@@ -10,6 +10,8 @@ export const INPUT_INTERACT = 1 << 4;  // unused for now; adopt is automatic in 
 /** Shelter = moving player. Size = capacity. petsInside = strays collected. */
 export interface PlayerState {
   id: string;
+  /** Display name (e.g. rescueNNN for guests). */
+  displayName: string;
   x: number;
   y: number;
   vx: number;

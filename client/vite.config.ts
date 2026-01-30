@@ -3,6 +3,7 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   root: '.',
+  base: process.env.NODE_ENV === 'production' ? '/rescueworld/' : '/',
   publicDir: 'public',
   resolve: {
     alias: {
@@ -17,6 +18,7 @@ export default defineConfig({
     proxy: {
       '/ws-signaling': { target: 'ws://localhost:4000', ws: true },
       '/ws-game': { target: 'ws://localhost:4001', ws: true },
+      '/auth': { target: 'http://localhost:4002', changeOrigin: true },
     },
   },
 });

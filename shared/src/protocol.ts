@@ -51,7 +51,7 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
   const pickups = snap.pickups ?? [];
   let size = 1 + 4 + 4 + 1;
   for (const p of players) {
-    size += 1 + encoder.encode(p.id).length + 4 * 4 + 4 + 4 + 1; // id, x,y,vx,vy, size(4), totalAdoptions(4), numPets
+    size += 1 + encoder.encode(p.id).length + 1 + encoder.encode(p.displayName ?? p.id).length + 4 * 4 + 4 + 4 + 1; // id, displayName, x,y,vx,vy, size(4), totalAdoptions(4), numPets
     for (const pid of p.petsInside) size += 1 + encoder.encode(pid).length;
     size += 4 + 1; // speedBoostUntil(4), inputSeq(1)
   }
@@ -78,6 +78,7 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
   view.setUint8(off++, players.length);
   for (const p of players) {
     off = writeString(view, off, p.id);
+    off = writeString(view, off, p.displayName ?? p.id);
     view.setFloat32(off, p.x, true);
     off += 4;
     view.setFloat32(off, p.y, true);
@@ -145,6 +146,8 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
   for (let i = 0; i < numPlayers; i++) {
     const { s: id, next: n1 } = readString(view, off);
     off = n1;
+    const { s: displayName, next: n2 } = readString(view, off);
+    off = n2;
     const x = view.getFloat32(off, true);
     off += 4;
     const y = view.getFloat32(off, true);
@@ -167,7 +170,7 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
     const speedBoostUntil = view.getUint32(off, true);
     off += 4;
     const inputSeq = view.getUint8(off++);
-    players.push({ id, x, y, vx, vy, size, totalAdoptions, petsInside, speedBoostUntil, inputSeq });
+    players.push({ id, displayName: displayName || id, x, y, vx, vy, size, totalAdoptions, petsInside, speedBoostUntil, inputSeq });
   }
   const numPets = view.getUint8(off++);
   const pets: PetState[] = [];

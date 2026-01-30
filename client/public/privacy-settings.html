@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy settings – Puppy Rescue</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font: 16px/1.5 Rubik, sans-serif; background: #1a1a2e; color: rgba(255,255,255,0.9); padding: 24px; max-width: 720px; margin: 0 auto; }
+    h1 { color: #7bed9f; margin-bottom: 16px; font-size: 24px; }
+    p { margin-bottom: 12px; }
+    a { color: #7bed9f; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    nav { margin-bottom: 24px; }
+    nav a { margin-right: 16px; }
+    .choices { margin: 16px 0; }
+    button { padding: 10px 20px; margin-right: 10px; margin-bottom: 10px; font: 600 14px Rubik, sans-serif; background: rgba(123,237,159,0.2); border: 2px solid #7bed9f; color: #7bed9f; border-radius: 8px; cursor: pointer; }
+    button:hover { background: rgba(123,237,159,0.3); }
+    .status { margin-top: 16px; color: rgba(255,255,255,0.7); font-size: 14px; }
+  </style>
+</head>
+<body>
+  <nav><a href="index.html">Game</a> <a href="privacy.html">Privacy</a> <a href="cookies.html">Cookies</a> <a href="terms.html">Terms</a> <a href="contact.html">Contact</a> <a href="privacy-settings.html">Privacy settings</a></nav>
+  <h1>Privacy settings</h1>
+  <p>We use cookies for session and preferences. Choose how you want us to use cookies:</p>
+  <div class="choices">
+    <button type="button" id="btn-accept">Accept all</button>
+    <button type="button" id="btn-essential">Essential only</button>
+  </div>
+  <p class="status" id="status">Loading…</p>
+  <p><a href="privacy.html">Privacy Policy</a> · <a href="cookies.html">Cookie Policy</a></p>
+  <script>
+    var KEY = 'cookieConsent';
+    function show() {
+      var v = localStorage.getItem(KEY);
+      document.getElementById('status').textContent = v === 'full' ? 'You chose: Accept all.' : v === 'essential' ? 'You chose: Essential only.' : 'No choice stored yet.';
+    }
+    document.getElementById('btn-accept').onclick = function() { localStorage.setItem(KEY, 'full'); show(); };
+    document.getElementById('btn-essential').onclick = function() { localStorage.setItem(KEY, 'essential'); show(); };
+    show();
+  </script>
+</body>
+</html>

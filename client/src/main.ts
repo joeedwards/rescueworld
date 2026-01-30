@@ -11,6 +11,7 @@ import {
   MAP_HEIGHT,
   SHELTER_SPEED,
   SHELTER_BASE_RADIUS,
+  SHELTER_RADIUS_PER_SIZE,
   PET_RADIUS,
   ADOPTION_ZONE_RADIUS,
   GROWTH_ORB_RADIUS,
@@ -27,6 +28,19 @@ import {
   MSG_SNAPSHOT,
 } from 'shared';
 import type { GameSnapshot, PlayerState, PetState, AdoptionZoneState, PickupState } from 'shared';
+import {
+  playMusic,
+  playWelcome,
+  playPickupGrowth,
+  playPickupSpeed,
+  playAdoption,
+  playStrayCollected,
+  playMatchEnd,
+  getMusicEnabled,
+  setMusicEnabled,
+  getSfxEnabled,
+  setSfxEnabled,
+} from './audio';
 
 const SIGNALING_URL = (() => {
   const { protocol, host } = window.location;
@@ -54,7 +68,16 @@ const INTERP_BUFFER_MS = 100;
 let predictedPlayer: PlayerState | null = null;
 let lastProcessedInputSeq = -1;
 let lastKnownSize = 0;
+let lastTotalAdoptions = 0;
+let lastPetsInsideLength = 0;
+let lastSpeedBoostUntil = 0;
+let matchEndPlayed = false;
 let growthPopUntil = 0;
+let currentRttMs = 0;
+let highLatencySince = 0;
+let pingIntervalId: ReturnType<typeof setInterval> | null = null;
+const RTT_HIGH_MS = 200;
+const RTT_HIGH_DURATION_MS = 5000;
 
 // --- Render ---
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -68,6 +91,118 @@ const timerEl = document.getElementById('timer')!;
 const leaderboardEl = document.getElementById('leaderboard')!;
 const connectionOverlayEl = document.getElementById('connection-overlay')!;
 const howToPlayEl = document.getElementById('how-to-play')!;
+const settingsBtnEl = document.getElementById('settings-btn')!;
+const settingsPanelEl = document.getElementById('settings-panel')!;
+const musicToggleEl = document.getElementById('music-toggle') as HTMLInputElement;
+const sfxToggleEl = document.getElementById('sfx-toggle') as HTMLInputElement;
+const settingsCloseEl = document.getElementById('settings-close')!;
+const pingEl = document.getElementById('ping')!;
+const switchServerEl = document.getElementById('switch-server')!;
+const switchServerBtnEl = document.getElementById('switch-server-btn')!;
+const authAreaEl = document.getElementById('auth-area')!;
+const landingEl = document.getElementById('landing')!;
+const gameWrapEl = document.getElementById('game-wrap')!;
+const landingPlayBtn = document.getElementById('landing-play')!;
+const landingNickInput = document.getElementById('landing-nick') as HTMLInputElement;
+const landingProfileName = document.getElementById('landing-profile-name')!;
+const landingProfileAvatar = document.getElementById('landing-profile-avatar')!;
+const landingProfileActions = document.getElementById('landing-profile-actions')!;
+const landingAuthButtons = document.getElementById('landing-auth-buttons')!;
+const cookieBannerEl = document.getElementById('cookie-banner')!;
+const cookieAcceptBtn = document.getElementById('cookie-accept')!;
+const cookieEssentialBtn = document.getElementById('cookie-essential')!;
+const fightAllyOverlayEl = document.getElementById('fight-ally-overlay')!;
+const fightAllyNameEl = document.getElementById('fight-ally-name')!;
+const fightAllyFightBtn = document.getElementById('fight-ally-fight')!;
+const fightAllyAllyBtn = document.getElementById('fight-ally-ally')!;
+const lobbyOverlayEl = document.getElementById('lobby-overlay')!;
+const lobbyMessageEl = document.getElementById('lobby-message')!;
+const lobbyCountdownEl = document.getElementById('lobby-countdown')!;
+const lobbyReadyBtnEl = document.getElementById('lobby-ready-btn')!;
+
+const COOKIE_CONSENT_KEY = 'cookieConsent';
+let fightAllyTargetId: string | null = null;
+const fightAllyChosenTargets = new Set<string>();
+type MatchPhase = 'lobby' | 'countdown' | 'playing';
+let matchPhase: MatchPhase = 'playing';
+let countdownRemainingSec = 0;
+let readyCount = 0;
+let iAmReady = false;
+const MONEY_KEY = 'rescueworld_money';
+const BOOST_PRICES = { size: 50, speed: 30, adoptSpeed: 40 } as const;
+
+type AuthMe = { displayName: string | null; signedIn: boolean };
+let selectedMode: 'ffa' | 'teams' | 'solo' = 'ffa';
+const pendingBoosts = { sizeBonus: 0, speedBoost: false, adoptSpeed: false };
+
+function getMoney(): number {
+  return parseInt(localStorage.getItem(MONEY_KEY) || '0', 10);
+}
+function setMoney(n: number): void {
+  localStorage.setItem(MONEY_KEY, String(Math.max(0, n)));
+}
+function updateLandingMoney(): void {
+  const el = document.getElementById('landing-money');
+  if (el) el.textContent = `Money: ${getMoney()}`;
+  const m = getMoney();
+  document.querySelectorAll('.landing-buy').forEach((btn) => {
+    const b = (btn as HTMLElement).dataset.boost as keyof typeof BOOST_PRICES;
+    if (!b || !(b in BOOST_PRICES)) return;
+    const price = BOOST_PRICES[b as keyof typeof BOOST_PRICES];
+    (btn as HTMLButtonElement).disabled = m < price || (b === 'speed' && pendingBoosts.speedBoost) || (b === 'adoptSpeed' && pendingBoosts.adoptSpeed);
+  });
+}
+
+async function fetchAndRenderAuth(): Promise<void> {
+  try {
+    const res = await fetch('/auth/me', { credentials: 'include' });
+    const data: AuthMe = await res.json();
+    const { displayName, signedIn } = data;
+    const name = displayName ?? '';
+    if (signedIn && name) {
+      authAreaEl.innerHTML = `
+        <span class="auth-profile">${escapeHtml(name)}</span>
+        <a href="/auth/signout" class="auth-link">Sign out</a>
+      `;
+      landingProfileName.textContent = name;
+      landingProfileAvatar.textContent = name.charAt(0).toUpperCase();
+      landingProfileActions.innerHTML = `<a href="/auth/signout" class="auth-link" style="font-size:12px">Sign out</a>`;
+      landingAuthButtons.innerHTML = `<a href="/auth/google" class="auth-link" style="display:inline-block">Sign in with Google</a> <a href="#" id="landing-facebook" style="opacity:0.7">Sign in with Facebook</a>`;
+      if (landingNickInput) landingNickInput.placeholder = name;
+    } else {
+      const guestLabel = name ? `Guest · ${escapeHtml(name)}` : 'Guest';
+      authAreaEl.innerHTML = `
+        <a href="/auth/google" class="auth-link">Sign in with Google</a>
+        <span class="auth-guest">${guestLabel}</span>
+      `;
+      landingProfileName.textContent = name || 'Guest';
+      landingProfileAvatar.textContent = name ? name.charAt(0).toUpperCase() : '?';
+      landingProfileActions.innerHTML = '';
+      landingAuthButtons.innerHTML = `
+        <a href="/auth/google">Sign in with Google</a>
+        <a href="#" id="landing-facebook" style="opacity:0.7">Sign in with Facebook</a>
+      `;
+      if (landingNickInput) landingNickInput.placeholder = name || 'rescue123';
+    }
+    if (landingNickInput && name) landingNickInput.value = name;
+  } catch {
+    authAreaEl.innerHTML = `
+      <a href="/auth/google" class="auth-link">Sign in with Google</a>
+      <span class="auth-guest">Guest</span>
+    `;
+    landingProfileName.textContent = 'Guest';
+    landingProfileAvatar.textContent = '?';
+    landingProfileActions.innerHTML = '';
+    landingAuthButtons.innerHTML = `<a href="/auth/google">Sign in with Google</a> <a href="#" id="landing-facebook" style="opacity:0.7">Sign in with Facebook</a>`;
+    if (landingNickInput) landingNickInput.placeholder = 'rescue123';
+  }
+}
+
+function escapeHtml(s: string): string {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
 
 function resize(): void {
   const w = window.innerWidth;
@@ -116,7 +251,13 @@ function getTapDirection(): { dx: number; dy: number } {
   return { dx: dx / len, dy: dy / len };
 }
 
+function hasMovementKeyDown(): boolean {
+  return !!(keys['KeyW'] || keys['KeyS'] || keys['KeyA'] || keys['KeyD'] ||
+    keys['ArrowUp'] || keys['ArrowDown'] || keys['ArrowLeft'] || keys['ArrowRight']);
+}
+
 function applyTapToInput(): void {
+  if (hasMovementKeyDown()) return;
   const { dx, dy } = getTapDirection();
   setInputFlag(INPUT_LEFT, dx < -0.3);
   setInputFlag(INPUT_RIGHT, dx > 0.3);
@@ -124,46 +265,140 @@ function applyTapToInput(): void {
   setInputFlag(INPUT_DOWN, dy > 0.3);
 }
 
+let touchStartClientX = 0;
+let touchStartClientY = 0;
+let lastTouchClientX = 0;
+let lastTouchClientY = 0;
 canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
-  if (e.touches.length) touchTarget = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  if (e.touches.length) {
+    touchTarget = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    touchStartClientX = e.touches[0].clientX;
+    touchStartClientY = e.touches[0].clientY;
+    lastTouchClientX = e.touches[0].clientX;
+    lastTouchClientY = e.touches[0].clientY;
+  }
 });
 canvas.addEventListener('touchmove', (e) => {
   e.preventDefault();
-  if (e.touches.length) touchTarget = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  if (e.touches.length) {
+    const tx = e.touches[0].clientX;
+    const ty = e.touches[0].clientY;
+    if (!isPanning && Math.hypot(tx - touchStartClientX, ty - touchStartClientY) > PAN_THRESHOLD_PX) {
+      isPanning = true;
+      touchTarget = null;
+    }
+    if (isPanning) {
+      applyPanDelta(tx - lastTouchClientX, ty - lastTouchClientY);
+      lastTouchClientX = tx;
+      lastTouchClientY = ty;
+    } else {
+      touchTarget = { x: tx, y: ty };
+    }
+  }
 });
 canvas.addEventListener('touchend', (e) => {
   e.preventDefault();
-  touchTarget = null;
+  if (e.touches.length === 0) {
+    touchTarget = null;
+    isPanning = false;
+  }
 });
 canvas.addEventListener('mousedown', (e) => {
-  touchTarget = { x: e.clientX, y: e.clientY };
+  e.preventDefault();
 });
 canvas.addEventListener('mousemove', (e) => {
-  if (e.buttons) touchTarget = { x: e.clientX, y: e.clientY };
+  e.preventDefault();
 });
-canvas.addEventListener('mouseup', () => {
-  touchTarget = null;
+canvas.addEventListener('mouseup', (e) => {
+  e.preventDefault();
+});
+canvas.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
 });
 window.addEventListener('keydown', onKeyDown);
 window.addEventListener('keyup', onKeyUp);
 
-// --- Camera (follow local player) ---
+// --- Camera (follow local player, smoothed; pannable by drag) ---
+let cameraSmoothedX: number | null = null;
+let cameraSmoothedY: number | null = null;
+const CAMERA_SMOOTH = 0.22;
+let cameraPanOffsetX = 0;
+let cameraPanOffsetY = 0;
+const PAN_THRESHOLD_PX = 10;
+let isPanning = false;
+let panStartClientX = 0;
+let panStartClientY = 0;
+let lastPanClientX = 0;
+let lastPanClientY = 0;
+
+// --- Local player display position (smoothed so shelter doesn't snap on server updates) ---
+let playerDisplayX: number | null = null;
+let playerDisplayY: number | null = null;
+const PLAYER_DISPLAY_SMOOTH = 0.28; // lerp toward predicted position per frame
+
 function getCamera(): { x: number; y: number; w: number; h: number } {
+  const w = canvas.width;
+  const h = canvas.height;
+  let px = predictedPlayer?.x ?? MAP_WIDTH / 2;
+  let py = predictedPlayer?.y ?? MAP_HEIGHT / 2;
+  if (!Number.isFinite(px) || !Number.isFinite(py)) {
+    px = MAP_WIDTH / 2;
+    py = MAP_HEIGHT / 2;
+  }
+  let targetX = px - w / 2 + cameraPanOffsetX;
+  let targetY = py - h / 2 + cameraPanOffsetY;
+  targetX = Math.max(0, Math.min(MAP_WIDTH - w, targetX));
+  targetY = Math.max(0, Math.min(MAP_HEIGHT - h, targetY));
+  if (predictedPlayer == null) {
+    cameraSmoothedX = null;
+    cameraSmoothedY = null;
+    return { x: targetX, y: targetY, w, h };
+  }
+  if (cameraSmoothedX == null || cameraSmoothedY == null || !Number.isFinite(cameraSmoothedX) || !Number.isFinite(cameraSmoothedY)) {
+    cameraSmoothedX = targetX;
+    cameraSmoothedY = targetY;
+  } else {
+    cameraSmoothedX += (targetX - cameraSmoothedX) * CAMERA_SMOOTH;
+    cameraSmoothedY += (targetY - cameraSmoothedY) * CAMERA_SMOOTH;
+  }
+  let cx = cameraSmoothedX;
+  let cy = cameraSmoothedY;
+  if (!Number.isFinite(cx) || !Number.isFinite(cy)) {
+    cx = targetX;
+    cy = targetY;
+    cameraSmoothedX = cx;
+    cameraSmoothedY = cy;
+  }
+  cx = Math.max(0, Math.min(MAP_WIDTH - w, cx));
+  cy = Math.max(0, Math.min(MAP_HEIGHT - h, cy));
+  return { x: cx, y: cy, w, h };
+}
+
+function applyPanDelta(deltaScreenX: number, deltaScreenY: number): void {
+  cameraPanOffsetX -= deltaScreenX;
+  cameraPanOffsetY -= deltaScreenY;
   const w = canvas.width;
   const h = canvas.height;
   const px = predictedPlayer?.x ?? MAP_WIDTH / 2;
   const py = predictedPlayer?.y ?? MAP_HEIGHT / 2;
-  return {
-    x: px - w / 2,
-    y: py - h / 2,
-    w,
-    h,
-  };
+  const maxX = Math.max(0, MAP_WIDTH - w);
+  const maxY = Math.max(0, MAP_HEIGHT - h);
+  const minOffsetX = -(px - w / 2);
+  const maxOffsetX = maxX - (px - w / 2);
+  const minOffsetY = -(py - h / 2);
+  const maxOffsetY = maxY - (py - h / 2);
+  cameraPanOffsetX = Math.max(minOffsetX, Math.min(maxOffsetX, cameraPanOffsetX));
+  cameraPanOffsetY = Math.max(minOffsetY, Math.min(maxOffsetY, cameraPanOffsetY));
 }
 
-// --- Prediction: same movement as server ---
+// --- Prediction: advance by one server tick (used when sending input) ---
 function predictPlayerTick(p: PlayerState, inputFlags: number): PlayerState {
+  return predictPlayerByDt(p, inputFlags, 1 / TICK_RATE);
+}
+
+// --- Prediction: advance by dt seconds (per-frame for smooth camera) ---
+function predictPlayerByDt(p: PlayerState, inputFlags: number, dtSec: number): PlayerState {
   let dx = 0,
     dy = 0;
   if (inputFlags & INPUT_LEFT) dx -= 1;
@@ -175,9 +410,9 @@ function predictPlayerTick(p: PlayerState, inputFlags: number): PlayerState {
   if (dx !== 0 || dy !== 0) {
     const len = Math.hypot(dx, dy) || 1;
     const speed = (p.speedBoostUntil ?? 0) > 0 ? SHELTER_SPEED * SPEED_BOOST_MULTIPLIER : SHELTER_SPEED;
-    const perTick = speed / TICK_RATE;
-    vx = (dx / len) * perTick;
-    vy = (dy / len) * perTick;
+    const step = speed * dtSec;
+    vx = (dx / len) * step;
+    vy = (dy / len) * step;
   }
   const radius = SHELTER_BASE_RADIUS + p.size * 4;
   let x = p.x + vx;
@@ -211,7 +446,12 @@ function showConnectionError(message: string): void {
 }
 
 // --- Connect flow ---
-async function connect(): Promise<void> {
+async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 'solo' }): Promise<void> {
+  if (pingIntervalId) {
+    clearInterval(pingIntervalId);
+    pingIntervalId = null;
+  }
+  switchServerEl.classList.add('hidden');
   let gameUrl = 'ws://localhost:4001';
   const ws = new WebSocket(SIGNALING_URL);
   await new Promise<void>((resolve, reject) => {
@@ -220,7 +460,7 @@ async function connect(): Promise<void> {
       reject(new Error('Connection timeout. Is the server running? Run: npm run dev'));
     }, CONNECT_TIMEOUT_MS);
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'join' }));
+      ws.send(JSON.stringify({ type: 'join', latency: options?.latency, mode: options?.mode ?? 'ffa' }));
     };
     ws.onmessage = (e) => {
       try {
@@ -247,11 +487,56 @@ async function connect(): Promise<void> {
   gameWsLocal.binaryType = 'arraybuffer';
   gameWsLocal.onopen = () => {
     gameWs = gameWsLocal;
+    gameWs.send(JSON.stringify({ type: 'mode', mode: options?.mode ?? 'ffa' }));
+    if (pendingBoosts.sizeBonus > 0 || pendingBoosts.speedBoost || pendingBoosts.adoptSpeed) {
+      gameWs.send(JSON.stringify({
+        type: 'startingBoosts',
+        sizeBonus: pendingBoosts.sizeBonus,
+        speedBoost: pendingBoosts.speedBoost,
+        adoptSpeed: pendingBoosts.adoptSpeed,
+      }));
+      pendingBoosts.sizeBonus = 0;
+      pendingBoosts.speedBoost = false;
+      pendingBoosts.adoptSpeed = false;
+    }
   };
   gameWsLocal.onmessage = (e) => {
     if (typeof e.data === 'string') {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'welcome' && msg.playerId) myPlayerId = msg.playerId;
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'welcome' && msg.playerId) {
+          myPlayerId = msg.playerId;
+          playWelcome();
+        }
+        if (msg.type === 'matchState' && typeof msg.phase === 'string') {
+          matchPhase = msg.phase as MatchPhase;
+          countdownRemainingSec = typeof msg.countdownRemainingSec === 'number' ? msg.countdownRemainingSec : 0;
+          readyCount = typeof msg.readyCount === 'number' ? msg.readyCount : 0;
+          if (matchPhase === 'lobby') {
+            lobbyOverlayEl.classList.remove('hidden');
+            lobbyMessageEl.textContent = 'Waiting for another player…';
+            lobbyCountdownEl.classList.add('hidden');
+            lobbyReadyBtnEl.classList.add('hidden');
+          } else if (matchPhase === 'countdown') {
+            lobbyOverlayEl.classList.remove('hidden');
+            lobbyMessageEl.textContent = 'Match starting soon';
+            lobbyCountdownEl.classList.remove('hidden');
+            lobbyCountdownEl.textContent = countdownRemainingSec > 0 ? `Starting in ${countdownRemainingSec}s…` : 'Starting…';
+            lobbyReadyBtnEl.classList.remove('hidden');
+            if (iAmReady) lobbyReadyBtnEl.textContent = 'Ready!';
+            else lobbyReadyBtnEl.textContent = 'Ready';
+          } else {
+            lobbyOverlayEl.classList.add('hidden');
+          }
+        }
+        if (msg.type === 'pong' && typeof msg.ts === 'number') {
+          currentRttMs = Math.round(Date.now() - msg.ts);
+          if (currentRttMs > RTT_HIGH_MS) highLatencySince = highLatencySince || Date.now();
+          else highLatencySince = 0;
+        }
+      } catch {
+        // ignore
+      }
       return;
     }
     const buf = e.data as ArrayBuffer;
@@ -259,6 +544,10 @@ async function connect(): Promise<void> {
     if (new DataView(buf).getUint8(0) === MSG_SNAPSHOT) {
       const snap = decodeSnapshot(buf);
       latestSnapshot = snap;
+      if (matchPhase !== 'playing') {
+        matchPhase = 'playing';
+        lobbyOverlayEl.classList.add('hidden');
+      }
       for (const p of snap.players) {
         const prev = interpolatedPlayers.get(p.id)?.next ?? p;
         interpolatedPlayers.set(p.id, { prev, next: { ...p }, t: 0 });
@@ -271,10 +560,28 @@ async function connect(): Promise<void> {
       if (me) {
         if (me.size > lastKnownSize) {
           growthPopUntil = Date.now() + 1500;
+          playPickupGrowth();
         }
+        if ((me.speedBoostUntil ?? 0) > lastSpeedBoostUntil) playPickupSpeed();
+        lastSpeedBoostUntil = me.speedBoostUntil ?? 0;
+        if (me.totalAdoptions > lastTotalAdoptions) playAdoption();
+        lastTotalAdoptions = me.totalAdoptions;
+        if (me.petsInside.length > lastPetsInsideLength) playStrayCollected();
+        lastPetsInsideLength = me.petsInside.length;
         lastKnownSize = me.size;
+        const prevX = predictedPlayer?.x ?? me.x;
+        const prevY = predictedPlayer?.y ?? me.y;
         predictedPlayer = { ...me, petsInside: [...me.petsInside] };
         lastProcessedInputSeq = me.inputSeq;
+        const jump = Math.hypot(me.x - prevX, me.y - prevY);
+        if (jump > 300) {
+          cameraSmoothedX = null;
+          cameraSmoothedY = null;
+          cameraPanOffsetX = 0;
+          cameraPanOffsetY = 0;
+          playerDisplayX = me.x;
+          playerDisplayY = me.y;
+        }
       }
     }
   };
@@ -283,6 +590,8 @@ async function connect(): Promise<void> {
     myPlayerId = null;
     latestSnapshot = null;
     predictedPlayer = null;
+    matchPhase = 'playing';
+    iAmReady = false;
   };
   await new Promise<void>((resolve, reject) => {
     const deadline = Date.now() + CONNECT_TIMEOUT_MS;
@@ -296,9 +605,15 @@ async function connect(): Promise<void> {
   connectionOverlayEl.classList.add('hidden');
   howToPlayEl.classList.remove('hidden');
   setTimeout(() => howToPlayEl.classList.add('hidden'), 12000);
+  playMusic();
+  pingIntervalId = setInterval(() => {
+    if (gameWs?.readyState === WebSocket.OPEN) {
+      gameWs.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+    }
+  }, 2000);
 }
 
-// --- Tick: send input at server tick rate, advance prediction and interpolation ---
+// --- Tick: send input at server tick rate, advance prediction every frame for smooth camera ---
 let lastTickTime = 0;
 let lastInputSendTime = 0;
 function tick(now: number): void {
@@ -308,13 +623,83 @@ function tick(now: number): void {
 
   if (touchTarget) applyTapToInput();
 
-  if (gameWs?.readyState === WebSocket.OPEN && now - lastInputSendTime >= TICK_MS) {
+  const matchOver = latestSnapshot != null && latestSnapshot.matchEndAt > 0 && latestSnapshot.tick >= latestSnapshot.matchEndAt;
+  const gameActive = matchPhase === 'playing' && !matchOver;
+
+  // Send input at server tick rate (only when match is playing and not over)
+  if (gameActive && gameWs?.readyState === WebSocket.OPEN && now - lastInputSendTime >= TICK_MS) {
     lastInputSendTime = now;
     const buf = encodeInput(inputFlags, inputSeq++);
     gameWs.send(buf);
-    if (predictedPlayer && myPlayerId) {
-      predictedPlayer = predictPlayerTick(predictedPlayer, inputFlags);
+  }
+
+  // Advance local player prediction every frame (smooth movement and camera) — freeze when lobby/countdown or match over
+  if (gameActive && predictedPlayer && myPlayerId) {
+    const prevX = predictedPlayer.x;
+    const prevY = predictedPlayer.y;
+    predictedPlayer = predictPlayerByDt(predictedPlayer, inputFlags, dt);
+    const myR = SHELTER_BASE_RADIUS + predictedPlayer.size * SHELTER_RADIUS_PER_SIZE;
+    if (latestSnapshot) {
+      for (const pl of latestSnapshot.players) {
+        if (pl.id === myPlayerId) continue;
+        const other = getInterpolatedPlayer(pl.id) ?? pl;
+        const or = SHELTER_BASE_RADIUS + other.size * SHELTER_RADIUS_PER_SIZE;
+        const d = Math.hypot(predictedPlayer.x - other.x, predictedPlayer.y - other.y);
+        if (d < myR + or && d > 0) {
+          predictedPlayer = { ...predictedPlayer, x: prevX, y: prevY };
+          break;
+        }
+      }
     }
+    // Smoothed display position so shelter doesn't jitter when server snapshots overwrite predictedPlayer
+    let tx = predictedPlayer.x;
+    let ty = predictedPlayer.y;
+    if (!Number.isFinite(tx) || !Number.isFinite(ty)) {
+      tx = MAP_WIDTH / 2;
+      ty = MAP_HEIGHT / 2;
+    }
+    if (playerDisplayX == null || playerDisplayY == null) {
+      playerDisplayX = tx;
+      playerDisplayY = ty;
+    } else {
+      playerDisplayX += (tx - playerDisplayX) * PLAYER_DISPLAY_SMOOTH;
+      playerDisplayY += (ty - playerDisplayY) * PLAYER_DISPLAY_SMOOTH;
+    }
+    if (!Number.isFinite(playerDisplayX) || !Number.isFinite(playerDisplayY)) {
+      playerDisplayX = tx;
+      playerDisplayY = ty;
+    }
+    // Show Fight/Ally when my shelter overlaps any other (including CPU)
+    let overlappingId: string | null = null;
+    if (latestSnapshot) {
+      const myX = playerDisplayX ?? predictedPlayer.x;
+      const myY = playerDisplayY ?? predictedPlayer.y;
+      const myR = SHELTER_BASE_RADIUS + predictedPlayer.size * SHELTER_RADIUS_PER_SIZE;
+      for (const pl of latestSnapshot.players) {
+        if (pl.id === myPlayerId) continue;
+        const other = getInterpolatedPlayer(pl.id) ?? pl;
+        const or = SHELTER_BASE_RADIUS + other.size * SHELTER_RADIUS_PER_SIZE;
+        const d = Math.hypot(myX - other.x, myY - other.y);
+        if (d < myR + or && d > 0) {
+          overlappingId = pl.id;
+          break;
+        }
+      }
+    }
+    if (overlappingId) {
+      const other = latestSnapshot!.players.find((p) => p.id === overlappingId);
+      fightAllyTargetId = overlappingId;
+      fightAllyNameEl.textContent = other?.displayName ?? overlappingId;
+      fightAllyOverlayEl.classList.remove('hidden');
+    } else {
+      fightAllyOverlayEl.classList.add('hidden');
+      fightAllyTargetId = null;
+    }
+  } else {
+    playerDisplayX = null;
+    playerDisplayY = null;
+    fightAllyOverlayEl.classList.add('hidden');
+    fightAllyTargetId = null;
   }
 
   const interpStep = dt * (1000 / INTERP_BUFFER_MS);
@@ -411,7 +796,7 @@ function drawAdoptionZone(z: AdoptionZoneState): void {
 }
 
 function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
-  const radius = SHELTER_BASE_RADIUS + p.size * 4;
+  const radius = SHELTER_BASE_RADIUS + p.size * SHELTER_RADIUS_PER_SIZE;
   const cx = p.x;
   const cy = p.y;
   ctx.save();
@@ -428,7 +813,8 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
   ctx.fillStyle = '#2d2d2d';
   ctx.font = 'bold 12px Rubik, sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText(isMe ? 'You' : `Size ${Math.floor(p.size)}`, cx, cy - radius - 6);
+  const label = isMe ? 'You' : (p.displayName ?? p.id);
+  ctx.fillText(label, cx, cy - radius - 6);
   ctx.fillText(`Pets: ${p.petsInside.length}/${Math.floor(p.size)}`, cx, cy + 4);
   ctx.restore();
 }
@@ -469,9 +855,12 @@ function drawPickup(u: PickupState): void {
 function render(dt: number): void {
   try {
     const cam = getCamera();
+    const camX = Number.isFinite(cam.x) ? Math.max(0, Math.min(MAP_WIDTH - cam.w, cam.x)) : 0;
+    const camY = Number.isFinite(cam.y) ? Math.max(0, Math.min(MAP_HEIGHT - cam.h, cam.y)) : 0;
+    const safeCam = { x: camX, y: camY, w: cam.w, h: cam.h };
     ctx.save();
-    ctx.translate(-cam.x, -cam.y);
-    drawMapBackground(cam);
+    ctx.translate(-safeCam.x, -safeCam.y);
+    drawMapBackground(safeCam);
 
   if (latestSnapshot) {
     for (const z of latestSnapshot.adoptionZones) {
@@ -485,12 +874,30 @@ function render(dt: number): void {
   for (const pet of latestSnapshot?.pets ?? []) {
     if (pet.insideShelterId !== null) continue;
     const p = getInterpolatedPet(pet.id) ?? pet;
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
     drawStray(p.x, p.y);
   }
 
   for (const pl of latestSnapshot?.players ?? []) {
     const isMe = pl.id === myPlayerId;
-    const p = isMe && predictedPlayer ? predictedPlayer : getInterpolatedPlayer(pl.id) ?? pl;
+    let p: PlayerState;
+    if (isMe && predictedPlayer) {
+      // Use smoothed display position for local player so shelter doesn't snap on server updates
+      let drawX = playerDisplayX ?? predictedPlayer.x;
+      let drawY = playerDisplayY ?? predictedPlayer.y;
+      if (!Number.isFinite(drawX) || !Number.isFinite(drawY)) {
+        drawX = predictedPlayer.x;
+        drawY = predictedPlayer.y;
+      }
+      if (!Number.isFinite(drawX) || !Number.isFinite(drawY)) {
+        drawX = MAP_WIDTH / 2;
+        drawY = MAP_HEIGHT / 2;
+      }
+      p = { ...predictedPlayer, x: drawX, y: drawY };
+    } else {
+      p = getInterpolatedPlayer(pl.id) ?? pl;
+    }
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
     drawPlayerShelter(p, isMe);
     if (isMe && growthPopUntil > Date.now()) {
       ctx.save();
@@ -540,7 +947,7 @@ function render(dt: number): void {
     }
     for (const pl of latestSnapshot.players) {
       minimapCtx.fillStyle = pl.id === myPlayerId ? '#7bed9f' : hashColor(pl.id);
-      const r = (SHELTER_BASE_RADIUS + pl.size * 4) * scale;
+      const r = (SHELTER_BASE_RADIUS + pl.size * SHELTER_RADIUS_PER_SIZE) * scale;
       minimapCtx.beginPath();
       minimapCtx.arc(pl.x * scale, pl.y * scale, Math.max(2, r), 0, Math.PI * 2);
       minimapCtx.fill();
@@ -566,9 +973,22 @@ function render(dt: number): void {
   const remainingSec = remainingTicks / tickRate;
   timerEl.textContent = remainingSec > 0 ? `${Math.floor(remainingSec / 60)}:${String(Math.floor(remainingSec % 60)).padStart(2, '0')}` : '0:00';
   if (remainingSec <= 0 && latestSnapshot?.players.length) {
+    if (!matchEndPlayed) {
+      matchEndPlayed = true;
+      playMatchEnd();
+    }
     leaderboardEl.classList.add('show');
     const sorted = [...latestSnapshot.players].sort((a, b) => b.size - a.size);
-    leaderboardEl.innerHTML = '<strong>Match over</strong><br><br>' + sorted.map((p, i) => `${i + 1}. ${p.id === myPlayerId ? 'You' : 'Shelter'}: size ${Math.floor(p.size)} (${p.totalAdoptions} adoptions)`).join('<br>');
+    const meResult = sorted.find((p) => p.id === myPlayerId);
+    const mySize = meResult ? Math.floor(meResult.size) : 0;
+    const placementBonus = [100, 50, 25];
+    const myRank = meResult ? sorted.findIndex((p) => p.id === myPlayerId) + 1 : 0;
+    const bonus = myRank > 0 && myRank <= placementBonus.length ? placementBonus[myRank - 1] : 0;
+    const earned = mySize + bonus;
+    const newMoney = getMoney() + earned;
+    setMoney(newMoney);
+    const rankText = myRank > 0 ? ` (${myRank}. place +${bonus})` : '';
+    leaderboardEl.innerHTML = '<strong>Match over</strong><br><br>' + sorted.map((p, i) => `${i + 1}. ${p.id === myPlayerId ? 'You' : (p.displayName ?? p.id)}: size ${Math.floor(p.size)} (${p.totalAdoptions} adoptions)`).join('<br>') + (earned > 0 ? `<br><br>+${earned} money (size ${mySize}${rankText}) · total: ${newMoney}` : '') + '<br><br><button type="button" id="play-again-btn" class="fight-ally-btn ally-btn" style="margin-right:8px">Play again</button><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn">Back to lobby</button>';
   } else {
     leaderboardEl.classList.remove('show');
   }
@@ -582,13 +1002,146 @@ function render(dt: number): void {
   }
 }
 
+// --- End match menu (delegated: Play again, Back to lobby) ---
+leaderboardEl.addEventListener('click', (e) => {
+  const t = (e.target as HTMLElement).closest?.('button');
+  if (!t) return;
+  if (t.id === 'play-again-btn') {
+    if (gameWs) {
+      gameWs.close();
+      gameWs = null;
+    }
+    leaderboardEl.classList.remove('show');
+    connectionOverlayEl.classList.remove('hidden');
+    connectionOverlayEl.innerHTML = '<h2>Connecting…</h2><p>Starting new match.</p>';
+    connect({ mode: selectedMode })
+      .then(() => {
+        connectionOverlayEl.classList.add('hidden');
+        connectionOverlayEl.innerHTML = '';
+        gameWrapEl.classList.add('visible');
+        requestAnimationFrame(tick);
+      })
+      .catch((err: Error) => showConnectionError(err.message || 'Connection failed.'));
+  } else if (t.id === 'lobby-btn') {
+    if (gameWs) {
+      gameWs.close();
+      gameWs = null;
+    }
+    leaderboardEl.classList.remove('show');
+    gameWrapEl.classList.remove('visible');
+    landingEl.classList.remove('hidden');
+    updateLandingMoney();
+  }
+});
+
+// --- Lobby: Ready button ---
+lobbyReadyBtnEl.addEventListener('click', () => {
+  if (iAmReady || matchPhase !== 'countdown' || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  iAmReady = true;
+  gameWs.send(JSON.stringify({ type: 'ready' }));
+  lobbyReadyBtnEl.textContent = 'Ready!';
+});
+
+// --- Fight / Ally ---
+function sendFightAllyChoice(choice: 'fight' | 'ally'): void {
+  if (!fightAllyTargetId || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  gameWs.send(JSON.stringify({ type: 'fightAlly', targetId: fightAllyTargetId, choice }));
+  fightAllyChosenTargets.add(fightAllyTargetId);
+  fightAllyOverlayEl.classList.add('hidden');
+  fightAllyTargetId = null;
+}
+fightAllyFightBtn.addEventListener('click', () => sendFightAllyChoice('fight'));
+fightAllyAllyBtn.addEventListener('click', () => sendFightAllyChoice('ally'));
+
+// --- Settings ---
+musicToggleEl.checked = getMusicEnabled();
+sfxToggleEl.checked = getSfxEnabled();
+musicToggleEl.addEventListener('change', () => {
+  setMusicEnabled(musicToggleEl.checked);
+  if (musicToggleEl.checked) playMusic();
+});
+sfxToggleEl.addEventListener('change', () => setSfxEnabled(sfxToggleEl.checked));
+settingsBtnEl.addEventListener('click', () => settingsPanelEl.classList.toggle('hidden'));
+settingsCloseEl.addEventListener('click', () => settingsPanelEl.classList.add('hidden'));
+switchServerBtnEl.addEventListener('click', () => {
+  if (gameWs) {
+    gameWs.close();
+    gameWs = null;
+  }
+  connectionOverlayEl.classList.remove('hidden');
+  connectionOverlayEl.innerHTML = '<h2>Switching server…</h2><p>Reconnecting to a closer server.</p>';
+  connect({ latency: currentRttMs, mode: selectedMode })
+    .then(() => {
+      connectionOverlayEl.classList.add('hidden');
+      connectionOverlayEl.innerHTML = '';
+    })
+    .catch((err: Error) => showConnectionError(err.message || 'Switch failed.'));
+});
+
+// --- Landing: mode selector ---
+document.querySelectorAll('.mode-option').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.mode-option').forEach((b) => b.classList.remove('selected'));
+    btn.classList.add('selected');
+    selectedMode = (btn as HTMLElement).dataset.mode as 'ffa' | 'teams' | 'solo';
+  });
+});
+
+// --- Landing: Facebook placeholder (no nav) ---
+landingAuthButtons.addEventListener('click', (e) => {
+  const a = (e.target as HTMLElement).closest('a[href="#"]');
+  if (a) e.preventDefault();
+});
+
+// --- Landing: Play ---
+landingPlayBtn.addEventListener('click', () => {
+  playMusic(); // Start music on user gesture (required for autoplay)
+  landingEl.classList.add('hidden');
+  connectionOverlayEl.classList.remove('hidden');
+  connectionOverlayEl.innerHTML = '<h2>Connecting…</h2><p>Waiting for game server.</p>';
+  connect({ mode: selectedMode })
+    .then(() => {
+      connectionOverlayEl.classList.add('hidden');
+      gameWrapEl.classList.add('visible');
+      requestAnimationFrame(tick);
+    })
+    .catch((err: Error) => {
+      showConnectionError(err.message || 'Connection failed.');
+    });
+});
+
+// --- Cookie consent banner ---
+if (!localStorage.getItem(COOKIE_CONSENT_KEY)) {
+  cookieBannerEl.classList.remove('hidden');
+}
+cookieAcceptBtn.addEventListener('click', () => {
+  localStorage.setItem(COOKIE_CONSENT_KEY, 'full');
+  cookieBannerEl.classList.add('hidden');
+});
+cookieEssentialBtn.addEventListener('click', () => {
+  localStorage.setItem(COOKIE_CONSENT_KEY, 'essential');
+  cookieBannerEl.classList.add('hidden');
+});
+
+// --- Landing: money and shop ---
+updateLandingMoney();
+document.querySelectorAll('.landing-buy').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const boost = (btn as HTMLElement).dataset.boost as keyof typeof BOOST_PRICES;
+    if (!boost || !(boost in BOOST_PRICES)) return;
+    const price = BOOST_PRICES[boost as keyof typeof BOOST_PRICES];
+    const m = getMoney();
+    if (m < price) return;
+    setMoney(m - price);
+    if (boost === 'size') pendingBoosts.sizeBonus += 1;
+    else if (boost === 'speed') pendingBoosts.speedBoost = true;
+    else if (boost === 'adoptSpeed') pendingBoosts.adoptSpeed = true;
+    updateLandingMoney();
+  });
+});
+
 // --- Start ---
+fetchAndRenderAuth();
+updateLandingMoney();
 window.addEventListener('resize', resize);
 resize();
-connect()
-  .then(() => {
-    requestAnimationFrame(tick);
-  })
-  .catch((err: Error) => {
-    showConnectionError(err.message || 'Connection failed.');
-  });

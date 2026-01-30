@@ -1,0 +1,2 @@
+Add your background music file as music.mp3 in this directory (client/public/).
+The game will loop it when connected. If missing, the game still runs without music.

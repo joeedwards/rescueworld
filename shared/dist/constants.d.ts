@@ -6,30 +6,44 @@ export declare const TICK_MS: number;
 export declare const MAP_WIDTH = 2400;
 export declare const MAP_HEIGHT = 2400;
 /** Shelter (player) movement speed (units per second). */
-export declare const SHELTER_SPEED = 220;
+export declare const SHELTER_SPEED = 280;
 /** Shelter base radius at size 1; scales with size for drawing. */
 export declare const SHELTER_BASE_RADIUS = 32;
+/** Radius growth per size point (smaller = more shelters fit in adoption center). */
+export declare const SHELTER_RADIUS_PER_SIZE = 2.5;
 /** Rescue radius: strays within this distance of shelter are collected (up to capacity). */
 export declare const RESCUE_RADIUS = 70;
 /** Stray (pet) radius for drawing and collision. */
 export declare const PET_RADIUS = 16;
 /** Adoption zone radius. */
 export declare const ADOPTION_ZONE_RADIUS = 90;
-/** Ticks between each adoption when shelter is in zone with pets (e.g. ~1 per 2 sec). */
+/** When shelter radius >= 2x zone radius, shelter is grounded (no move, gravity pulls strays). */
+export declare const GROUNDED_ZONE_RATIO = 2;
+/** Auto-jump to new area when total adoptions reach this. */
+export declare const AUTO_JUMP_ADOPTIONS = 50;
+/** Ticks between each adoption when shelter is in zone with pets (base). */
 export declare const ADOPTION_TICKS_INTERVAL = 50;
-/** Size growth per adoption. */
-export declare const GROWTH_PER_ADOPTION = 1;
+/** When shelter has 10+ pets, adopt faster (shorter interval). */
+export declare const ADOPTION_TICKS_INTERVAL_FAST = 20;
+export declare const ADOPTION_FAST_PET_THRESHOLD = 10;
+/** Slower adoption when grounded/ported (own shelter) — longer interval. */
+export declare const ADOPTION_TICKS_GROUNDED = 80;
+/** Size growth per adoption (higher = faster growth). */
+export declare const GROWTH_PER_ADOPTION = 1.5;
 /** Initial shelter size (capacity = size). */
 export declare const INITIAL_SHELTER_SIZE = 1;
 /** Session duration (ms) - 5 min. */
 export declare const SESSION_DURATION_MS: number;
 /** Max players per shard. */
 export declare const MAX_PLAYERS_PER_SHARD = 100;
-/** Stray spawn interval (ticks). */
-export declare const STRAY_SPAWN_TICKS = 100;
+/** Stray spawn interval (ticks); spawn multiple per tick for a race feel. */
+export declare const STRAY_SPAWN_TICKS = 25;
+/** Strays spawned per spawn event. */
+export declare const STRAY_SPAWN_COUNT = 3;
 /** Growth orb radius and value. */
 export declare const GROWTH_ORB_RADIUS = 18;
-export declare const GROWTH_ORB_VALUE = 0.5;
+/** Each +size pickup adds 1 to size (and thus +1 capacity). */
+export declare const GROWTH_ORB_VALUE = 1;
 /** Speed boost duration (ticks). */
 export declare const SPEED_BOOST_DURATION_TICKS = 750;
 /** Speed multiplier when boosted. */
