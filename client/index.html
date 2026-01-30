@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Puppy Rescue</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; touch-action: none; background: #1a1a2e; }
+    #game { display: block; width: 100%; height: 100%; }
+    #ui { position: fixed; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; }
+    #ui > * { pointer-events: auto; }
+    .top-bar {
+      position: absolute; top: 0; left: 0; right: 0; height: 48px;
+      background: linear-gradient(180deg, rgba(30,35,50,0.97) 0%, rgba(22,26,38,0.97) 100%);
+      border-bottom: 2px solid rgba(255,255,255,0.12);
+      display: flex; align-items: center; justify-content: space-between; padding: 0 16px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    }
+    .top-bar .score { font: 700 18px/1 Rubik, sans-serif; color: #7bed9f; text-shadow: 0 0 12px rgba(123,237,159,0.4); }
+    .top-bar .game-title { font: 700 16px/1 Rubik, sans-serif; color: rgba(255,255,255,0.9); letter-spacing: 0.12em; }
+    .top-bar .timer { font: 700 18px/1 Rubik, sans-serif; color: #fff; letter-spacing: 0.05em; }
+    #minimap-wrap {
+      position: absolute; top: 56px; right: 12px; width: 132px; height: 132px;
+      background: linear-gradient(145deg, rgba(25,30,45,0.95), rgba(18,22,35,0.95));
+      border: 2px solid rgba(255,255,255,0.15); border-radius: 10px;
+      box-shadow: inset 0 2px 8px rgba(0,0,0,0.5), 0 4px 16px rgba(0,0,0,0.3);
+      padding: 4px;
+    }
+    #minimap { width: 120px; height: 120px; border-radius: 6px; display: block; background: #2d4a2d; }
+    .bottom-bar {
+      position: absolute; bottom: 0; left: 0; right: 0; height: 72px;
+      background: linear-gradient(0deg, rgba(30,35,50,0.97), rgba(22,26,38,0.97));
+      border-top: 2px solid rgba(255,255,255,0.12);
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+      box-shadow: 0 -4px 20px rgba(0,0,0,0.4);
+    }
+    #carried { font: 600 14px Rubik, sans-serif; color: #ffd93d; }
+    #tag-cooldown { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.7); }
+    #leaderboard {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      background: linear-gradient(145deg, rgba(35,42,60,0.98), rgba(25,30,45,0.98));
+      border: 2px solid rgba(255,255,255,0.2); border-radius: 16px; padding: 28px 32px;
+      font: 600 16px Rubik, sans-serif; color: #fff; display: none; max-width: 90%;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.08);
+    }
+    #leaderboard.show { display: block; }
+    #leaderboard strong { display: block; margin-bottom: 16px; font-size: 20px; color: #7bed9f; }
+    #connection-overlay {
+      position: fixed; inset: 0; background: rgba(26,26,46,0.95); display: flex; flex-direction: column;
+      align-items: center; justify-content: center; padding: 24px; text-align: center; z-index: 100;
+      font: 600 16px Rubik, sans-serif; color: #fff;
+    }
+    #connection-overlay.hidden { display: none; }
+    #connection-overlay h2 { color: #7bed9f; margin-bottom: 12px; font-size: 22px; }
+    #connection-overlay p { max-width: 420px; line-height: 1.5; margin-bottom: 8px; color: rgba(255,255,255,0.9); }
+    #connection-overlay code { background: rgba(0,0,0,0.3); padding: 2px 8px; border-radius: 4px; font-size: 14px; }
+    #connection-overlay .error { color: #ff6b6b; margin-top: 16px; }
+    #how-to-play {
+      position: fixed; bottom: 80px; left: 12px; right: 12px; max-width: 360px; margin: 0 auto;
+      background: rgba(35,42,60,0.95); border: 2px solid rgba(255,255,255,0.15); border-radius: 12px;
+      padding: 14px 18px; font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.95);
+      line-height: 1.45; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    #how-to-play.hidden { display: none; }
+    #how-to-play strong { color: #7bed9f; }
+  </style>
+</head>
+<body>
+  <div id="connection-overlay">
+    <h2>Connecting…</h2>
+    <p>Waiting for game server. If this doesn’t go away, the server isn’t running.</p>
+    <p>From the project root run: <code>npm run dev</code></p>
+    <p>That starts both the server (ports 4000, 4001) and this client (3000).</p>
+  </div>
+  <canvas id="game"></canvas>
+  <div id="ui">
+    <div class="top-bar">
+      <span class="score" id="score">Size: 1</span>
+      <span class="game-title">PUPPY RESCUE</span>
+      <span class="timer" id="timer">5:00</span>
+    </div>
+    <div id="minimap-wrap"><canvas id="minimap" width="120" height="120"></canvas></div>
+    <div class="bottom-bar">
+      <span id="carried"></span>
+      <span id="tag-cooldown">Adoptions: 0</span>
+    </div>
+    <div id="leaderboard"></div>
+    <div id="how-to-play" class="hidden">
+      <strong>You are a shelter.</strong> WASD or tap to move. Collect <strong>strays</strong> (brown) — you can hold as many as your size. Bring them to the <strong>Adoption Center</strong> (green circle) to adopt out and <strong>grow</strong>. Green orbs = +size, blue = speed boost.
+    </div>
+  </div>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <script type="module">
+    import('/src/main.ts?t=' + Date.now()).catch(e => console.error('Failed to load game:', e));
+  </script>
+</body>
+</html>
