@@ -1,6 +1,6 @@
 "use strict";
 /**
- * Auth API: guest names (rescueNNN), Google SSO. Uses .env for keys.
+ * Auth API: guest names (rescueNNN from registry), Google SSO. Uses .env for keys.
  */
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
@@ -8,6 +8,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const cookie_parser_1 = __importDefault(require("cookie-parser"));
+const registry_js_1 = require("./registry.js");
 const API_PORT = Number(process.env.API_PORT) || 4002;
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-in-production';
 const API_ORIGIN = process.env.API_ORIGIN || 'http://localhost:3000';
@@ -18,23 +19,26 @@ app.use((0, cookie_parser_1.default)(SESSION_SECRET));
 app.use(express_1.default.json());
 const users = new Map();
 let userSeq = 0;
-function generateGuestName() {
-    return `rescue${String(100 + Math.floor(Math.random() * 900))}`;
-}
+app.get('/health', (_req, res) => {
+    res.json((0, registry_js_1.getStorageStatus)());
+});
 app.get('/auth/me', (req, res) => {
     const userId = req.signedCookies?.session;
     if (userId) {
         const user = users.get(userId);
         if (user) {
+            console.log(`[rescue] auth/me signed-in displayName=${user.displayName}`);
             res.json({ displayName: user.displayName, signedIn: true });
             return;
         }
     }
     const guestName = req.signedCookies?.guest_name ?? req.cookies?.guest_name;
     if (guestName) {
+        console.log(`[rescue] auth/me guest cookie displayName=${guestName}`);
         res.json({ displayName: guestName, signedIn: false });
         return;
     }
+    console.log('[rescue] auth/me no session');
     res.json({ displayName: null, signedIn: false });
 });
 app.get('/auth/signout', (req, res) => {
@@ -43,8 +47,9 @@ app.get('/auth/signout', (req, res) => {
     const gamePath = API_ORIGIN.includes('localhost') ? '/' : '/rescueworld/';
     res.redirect(`${API_ORIGIN.replace(/\/$/, '')}${gamePath}`);
 });
-app.post('/auth/guest', (req, res) => {
-    const displayName = generateGuestName();
+app.post('/auth/guest', async (req, res) => {
+    const displayName = await (0, registry_js_1.getNextGuestName)();
+    console.log(`[rescue] auth guest assigned displayName=${displayName}`);
     res.cookie('guest_name', displayName, {
         httpOnly: true,
         maxAge: 365 * 24 * 60 * 60 * 1000,
@@ -97,11 +102,12 @@ app.get('/auth/google/callback', async (req, res) => {
         const profile = (await profileRes.json());
         let user = Array.from(users.values()).find((u) => u.googleId === profile.id);
         if (!user) {
+            const displayName = profile.name ?? profile.email ?? (await (0, registry_js_1.getNextGuestName)());
             user = {
                 id: `u-${++userSeq}`,
                 googleId: profile.id,
                 email: profile.email ?? '',
-                displayName: profile.name ?? profile.email ?? generateGuestName(),
+                displayName,
             };
             users.set(user.id, user);
         }

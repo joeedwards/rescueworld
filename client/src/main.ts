@@ -16,6 +16,7 @@ import {
   ADOPTION_ZONE_RADIUS,
   GROWTH_ORB_RADIUS,
   SPEED_BOOST_MULTIPLIER,
+  COMBAT_MIN_SIZE,
 } from 'shared';
 import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED } from 'shared';
 import {
@@ -36,6 +37,7 @@ import {
   playAdoption,
   playStrayCollected,
   playMatchEnd,
+  playAttackWarning,
   getMusicEnabled,
   setMusicEnabled,
   getSfxEnabled,
@@ -52,7 +54,15 @@ const SIGNALING_URL = (() => {
 let inputFlags = 0;
 let inputSeq = 0;
 const keys: Record<string, boolean> = {};
-let touchTarget: { x: number; y: number } | null = null;
+
+// --- Virtual joystick state ---
+let joystickActive = false;
+let joystickOriginX = 0;
+let joystickOriginY = 0;
+let joystickCurrentX = 0;
+let joystickCurrentY = 0;
+const JOYSTICK_DEADZONE = 15; // pixels from center before movement starts
+const JOYSTICK_MAX_RADIUS = 60; // max visual radius
 
 // --- Network ---
 let gameWs: WebSocket | null = null;
@@ -104,6 +114,7 @@ const landingEl = document.getElementById('landing')!;
 const gameWrapEl = document.getElementById('game-wrap')!;
 const landingPlayBtn = document.getElementById('landing-play')!;
 const landingNickInput = document.getElementById('landing-nick') as HTMLInputElement;
+const landingMusicToggleEl = document.getElementById('landing-music-toggle') as HTMLInputElement | null;
 const landingProfileName = document.getElementById('landing-profile-name')!;
 const landingProfileAvatar = document.getElementById('landing-profile-avatar')!;
 const landingProfileActions = document.getElementById('landing-profile-actions')!;
@@ -115,14 +126,19 @@ const fightAllyOverlayEl = document.getElementById('fight-ally-overlay')!;
 const fightAllyNameEl = document.getElementById('fight-ally-name')!;
 const fightAllyFightBtn = document.getElementById('fight-ally-fight')!;
 const fightAllyAllyBtn = document.getElementById('fight-ally-ally')!;
+const cpuWarningEl = document.getElementById('cpu-warning')!;
 const lobbyOverlayEl = document.getElementById('lobby-overlay')!;
 const lobbyMessageEl = document.getElementById('lobby-message')!;
 const lobbyCountdownEl = document.getElementById('lobby-countdown')!;
 const lobbyReadyBtnEl = document.getElementById('lobby-ready-btn')!;
+const lobbyBackBtnEl = document.getElementById('lobby-back-btn')!;
 
 const COOKIE_CONSENT_KEY = 'cookieConsent';
+const MODE_KEY = 'rescueworld_mode';
 let fightAllyTargetId: string | null = null;
 const fightAllyChosenTargets = new Set<string>();
+let lastAttackWarnTime = 0;
+const ATTACK_WARN_COOLDOWN_MS = 2000;
 type MatchPhase = 'lobby' | 'countdown' | 'playing';
 let matchPhase: MatchPhase = 'playing';
 let countdownRemainingSec = 0;
@@ -134,6 +150,8 @@ const BOOST_PRICES = { size: 50, speed: 30, adoptSpeed: 40 } as const;
 type AuthMe = { displayName: string | null; signedIn: boolean };
 let selectedMode: 'ffa' | 'teams' | 'solo' = 'ffa';
 const pendingBoosts = { sizeBonus: 0, speedBoost: false, adoptSpeed: false };
+let currentDisplayName: string | null = null;
+let isSignedIn = false;
 
 function getMoney(): number {
   return parseInt(localStorage.getItem(MONEY_KEY) || '0', 10);
@@ -159,6 +177,8 @@ async function fetchAndRenderAuth(): Promise<void> {
     const data: AuthMe = await res.json();
     const { displayName, signedIn } = data;
     const name = displayName ?? '';
+    currentDisplayName = name || null;
+    isSignedIn = signedIn;
     if (signedIn && name) {
       authAreaEl.innerHTML = `
         <span class="auth-profile">${escapeHtml(name)}</span>
@@ -170,7 +190,7 @@ async function fetchAndRenderAuth(): Promise<void> {
       landingAuthButtons.innerHTML = `<a href="/auth/google" class="auth-link" style="display:inline-block">Sign in with Google</a> <a href="#" id="landing-facebook" style="opacity:0.7">Sign in with Facebook</a>`;
       if (landingNickInput) landingNickInput.placeholder = name;
     } else {
-      const guestLabel = name ? `Guest · ${escapeHtml(name)}` : 'Guest';
+      const guestLabel = name ? `${escapeHtml(name)}` : 'Guest';
       authAreaEl.innerHTML = `
         <a href="/auth/google" class="auth-link">Sign in with Google</a>
         <span class="auth-guest">${guestLabel}</span>
@@ -182,10 +202,12 @@ async function fetchAndRenderAuth(): Promise<void> {
         <a href="/auth/google">Sign in with Google</a>
         <a href="#" id="landing-facebook" style="opacity:0.7">Sign in with Facebook</a>
       `;
-      if (landingNickInput) landingNickInput.placeholder = name || 'rescue123';
+      if (landingNickInput) landingNickInput.placeholder = name || 'Nickname';
     }
     if (landingNickInput && name) landingNickInput.value = name;
   } catch {
+    currentDisplayName = null;
+    isSignedIn = false;
     authAreaEl.innerHTML = `
       <a href="/auth/google" class="auth-link">Sign in with Google</a>
       <span class="auth-guest">Guest</span>
@@ -194,8 +216,38 @@ async function fetchAndRenderAuth(): Promise<void> {
     landingProfileAvatar.textContent = '?';
     landingProfileActions.innerHTML = '';
     landingAuthButtons.innerHTML = `<a href="/auth/google">Sign in with Google</a> <a href="#" id="landing-facebook" style="opacity:0.7">Sign in with Facebook</a>`;
-    if (landingNickInput) landingNickInput.placeholder = 'rescue123';
+    if (landingNickInput) landingNickInput.placeholder = 'Nickname';
   }
+}
+
+async function getOrCreateDisplayName(): Promise<string> {
+  // If user typed a nickname, use that
+  const nickInput = landingNickInput?.value?.trim();
+  if (nickInput) {
+    currentDisplayName = nickInput;
+    return nickInput;
+  }
+  // If we already have a name from /auth/me, use it
+  if (currentDisplayName) {
+    return currentDisplayName;
+  }
+  // Otherwise, create a guest name
+  try {
+    const res = await fetch('/auth/guest', { method: 'POST', credentials: 'include' });
+    const data = await res.json();
+    if (data.displayName) {
+      currentDisplayName = data.displayName;
+      // Update the UI
+      landingProfileName.textContent = data.displayName;
+      landingProfileAvatar.textContent = data.displayName.charAt(0).toUpperCase();
+      return data.displayName;
+    }
+  } catch {
+    // Fallback to random name
+  }
+  const fallback = `rescue${Date.now().toString(36)}`;
+  currentDisplayName = fallback;
+  return fallback;
 }
 
 function escapeHtml(s: string): string {
@@ -235,75 +287,93 @@ function onKeyUp(e: KeyboardEvent): void {
   e.preventDefault();
 }
 
-function getTapDirection(): { dx: number; dy: number } {
-  if (!touchTarget || !predictedPlayer) return { dx: 0, dy: 0 };
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const tx = (touchTarget.x - rect.left) * scaleX;
-  const ty = (touchTarget.y - rect.top) * scaleY;
-  const cam = getCamera();
-  const wx = tx - cam.x + cam.w / 2;
-  const wy = ty - cam.y + cam.h / 2;
-  const dx = wx - predictedPlayer.x;
-  const dy = wy - predictedPlayer.y;
-  const len = Math.hypot(dx, dy) || 1;
-  return { dx: dx / len, dy: dy / len };
-}
-
 function hasMovementKeyDown(): boolean {
   return !!(keys['KeyW'] || keys['KeyS'] || keys['KeyA'] || keys['KeyD'] ||
     keys['ArrowUp'] || keys['ArrowDown'] || keys['ArrowLeft'] || keys['ArrowRight']);
 }
 
-function applyTapToInput(): void {
+function applyJoystickToInput(): void {
   if (hasMovementKeyDown()) return;
-  const { dx, dy } = getTapDirection();
-  setInputFlag(INPUT_LEFT, dx < -0.3);
-  setInputFlag(INPUT_RIGHT, dx > 0.3);
-  setInputFlag(INPUT_UP, dy < -0.3);
-  setInputFlag(INPUT_DOWN, dy > 0.3);
+  if (!joystickActive) {
+    // Clear all movement flags when joystick is inactive
+    setInputFlag(INPUT_LEFT, false);
+    setInputFlag(INPUT_RIGHT, false);
+    setInputFlag(INPUT_UP, false);
+    setInputFlag(INPUT_DOWN, false);
+    return;
+  }
+  const dx = joystickCurrentX - joystickOriginX;
+  const dy = joystickCurrentY - joystickOriginY;
+  const dist = Math.hypot(dx, dy);
+  
+  if (dist < JOYSTICK_DEADZONE) {
+    // Inside deadzone - no movement
+    setInputFlag(INPUT_LEFT, false);
+    setInputFlag(INPUT_RIGHT, false);
+    setInputFlag(INPUT_UP, false);
+    setInputFlag(INPUT_DOWN, false);
+    return;
+  }
+  
+  // Normalize direction
+  const nx = dx / dist;
+  const ny = dy / dist;
+  
+  // Apply input based on direction (threshold at 0.3 for diagonal support)
+  setInputFlag(INPUT_LEFT, nx < -0.3);
+  setInputFlag(INPUT_RIGHT, nx > 0.3);
+  setInputFlag(INPUT_UP, ny < -0.3);
+  setInputFlag(INPUT_DOWN, ny > 0.3);
 }
 
-let touchStartClientX = 0;
-let touchStartClientY = 0;
-let lastTouchClientX = 0;
-let lastTouchClientY = 0;
 canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
   if (e.touches.length) {
-    touchTarget = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-    touchStartClientX = e.touches[0].clientX;
-    touchStartClientY = e.touches[0].clientY;
-    lastTouchClientX = e.touches[0].clientX;
-    lastTouchClientY = e.touches[0].clientY;
+    joystickActive = true;
+    joystickOriginX = e.touches[0].clientX;
+    joystickOriginY = e.touches[0].clientY;
+    joystickCurrentX = joystickOriginX;
+    joystickCurrentY = joystickOriginY;
   }
-});
+}, { passive: false });
+
 canvas.addEventListener('touchmove', (e) => {
   e.preventDefault();
-  if (e.touches.length) {
-    const tx = e.touches[0].clientX;
-    const ty = e.touches[0].clientY;
-    if (!isPanning && Math.hypot(tx - touchStartClientX, ty - touchStartClientY) > PAN_THRESHOLD_PX) {
-      isPanning = true;
-      touchTarget = null;
-    }
-    if (isPanning) {
-      applyPanDelta(tx - lastTouchClientX, ty - lastTouchClientY);
-      lastTouchClientX = tx;
-      lastTouchClientY = ty;
-    } else {
-      touchTarget = { x: tx, y: ty };
-    }
+  if (e.touches.length && joystickActive) {
+    joystickCurrentX = e.touches[0].clientX;
+    joystickCurrentY = e.touches[0].clientY;
   }
-});
+}, { passive: false });
+
+function sendInputImmediately(): void {
+  if (gameWs?.readyState === WebSocket.OPEN) {
+    const buf = encodeInput(inputFlags, inputSeq++);
+    gameWs.send(buf);
+  }
+}
+
 canvas.addEventListener('touchend', (e) => {
   e.preventDefault();
   if (e.touches.length === 0) {
-    touchTarget = null;
-    isPanning = false;
+    joystickActive = false;
+    // Immediately clear input flags and send to server
+    setInputFlag(INPUT_LEFT, false);
+    setInputFlag(INPUT_RIGHT, false);
+    setInputFlag(INPUT_UP, false);
+    setInputFlag(INPUT_DOWN, false);
+    sendInputImmediately(); // Send stop immediately to prevent momentum
   }
-});
+}, { passive: false });
+
+canvas.addEventListener('touchcancel', (e) => {
+  e.preventDefault();
+  joystickActive = false;
+  setInputFlag(INPUT_LEFT, false);
+  setInputFlag(INPUT_RIGHT, false);
+  setInputFlag(INPUT_UP, false);
+  setInputFlag(INPUT_DOWN, false);
+  sendInputImmediately(); // Send stop immediately to prevent momentum
+}, { passive: false });
 canvas.addEventListener('mousedown', (e) => {
   e.preventDefault();
 });
@@ -318,6 +388,67 @@ canvas.addEventListener('contextmenu', (e) => {
 });
 window.addEventListener('keydown', onKeyDown);
 window.addEventListener('keyup', onKeyUp);
+
+// --- Minimap click/drag to pan camera ---
+let minimapDragging = false;
+
+function panCameraToMinimapPos(clientX: number, clientY: number): void {
+  const rect = minimap.getBoundingClientRect();
+  const clickX = clientX - rect.left;
+  const clickY = clientY - rect.top;
+  const scale = MAP_WIDTH / 120; // minimap is 120px, map is MAP_WIDTH
+  const worldX = clickX * scale;
+  const worldY = clickY * scale;
+  // Set camera offset to center view on clicked world position
+  const playerX = predictedPlayer?.x ?? MAP_WIDTH / 2;
+  const playerY = predictedPlayer?.y ?? MAP_HEIGHT / 2;
+  cameraPanOffsetX = worldX - playerX;
+  cameraPanOffsetY = worldY - playerY;
+}
+
+minimap.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  minimapDragging = true;
+  panCameraToMinimapPos(e.clientX, e.clientY);
+});
+
+minimap.addEventListener('mousemove', (e) => {
+  if (minimapDragging) {
+    panCameraToMinimapPos(e.clientX, e.clientY);
+  }
+});
+
+minimap.addEventListener('mouseup', () => {
+  minimapDragging = false;
+});
+
+minimap.addEventListener('mouseleave', () => {
+  minimapDragging = false;
+});
+
+// Touch support for minimap drag
+minimap.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  minimapDragging = true;
+  if (e.touches.length > 0) {
+    panCameraToMinimapPos(e.touches[0].clientX, e.touches[0].clientY);
+  }
+}, { passive: false });
+
+minimap.addEventListener('touchmove', (e) => {
+  if (minimapDragging && e.touches.length > 0) {
+    e.preventDefault();
+    panCameraToMinimapPos(e.touches[0].clientX, e.touches[0].clientY);
+  }
+}, { passive: false });
+
+minimap.addEventListener('touchend', () => {
+  minimapDragging = false;
+});
+
+minimap.addEventListener('touchcancel', () => {
+  minimapDragging = false;
+});
 
 // --- Camera (follow local player, smoothed; pannable by drag) ---
 let cameraSmoothedX: number | null = null;
@@ -414,7 +545,7 @@ function predictPlayerByDt(p: PlayerState, inputFlags: number, dtSec: number): P
     vx = (dx / len) * step;
     vy = (dy / len) * step;
   }
-  const radius = SHELTER_BASE_RADIUS + p.size * 4;
+  const radius = SHELTER_BASE_RADIUS + p.size * SHELTER_RADIUS_PER_SIZE;
   let x = p.x + vx;
   let y = p.y + vy;
   x = Math.max(radius, Math.min(MAP_WIDTH - radius, x));
@@ -452,7 +583,13 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     pingIntervalId = null;
   }
   switchServerEl.classList.add('hidden');
-  let gameUrl = 'ws://localhost:4001';
+  const isLocalhost = (url: string) => /^wss?:\/\/localhost(\b|:|\/|$)/i.test(url) || /^wss?:\/\/127\.0\.0\.1(\b|:|\/|$)/i.test(url);
+  const gameUrlFromPage = () => {
+    const { protocol, host } = window.location;
+    const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${wsProtocol}//${host}/ws-game`;
+  };
+  let gameUrl = isLocalhost(window.location.href) ? 'ws://localhost:4001' : gameUrlFromPage();
   const ws = new WebSocket(SIGNALING_URL);
   await new Promise<void>((resolve, reject) => {
     const t = setTimeout(() => {
@@ -468,6 +605,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         if (msg.type === 'joined' && msg.gameUrl) {
           clearTimeout(t);
           gameUrl = msg.gameUrl;
+          if (!isLocalhost(window.location.href) && isLocalhost(gameUrl)) gameUrl = gameUrlFromPage();
           resolve();
         }
       } catch {
@@ -485,9 +623,10 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
   });
   const gameWsLocal = new WebSocket(gameUrl);
   gameWsLocal.binaryType = 'arraybuffer';
-  gameWsLocal.onopen = () => {
+  gameWsLocal.onopen = async () => {
     gameWs = gameWsLocal;
-    gameWs.send(JSON.stringify({ type: 'mode', mode: options?.mode ?? 'ffa' }));
+    const displayName = await getOrCreateDisplayName();
+    gameWs.send(JSON.stringify({ type: 'mode', mode: options?.mode ?? 'ffa', displayName }));
     if (pendingBoosts.sizeBonus > 0 || pendingBoosts.speedBoost || pendingBoosts.adoptSpeed) {
       gameWs.send(JSON.stringify({
         type: 'startingBoosts',
@@ -513,10 +652,14 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           countdownRemainingSec = typeof msg.countdownRemainingSec === 'number' ? msg.countdownRemainingSec : 0;
           readyCount = typeof msg.readyCount === 'number' ? msg.readyCount : 0;
           if (matchPhase === 'lobby') {
-            lobbyOverlayEl.classList.remove('hidden');
-            lobbyMessageEl.textContent = 'Waiting for another player…';
-            lobbyCountdownEl.classList.add('hidden');
-            lobbyReadyBtnEl.classList.add('hidden');
+            if (selectedMode === 'solo') {
+              lobbyOverlayEl.classList.add('hidden');
+            } else {
+              lobbyOverlayEl.classList.remove('hidden');
+              lobbyMessageEl.textContent = 'Waiting for another player…';
+              lobbyCountdownEl.classList.add('hidden');
+              lobbyReadyBtnEl.classList.add('hidden');
+            }
           } else if (matchPhase === 'countdown') {
             lobbyOverlayEl.classList.remove('hidden');
             lobbyMessageEl.textContent = 'Match starting soon';
@@ -621,10 +764,11 @@ function tick(now: number): void {
   const dt = Math.min((now - lastTickTime) / 1000, 0.1);
   lastTickTime = now;
 
-  if (touchTarget) applyTapToInput();
+  applyJoystickToInput();
 
   const matchOver = latestSnapshot != null && latestSnapshot.matchEndAt > 0 && latestSnapshot.tick >= latestSnapshot.matchEndAt;
-  const gameActive = matchPhase === 'playing' && !matchOver;
+  const meForActive = latestSnapshot?.players.find((p) => p.id === myPlayerId);
+  const gameActive = matchPhase === 'playing' && !matchOver && !meForActive?.eliminated;
 
   // Send input at server tick rate (only when match is playing and not over)
   if (gameActive && gameWs?.readyState === WebSocket.OPEN && now - lastInputSendTime >= TICK_MS) {
@@ -644,8 +788,9 @@ function tick(now: number): void {
         if (pl.id === myPlayerId) continue;
         const other = getInterpolatedPlayer(pl.id) ?? pl;
         const or = SHELTER_BASE_RADIUS + other.size * SHELTER_RADIUS_PER_SIZE;
-        const d = Math.hypot(predictedPlayer.x - other.x, predictedPlayer.y - other.y);
-        if (d < myR + or && d > 0) {
+        const overlap =
+          Math.abs(predictedPlayer.x - other.x) <= myR + or && Math.abs(predictedPlayer.y - other.y) <= myR + or;
+        if (overlap) {
           predictedPlayer = { ...predictedPlayer, x: prevX, y: prevY };
           break;
         }
@@ -669,18 +814,28 @@ function tick(now: number): void {
       playerDisplayX = tx;
       playerDisplayY = ty;
     }
-    // Show Fight/Ally when my shelter overlaps any other (including CPU)
+    // Show Fight/Ally when my shelter overlaps another HUMAN player — AABB to match server
+    // Show CPU warning when overlapping a CPU (no prompt)
     let overlappingId: string | null = null;
+    let cpuOverlapping = false;
     if (latestSnapshot) {
       const myX = playerDisplayX ?? predictedPlayer.x;
       const myY = playerDisplayY ?? predictedPlayer.y;
-      const myR = SHELTER_BASE_RADIUS + predictedPlayer.size * SHELTER_RADIUS_PER_SIZE;
+      const mySize = predictedPlayer.size;
+      const myR = SHELTER_BASE_RADIUS + mySize * SHELTER_RADIUS_PER_SIZE;
       for (const pl of latestSnapshot.players) {
         if (pl.id === myPlayerId) continue;
         const other = getInterpolatedPlayer(pl.id) ?? pl;
         const or = SHELTER_BASE_RADIUS + other.size * SHELTER_RADIUS_PER_SIZE;
-        const d = Math.hypot(myX - other.x, myY - other.y);
-        if (d < myR + or && d > 0) {
+        const overlap = Math.abs(myX - other.x) <= myR + or && Math.abs(myY - other.y) <= myR + or;
+        if (!overlap) continue;
+        // Combat only starts at size 4+
+        if (mySize < COMBAT_MIN_SIZE || other.size < COMBAT_MIN_SIZE) continue;
+        if (pl.id.startsWith('cpu-')) {
+          cpuOverlapping = true;
+          continue;
+        }
+        if (!fightAllyChosenTargets.has(pl.id)) {
           overlappingId = pl.id;
           break;
         }
@@ -690,16 +845,36 @@ function tick(now: number): void {
       const other = latestSnapshot!.players.find((p) => p.id === overlappingId);
       fightAllyTargetId = overlappingId;
       fightAllyNameEl.textContent = other?.displayName ?? overlappingId;
+      const wasHidden = fightAllyOverlayEl.classList.contains('hidden');
       fightAllyOverlayEl.classList.remove('hidden');
+      // Play attack warning when first showing human fight overlay
+      if (wasHidden && Date.now() - lastAttackWarnTime > ATTACK_WARN_COOLDOWN_MS) {
+        lastAttackWarnTime = Date.now();
+        playAttackWarning();
+      }
     } else {
       fightAllyOverlayEl.classList.add('hidden');
       fightAllyTargetId = null;
+      // Reset choices when not overlapping anyone - allows changing mind on next encounter
+      fightAllyChosenTargets.clear();
+    }
+    if (cpuOverlapping) {
+      const wasHidden = cpuWarningEl.classList.contains('hidden');
+      cpuWarningEl.classList.remove('hidden');
+      // Play attack warning when first showing CPU warning
+      if (wasHidden && Date.now() - lastAttackWarnTime > ATTACK_WARN_COOLDOWN_MS) {
+        lastAttackWarnTime = Date.now();
+        playAttackWarning();
+      }
+    } else {
+      cpuWarningEl.classList.add('hidden');
     }
   } else {
     playerDisplayX = null;
     playerDisplayY = null;
     fightAllyOverlayEl.classList.add('hidden');
     fightAllyTargetId = null;
+    cpuWarningEl.classList.add('hidden');
   }
 
   const interpStep = dt * (1000 / INTERP_BUFFER_MS);
@@ -764,9 +939,7 @@ function drawMapBackground(cam: { x: number; y: number; w: number; h: number }):
   ctx.fillStyle = 'rgba(255,255,255,0.35)';
   for (let yy = y0; yy <= y1; yy += DOT_SPACING) {
     for (let xx = x0; xx <= x1; xx += DOT_SPACING) {
-      ctx.beginPath();
-      ctx.arc(xx, yy, DOT_R, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillRect(xx - DOT_R, yy - DOT_R, DOT_R * 2, DOT_R * 2);
     }
   }
 }
@@ -779,14 +952,10 @@ function drawAdoptionZone(z: AdoptionZoneState): void {
   ctx.strokeStyle = 'rgba(123, 237, 159, 0.6)';
   ctx.lineWidth = 4;
   ctx.setLineDash([8, 8]);
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.stroke();
+  ctx.strokeRect(cx - r, cy - r, r * 2, r * 2);
   ctx.setLineDash([]);
   ctx.fillStyle = 'rgba(74, 124, 89, 0.2)';
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
   ctx.fillStyle = '#7bed9f';
   ctx.font = 'bold 14px Rubik, sans-serif';
   ctx.textAlign = 'center';
@@ -796,7 +965,7 @@ function drawAdoptionZone(z: AdoptionZoneState): void {
 }
 
 function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
-  const radius = SHELTER_BASE_RADIUS + p.size * SHELTER_RADIUS_PER_SIZE;
+  const half = SHELTER_BASE_RADIUS + p.size * SHELTER_RADIUS_PER_SIZE;
   const cx = p.x;
   const cy = p.y;
   ctx.save();
@@ -804,17 +973,15 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
   ctx.shadowBlur = 10;
   const color = isMe ? '#7bed9f' : hashColor(p.id);
   ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.fillRect(cx - half, cy - half, half * 2, half * 2);
   ctx.strokeStyle = isMe ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)';
   ctx.lineWidth = isMe ? 3 : 2;
-  ctx.stroke();
+  ctx.strokeRect(cx - half, cy - half, half * 2, half * 2);
   ctx.fillStyle = '#2d2d2d';
   ctx.font = 'bold 12px Rubik, sans-serif';
   ctx.textAlign = 'center';
   const label = isMe ? 'You' : (p.displayName ?? p.id);
-  ctx.fillText(label, cx, cy - radius - 6);
+  ctx.fillText(label, cx, cy - half - 6);
   ctx.fillText(`Pets: ${p.petsInside.length}/${Math.floor(p.size)}`, cx, cy + 4);
   ctx.restore();
 }
@@ -837,14 +1004,13 @@ function drawStray(x: number, y: number): void {
 
 function drawPickup(u: PickupState): void {
   const isGrowth = u.type === PICKUP_TYPE_GROWTH;
+  const h = GROWTH_ORB_RADIUS;
   ctx.save();
   ctx.fillStyle = isGrowth ? '#7bed9f' : '#70a3ff';
-  ctx.beginPath();
-  ctx.arc(u.x, u.y, GROWTH_ORB_RADIUS, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.fillRect(u.x - h, u.y - h, h * 2, h * 2);
   ctx.strokeStyle = isGrowth ? '#2d5a38' : '#2d4a6e';
   ctx.lineWidth = 2;
-  ctx.stroke();
+  ctx.strokeRect(u.x - h, u.y - h, h * 2, h * 2);
   ctx.fillStyle = '#333';
   ctx.font = '10px Rubik, sans-serif';
   ctx.textAlign = 'center';
@@ -878,7 +1044,9 @@ function render(dt: number): void {
     drawStray(p.x, p.y);
   }
 
-  for (const pl of latestSnapshot?.players ?? []) {
+  // Sort players by size so larger ones render on top
+  const sortedPlayers = [...(latestSnapshot?.players ?? [])].sort((a, b) => a.size - b.size);
+  for (const pl of sortedPlayers) {
     const isMe = pl.id === myPlayerId;
     let p: PlayerState;
     if (isMe && predictedPlayer) {
@@ -920,42 +1088,84 @@ function render(dt: number): void {
   for (let yy = 0; yy <= MAP_HEIGHT; yy += DOT_SPACING * 3) {
     for (let xx = 0; xx <= MAP_WIDTH; xx += DOT_SPACING * 3) {
       minimapCtx.fillStyle = 'rgba(255,255,255,0.15)';
-      minimapCtx.beginPath();
-      minimapCtx.arc(xx * scale, yy * scale, 0.8, 0, Math.PI * 2);
-      minimapCtx.fill();
+      minimapCtx.fillRect(xx * scale - 0.8, yy * scale - 0.8, 1.6, 1.6);
     }
   }
   if (latestSnapshot) {
     for (const z of latestSnapshot.adoptionZones) {
+      const r = (z.radius * scale) | 0;
       minimapCtx.fillStyle = 'rgba(123, 237, 159, 0.6)';
-      minimapCtx.beginPath();
-      minimapCtx.arc(z.x * scale, z.y * scale, (z.radius * scale) | 0, 0, Math.PI * 2);
-      minimapCtx.fill();
+      minimapCtx.fillRect(z.x * scale - r, z.y * scale - r, r * 2, r * 2);
     }
     for (const pet of latestSnapshot.pets) {
       if (pet.insideShelterId !== null) continue;
       minimapCtx.fillStyle = '#c9a86c';
-      minimapCtx.beginPath();
-      minimapCtx.arc(pet.x * scale, pet.y * scale, 2, 0, Math.PI * 2);
-      minimapCtx.fill();
+      minimapCtx.fillRect(pet.x * scale - 2, pet.y * scale - 2, 4, 4);
     }
     for (const u of latestSnapshot.pickups ?? []) {
       minimapCtx.fillStyle = u.type === PICKUP_TYPE_GROWTH ? '#7bed9f' : '#70a3ff';
-      minimapCtx.beginPath();
-      minimapCtx.arc(u.x * scale, u.y * scale, 2, 0, Math.PI * 2);
-      minimapCtx.fill();
+      minimapCtx.fillRect(u.x * scale - 2, u.y * scale - 2, 4, 4);
     }
     for (const pl of latestSnapshot.players) {
       minimapCtx.fillStyle = pl.id === myPlayerId ? '#7bed9f' : hashColor(pl.id);
       const r = (SHELTER_BASE_RADIUS + pl.size * SHELTER_RADIUS_PER_SIZE) * scale;
-      minimapCtx.beginPath();
-      minimapCtx.arc(pl.x * scale, pl.y * scale, Math.max(2, r), 0, Math.PI * 2);
-      minimapCtx.fill();
+      const half = Math.max(2, r);
+      minimapCtx.fillRect(pl.x * scale - half, pl.y * scale - half, half * 2, half * 2);
     }
   }
+  // Draw viewport indicator on minimap
+  const vpX = safeCam.x * scale;
+  const vpY = safeCam.y * scale;
+  const vpW = safeCam.w * scale;
+  const vpH = safeCam.h * scale;
+  minimapCtx.strokeStyle = 'rgba(255,255,255,0.6)';
+  minimapCtx.lineWidth = 1.5;
+  minimapCtx.strokeRect(vpX, vpY, vpW, vpH);
+  
   minimapCtx.strokeStyle = 'rgba(255,255,255,0.2)';
   minimapCtx.lineWidth = 1;
   minimapCtx.strokeRect(0.5, 0.5, 119, 119);
+
+  // Draw virtual joystick on main canvas when active
+  if (joystickActive) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const originX = (joystickOriginX - rect.left) * scaleX;
+    const originY = (joystickOriginY - rect.top) * scaleY;
+    const currentX = (joystickCurrentX - rect.left) * scaleX;
+    const currentY = (joystickCurrentY - rect.top) * scaleY;
+    
+    // Clamp joystick knob to max radius
+    const dx = currentX - originX;
+    const dy = currentY - originY;
+    const dist = Math.hypot(dx, dy);
+    const clampedDist = Math.min(dist, JOYSTICK_MAX_RADIUS * scaleX);
+    const knobX = dist > 0 ? originX + (dx / dist) * clampedDist : originX;
+    const knobY = dist > 0 ? originY + (dy / dist) * clampedDist : originY;
+    
+    // Outer ring (base)
+    ctx.save();
+    ctx.globalAlpha = 0.3;
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(originX, originY, JOYSTICK_MAX_RADIUS * scaleX, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+    ctx.fill();
+    
+    // Inner knob
+    ctx.globalAlpha = 0.6;
+    ctx.fillStyle = '#7bed9f';
+    ctx.beginPath();
+    ctx.arc(knobX, knobY, 20 * scaleX, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
 
   // UI
   const me = latestSnapshot?.players.find((p) => p.id === myPlayerId) ?? predictedPlayer;
@@ -972,7 +1182,8 @@ function render(dt: number): void {
   const remainingTicks = Math.max(0, matchEndAt - nowTick);
   const remainingSec = remainingTicks / tickRate;
   timerEl.textContent = remainingSec > 0 ? `${Math.floor(remainingSec / 60)}:${String(Math.floor(remainingSec % 60)).padStart(2, '0')}` : '0:00';
-  if (remainingSec <= 0 && latestSnapshot?.players.length) {
+  const iAmEliminated = !!(me?.eliminated);
+  if ((remainingSec <= 0 || iAmEliminated) && latestSnapshot?.players.length) {
     if (!matchEndPlayed) {
       matchEndPlayed = true;
       playMatchEnd();
@@ -984,11 +1195,17 @@ function render(dt: number): void {
     const placementBonus = [100, 50, 25];
     const myRank = meResult ? sorted.findIndex((p) => p.id === myPlayerId) + 1 : 0;
     const bonus = myRank > 0 && myRank <= placementBonus.length ? placementBonus[myRank - 1] : 0;
-    const earned = mySize + bonus;
+    const earned = iAmEliminated ? 0 : mySize + bonus;
     const newMoney = getMoney() + earned;
-    setMoney(newMoney);
-    const rankText = myRank > 0 ? ` (${myRank}. place +${bonus})` : '';
-    leaderboardEl.innerHTML = '<strong>Match over</strong><br><br>' + sorted.map((p, i) => `${i + 1}. ${p.id === myPlayerId ? 'You' : (p.displayName ?? p.id)}: size ${Math.floor(p.size)} (${p.totalAdoptions} adoptions)`).join('<br>') + (earned > 0 ? `<br><br>+${earned} money (size ${mySize}${rankText}) · total: ${newMoney}` : '') + '<br><br><button type="button" id="play-again-btn" class="fight-ally-btn ally-btn" style="margin-right:8px">Play again</button><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn">Back to lobby</button>';
+    if (remainingSec <= 0) setMoney(newMoney);
+    const bonusLabel = myRank === 1 ? 'Win bonus' : myRank === 2 ? '2nd place' : myRank === 3 ? '3rd place' : myRank > 0 ? `${myRank}th place` : '';
+    const moneyLines = earned > 0
+      ? `<br><br><strong>Total: ${newMoney.toLocaleString()}</strong>${bonusLabel ? `<br>${bonusLabel}: +${bonus}` : ''}`
+      : iAmEliminated
+        ? `<br><br><strong>Total: ${getMoney().toLocaleString()}</strong>`
+        : '';
+    const title = iAmEliminated ? 'You were consumed' : 'Match over';
+    leaderboardEl.innerHTML = `<strong>${title}</strong><br><br>` + sorted.map((p, i) => `${i + 1}. ${p.id === myPlayerId ? 'You' : (p.displayName ?? p.id)}: size ${Math.floor(p.size)} (${p.totalAdoptions} adoptions)`).join('<br>') + moneyLines + '<br><br><button type="button" id="play-again-btn" class="fight-ally-btn ally-btn" style="margin-right:8px">Play again</button><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn">Back to lobby</button>';
   } else {
     leaderboardEl.classList.remove('show');
   }
@@ -1003,17 +1220,20 @@ function render(dt: number): void {
 }
 
 // --- End match menu (delegated: Play again, Back to lobby) ---
-leaderboardEl.addEventListener('click', (e) => {
-  const t = (e.target as HTMLElement).closest?.('button');
-  if (!t) return;
-  if (t.id === 'play-again-btn') {
+function handleLeaderboardButton(btn: HTMLButtonElement): void {
+  if (btn.id === 'play-again-btn') {
     if (gameWs) {
       gameWs.close();
       gameWs = null;
     }
     leaderboardEl.classList.remove('show');
+    matchEndPlayed = false;
+    latestSnapshot = null;
     connectionOverlayEl.classList.remove('hidden');
-    connectionOverlayEl.innerHTML = '<h2>Connecting…</h2><p>Starting new match.</p>';
+    connectionOverlayEl.innerHTML = selectedMode === 'ffa'
+      ? '<h2>Connecting…</h2><p>Joining FFA lobby…</p>'
+      : '<h2>Connecting…</h2><p>Starting new match.</p>';
+    authAreaEl.classList.add('hidden');
     connect({ mode: selectedMode })
       .then(() => {
         connectionOverlayEl.classList.add('hidden');
@@ -1022,17 +1242,39 @@ leaderboardEl.addEventListener('click', (e) => {
         requestAnimationFrame(tick);
       })
       .catch((err: Error) => showConnectionError(err.message || 'Connection failed.'));
-  } else if (t.id === 'lobby-btn') {
+  } else if (btn.id === 'lobby-btn') {
     if (gameWs) {
       gameWs.close();
       gameWs = null;
     }
     leaderboardEl.classList.remove('show');
+    matchEndPlayed = false;
+    latestSnapshot = null;
     gameWrapEl.classList.remove('visible');
     landingEl.classList.remove('hidden');
+    authAreaEl.classList.remove('hidden');
     updateLandingMoney();
+    restoreModeSelection();
   }
+}
+
+leaderboardEl.addEventListener('click', (e) => {
+  const target = e.target as HTMLElement;
+  const btn = target.closest('button') as HTMLButtonElement | null;
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  handleLeaderboardButton(btn);
 });
+
+leaderboardEl.addEventListener('touchend', (e) => {
+  const target = e.target as HTMLElement;
+  const btn = target.closest('button') as HTMLButtonElement | null;
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  handleLeaderboardButton(btn);
+}, { passive: false });
 
 // --- Lobby: Ready button ---
 lobbyReadyBtnEl.addEventListener('click', () => {
@@ -1040,6 +1282,21 @@ lobbyReadyBtnEl.addEventListener('click', () => {
   iAmReady = true;
   gameWs.send(JSON.stringify({ type: 'ready' }));
   lobbyReadyBtnEl.textContent = 'Ready!';
+  lobbyMessageEl.textContent = "You're ready! Waiting for other player(s)…";
+});
+
+// --- Lobby: Back to lobby (same as end-match lobby button) ---
+lobbyBackBtnEl.addEventListener('click', () => {
+  if (gameWs) {
+    gameWs.close();
+    gameWs = null;
+  }
+  lobbyOverlayEl.classList.add('hidden');
+  gameWrapEl.classList.remove('visible');
+  landingEl.classList.remove('hidden');
+  authAreaEl.classList.remove('hidden'); // Show auth when returning to lobby
+  updateLandingMoney();
+  restoreModeSelection(); // Restore sticky mode
 });
 
 // --- Fight / Ally ---
@@ -1070,20 +1327,40 @@ switchServerBtnEl.addEventListener('click', () => {
   }
   connectionOverlayEl.classList.remove('hidden');
   connectionOverlayEl.innerHTML = '<h2>Switching server…</h2><p>Reconnecting to a closer server.</p>';
+  authAreaEl.classList.add('hidden');
   connect({ latency: currentRttMs, mode: selectedMode })
     .then(() => {
       connectionOverlayEl.classList.add('hidden');
       connectionOverlayEl.innerHTML = '';
     })
-    .catch((err: Error) => showConnectionError(err.message || 'Switch failed.'));
+    .catch((err: Error) => {
+      showConnectionError(err.message || 'Switch failed.');
+      authAreaEl.classList.remove('hidden');
+    });
 });
 
 // --- Landing: mode selector ---
+function restoreModeSelection(): void {
+  document.querySelectorAll('.mode-option').forEach((b) => {
+    const mode = (b as HTMLElement).dataset.mode;
+    if (mode === selectedMode) {
+      b.classList.add('selected');
+    } else {
+      b.classList.remove('selected');
+    }
+  });
+}
+const savedMode = localStorage.getItem(MODE_KEY);
+if (savedMode === 'ffa' || savedMode === 'teams' || savedMode === 'solo') {
+  selectedMode = savedMode;
+}
+restoreModeSelection();
 document.querySelectorAll('.mode-option').forEach((btn) => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.mode-option').forEach((b) => b.classList.remove('selected'));
     btn.classList.add('selected');
     selectedMode = (btn as HTMLElement).dataset.mode as 'ffa' | 'teams' | 'solo';
+    localStorage.setItem(MODE_KEY, selectedMode);
   });
 });
 
@@ -1099,14 +1376,18 @@ landingPlayBtn.addEventListener('click', () => {
   landingEl.classList.add('hidden');
   connectionOverlayEl.classList.remove('hidden');
   connectionOverlayEl.innerHTML = '<h2>Connecting…</h2><p>Waiting for game server.</p>';
+  // Hide auth buttons during match
+  authAreaEl.classList.add('hidden');
   connect({ mode: selectedMode })
     .then(() => {
       connectionOverlayEl.classList.add('hidden');
       gameWrapEl.classList.add('visible');
+      if (musicToggleEl) musicToggleEl.checked = getMusicEnabled();
       requestAnimationFrame(tick);
     })
     .catch((err: Error) => {
       showConnectionError(err.message || 'Connection failed.');
+      authAreaEl.classList.remove('hidden'); // Show auth on error
     });
 });
 
@@ -1139,6 +1420,17 @@ document.querySelectorAll('.landing-buy').forEach((btn) => {
     updateLandingMoney();
   });
 });
+
+// --- Landing: music toggle + play on load ---
+if (landingMusicToggleEl) {
+  landingMusicToggleEl.checked = getMusicEnabled();
+  landingMusicToggleEl.addEventListener('change', () => {
+    setMusicEnabled(landingMusicToggleEl!.checked);
+    if (landingMusicToggleEl!.checked) playMusic();
+  });
+}
+// Start music when the first page loads (may be blocked by browser until user interaction)
+if (getMusicEnabled()) playMusic();
 
 // --- Start ---
 fetchAndRenderAuth();

@@ -10,6 +10,10 @@ export const MAP_HEIGHT = 2400;
 
 /** Shelter (player) movement speed (units per second). */
 export const SHELTER_SPEED = 280;
+/** Faster movement speed for large shelters (size 200+). */
+export const SHELTER_SPEED_LARGE = 420;
+/** Size threshold for faster movement. */
+export const SHELTER_LARGE_SIZE_THRESHOLD = 200;
 
 /** Shelter base radius at size 1; scales with size for drawing. */
 export const SHELTER_BASE_RADIUS = 32;
@@ -39,7 +43,22 @@ export const ADOPTION_FAST_PET_THRESHOLD = 10;
 export const ADOPTION_TICKS_GROUNDED = 80;
 
 /** Size growth per adoption (higher = faster growth). */
-export const GROWTH_PER_ADOPTION = 1.5;
+export const GROWTH_PER_ADOPTION = 1;
+
+/** Combat: minimum size to engage (size 4+). */
+export const COMBAT_MIN_SIZE = 4;
+/** Combat: grace period ticks before combat starts (gives time to click Ally). */
+export const COMBAT_GRACE_TICKS = 50; // 2 seconds at 25Hz
+/** Combat: size units transferred per resolved fight. */
+export const COMBAT_TRANSFER_PER_WIN = 2;
+/** Combat: weight for pets carried when computing strength. */
+export const COMBAT_PET_WEIGHT = 2;
+/** Combat: strength to win-probability weight. */
+export const COMBAT_STRENGTH_WEIGHT = 0.15;
+/** Combat: per-stray variance weight (adds randomness). */
+export const COMBAT_STRAY_VARIANCE = 0.005;
+/** Combat: maximum variance applied to win chance. */
+export const COMBAT_MAX_VARIANCE = 0.2;
 
 /** Initial shelter size (capacity = size). */
 export const INITIAL_SHELTER_SIZE = 1;

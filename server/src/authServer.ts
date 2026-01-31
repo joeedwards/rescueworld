@@ -1,9 +1,10 @@
 /**
- * Auth API: guest names (rescueNNN), Google SSO. Uses .env for keys.
+ * Auth API: guest names (rescueNNN from registry), Google SSO. Uses .env for keys.
  */
 
 import express, { Request, Response } from 'express';
 import cookieParser from 'cookie-parser';
+import { getNextGuestName, getStorageStatus } from './registry.js';
 
 const API_PORT = Number(process.env.API_PORT) || 4002;
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-in-production';
@@ -19,24 +20,27 @@ type User = { id: string; googleId: string; email: string; displayName: string }
 const users = new Map<string, User>();
 let userSeq = 0;
 
-function generateGuestName(): string {
-  return `rescue${String(100 + Math.floor(Math.random() * 900))}`;
-}
+app.get('/health', (_req: Request, res: Response) => {
+  res.json(getStorageStatus());
+});
 
 app.get('/auth/me', (req, res) => {
   const userId = req.signedCookies?.session;
   if (userId) {
     const user = users.get(userId);
     if (user) {
+      console.log(`[rescue] auth/me signed-in displayName=${user.displayName}`);
       res.json({ displayName: user.displayName, signedIn: true });
       return;
     }
   }
   const guestName = req.signedCookies?.guest_name ?? req.cookies?.guest_name;
   if (guestName) {
+    console.log(`[rescue] auth/me guest cookie displayName=${guestName}`);
     res.json({ displayName: guestName, signedIn: false });
     return;
   }
+  console.log('[rescue] auth/me no session');
   res.json({ displayName: null, signedIn: false });
 });
 
@@ -47,8 +51,9 @@ app.get('/auth/signout', (req: Request, res: Response) => {
   res.redirect(`${API_ORIGIN.replace(/\/$/, '')}${gamePath}`);
 });
 
-app.post('/auth/guest', (req: Request, res: Response) => {
-  const displayName = generateGuestName();
+app.post('/auth/guest', async (req: Request, res: Response) => {
+  const displayName = await getNextGuestName();
+  console.log(`[rescue] auth guest assigned displayName=${displayName}`);
   res.cookie('guest_name', displayName, {
     httpOnly: true,
     maxAge: 365 * 24 * 60 * 60 * 1000,
@@ -103,11 +108,12 @@ app.get('/auth/google/callback', async (req: Request, res: Response) => {
     const profile = (await profileRes.json()) as { id: string; email?: string; name?: string };
     let user = Array.from(users.values()).find((u) => u.googleId === profile.id);
     if (!user) {
+      const displayName = profile.name ?? profile.email ?? (await getNextGuestName());
       user = {
         id: `u-${++userSeq}`,
         googleId: profile.id,
         email: profile.email ?? '',
-        displayName: profile.name ?? profile.email ?? generateGuestName(),
+        displayName,
       };
       users.set(user.id, user);
     }

@@ -1,9 +1,10 @@
 import path from 'path';
 import { defineConfig } from 'vite';
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   root: '.',
-  base: process.env.NODE_ENV === 'production' ? '/rescueworld/' : '/',
+  // build always uses /rescueworld/ so import.meta.env.BASE_URL is correct when deployed under games.vo.ly/rescueworld
+  base: command === 'build' ? '/rescueworld/' : '/',
   publicDir: 'public',
   resolve: {
     alias: {
@@ -21,4 +22,4 @@ export default defineConfig({
       '/auth': { target: 'http://localhost:4002', changeOrigin: true },
     },
   },
-});
+}));

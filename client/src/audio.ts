@@ -105,10 +105,27 @@ export function playWelcome(): void {
   setTimeout(() => playTone(659, 0.12, 'sine', 0.2), 160);
 }
 
+export function playAttackWarning(): void {
+  // Urgent low-frequency alert tone
+  playTone(220, 0.15, 'sawtooth', 0.35);
+  setTimeout(() => playTone(180, 0.12, 'sawtooth', 0.3), 100);
+  setTimeout(() => playTone(220, 0.1, 'sawtooth', 0.25), 200);
+}
+
 let musicAudio: HTMLAudioElement | null = null;
 function getMusicUrl(): string {
+  // Prefer Vite's BASE_URL (from vite.config base), fallback to current path so
+  // music loads from the same path as the app (e.g. games.vo.ly/rescueworld/music.mp3).
   const meta = import.meta as unknown as { env?: { BASE_URL?: string } };
-  const base = typeof meta.env?.BASE_URL === 'string' ? meta.env.BASE_URL : '/';
+  let base = typeof meta.env?.BASE_URL === 'string' ? meta.env.BASE_URL : '';
+  if (!base || base === '/') {
+    const pathname = typeof window !== 'undefined' ? window.location.pathname : '';
+    if (pathname.includes('rescueworld')) base = '/rescueworld/';
+    else {
+      const lastSlash = pathname.lastIndexOf('/');
+      base = lastSlash <= 0 ? '/' : pathname.slice(0, lastSlash + 1);
+    }
+  }
   const path = base.endsWith('/') ? `${base}music.mp3` : `${base}/music.mp3`;
   return path;
 }
@@ -122,11 +139,12 @@ export function playMusic(): void {
       musicAudio.volume = 1;
       musicAudio.preload = 'auto';
       musicAudio.src = getMusicUrl();
+      let musicTriedFallback = false;
       musicAudio.addEventListener('error', () => {
-        if (musicAudio && !musicAudio.src.endsWith('/music.mp3')) {
-          musicAudio.src = '/music.mp3';
-          void musicAudio.play().catch(() => {});
-        }
+        if (!musicAudio || musicTriedFallback) return;
+        musicTriedFallback = true;
+        musicAudio.src = '/rescueworld/music.mp3';
+        void musicAudio.play().catch(() => {});
       });
       musicAudio.load();
     }

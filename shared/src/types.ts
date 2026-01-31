@@ -25,6 +25,10 @@ export interface PlayerState {
   /** Tick until speed boost expires (0 = no boost). */
   speedBoostUntil: number;
   inputSeq: number;
+  /** Ally player ids (can overlap; no push-apart). Sent by server. */
+  allies?: string[];
+  /** True if consumed/eliminated (size <= threshold). */
+  eliminated?: boolean;
 }
 
 export const PICKUP_TYPE_GROWTH = 0;

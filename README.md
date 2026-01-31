@@ -167,6 +167,8 @@ If `REDIS_URL` is empty or unset, the app runs without Redis (single game server
   `systemctl status redis` or `systemctl status redis-server`  
   Should show `active (running)`.
 
+**SQLite fallback:** When Redis is not configured or not running, the server creates a SQLite database (default: `server/rescueworld.db`) for the guest name counter. Set `SQLITE_DB_PATH` in `.env` to use a different path. A **health endpoint** is available at `GET /health` on the auth API (same port as `/auth/*`); it returns `{ redis: boolean, sqlite: boolean }` so you can confirm which storage is in use.
+
 ### Database (optional)
 
 The auth API currently keeps users in memory. For production you can add a database (e.g. Postgres) for users, sessions, match results, and world leaderboard. In `.env`:

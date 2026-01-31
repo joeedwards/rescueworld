@@ -39,6 +39,9 @@ function readString(view, offset) {
     const len = view.getUint8(offset);
     if (len === 0)
         return { s: '', next: offset + 1 };
+    const maxLen = view.buffer.byteLength - (offset + 1);
+    if (len > maxLen || len < 0)
+        throw new RangeError(`Snapshot string length ${len} exceeds buffer (${maxLen} bytes left)`);
     const bytes = new Uint8Array(view.buffer, offset + 1, len);
     const s = new TextDecoder().decode(bytes);
     return { s, next: offset + 1 + len };
@@ -55,10 +58,13 @@ function encodeSnapshot(snap) {
         for (const pid of p.petsInside)
             size += 1 + encoder.encode(pid).length;
         size += 4 + 1; // speedBoostUntil(4), inputSeq(1)
+        size += 1 + 1; // eliminated(1), numAllies(1)
+        for (const aid of p.allies ?? [])
+            size += 1 + encoder.encode(aid).length;
     }
     size += 1;
     for (const pet of pets) {
-        size += 1 + encoder.encode(pet.id).length + 4 * 4 + 1 + (pet.insideShelterId ? encoder.encode(pet.insideShelterId).length : 0) + 1;
+        size += 1 + encoder.encode(pet.id).length + 4 * 4 + 1 + (pet.insideShelterId ? encoder.encode(pet.insideShelterId).length : 0);
     }
     size += 1;
     for (const z of adoptionZones) {
@@ -68,7 +74,7 @@ function encodeSnapshot(snap) {
     for (const u of pickups) {
         size += 1 + encoder.encode(u.id).length + 4 + 4 + 1;
     }
-    const buf = new ArrayBuffer(Math.min(size * 2, 65536));
+    const buf = new ArrayBuffer(size * 2); // No cap - large games need large buffers
     const view = new DataView(buf);
     let off = 0;
     view.setUint8(off++, exports.MSG_SNAPSHOT);
@@ -98,6 +104,11 @@ function encodeSnapshot(snap) {
         view.setUint32(off, (p.speedBoostUntil ?? 0) >>> 0, true);
         off += 4;
         view.setUint8(off++, p.inputSeq & 0xff);
+        view.setUint8(off++, (p.eliminated ? 1 : 0));
+        const allies = p.allies ?? [];
+        view.setUint8(off++, allies.length);
+        for (const aid of allies)
+            off = writeString(view, off, aid);
     }
     view.setUint8(off++, pets.length);
     for (const pet of pets) {
@@ -174,7 +185,29 @@ function decodeSnapshot(buf) {
         const speedBoostUntil = view.getUint32(off, true);
         off += 4;
         const inputSeq = view.getUint8(off++);
-        players.push({ id, displayName: displayName || id, x, y, vx, vy, size, totalAdoptions, petsInside, speedBoostUntil, inputSeq });
+        const eliminated = view.getUint8(off++) !== 0;
+        const numAllies = view.getUint8(off++);
+        const allies = [];
+        for (let k = 0; k < numAllies; k++) {
+            const { s: allyId, next: allyNext } = readString(view, off);
+            off = allyNext;
+            allies.push(allyId);
+        }
+        players.push({
+            id,
+            displayName: displayName || id,
+            x,
+            y,
+            vx,
+            vy,
+            size,
+            totalAdoptions,
+            petsInside,
+            speedBoostUntil,
+            inputSeq,
+            ...(allies.length ? { allies } : {}),
+            ...(eliminated ? { eliminated: true } : {}),
+        });
     }
     const numPets = view.getUint8(off++);
     const pets = [];
@@ -189,10 +222,9 @@ function decodeSnapshot(buf) {
         off += 4;
         const vy = view.getFloat32(off, true);
         off += 4;
-        const insideLen = view.getUint8(off++);
-        const { s: insideStr, next: inNext } = readString(view, off - 1);
+        const { s: insideStr, next: inNext } = readString(view, off);
         off = inNext;
-        const insideShelterId = insideLen === 0 ? null : insideStr;
+        const insideShelterId = insideStr === '' ? null : insideStr;
         pets.push({ id, x, y, vx, vy, insideShelterId });
     }
     const numZones = view.getUint8(off++);

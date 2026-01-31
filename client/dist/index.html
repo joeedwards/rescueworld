@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-  <title>Puppy Rescue</title>
+  <title>Adoptar.io - Pet Rescue</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -29,6 +29,7 @@
     .top-bar .game-title { font: 700 16px/1 Rubik, sans-serif; color: rgba(255,255,255,0.9); letter-spacing: 0.12em; }
     .top-bar .timer { font: 700 18px/1 Rubik, sans-serif; color: #fff; letter-spacing: 0.05em; }
     .top-bar #auth-area { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .top-bar #auth-area.hidden { display: none; }
     .top-bar .auth-link { font: 600 12px/1 Rubik, sans-serif; color: rgba(255,255,255,0.85); text-decoration: none; }
     .top-bar .auth-link:hover { color: #7bed9f; }
     .top-bar .auth-profile { font: 600 12px/1 Rubik, sans-serif; color: #7bed9f; }
@@ -54,6 +55,8 @@
     .fight-ally-btn { padding: 10px 20px; font: 600 13px Rubik, sans-serif; border-radius: 8px; cursor: pointer; border: none; }
     .fight-btn { background: #ff6b6b; color: #fff; }
     .ally-btn { background: #7bed9f; color: #1a1a2e; }
+    .cpu-warning { position: fixed; top: 60px; right: 16px; z-index: 70; background: rgba(35,42,60,0.98); border: 2px solid #ff6b6b; border-radius: 10px; padding: 10px 14px; font: 700 12px Rubik, sans-serif; color: #ff6b6b; box-shadow: 0 6px 18px rgba(0,0,0,0.4); }
+    .cpu-warning.hidden { display: none; }
     .settings-panel { position: fixed; top: 56px; right: 12px; background: rgba(35,42,60,0.98); border: 2px solid rgba(255,255,255,0.2); border-radius: 12px; padding: 16px; z-index: 60; min-width: 180px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
     .settings-panel.hidden { display: none; }
     .settings-panel h3 { margin-bottom: 12px; font: 700 14px Rubik, sans-serif; color: #7bed9f; }
@@ -67,7 +70,8 @@
       box-shadow: inset 0 2px 8px rgba(0,0,0,0.5), 0 4px 16px rgba(0,0,0,0.3);
       padding: 4px;
     }
-    #minimap { width: 120px; height: 120px; border-radius: 6px; display: block; background: #2d4a2d; }
+    #minimap { width: 120px; height: 120px; border-radius: 6px; display: block; background: #2d4a2d; cursor: grab; }
+    #minimap:active { cursor: grabbing; }
     .bottom-bar {
       position: absolute; bottom: 0; left: 0; right: 0; height: 72px;
       background: linear-gradient(0deg, rgba(30,35,50,0.97), rgba(22,26,38,0.97));
@@ -83,6 +87,7 @@
       border: 2px solid rgba(255,255,255,0.2); border-radius: 16px; padding: 28px 32px;
       font: 600 16px Rubik, sans-serif; color: #fff; display: none; max-width: 90%;
       box-shadow: 0 12px 40px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.08);
+      z-index: 80; pointer-events: auto;
     }
     #leaderboard.show { display: block; }
     #leaderboard strong { display: block; margin-bottom: 16px; font-size: 20px; color: #7bed9f; }
@@ -137,6 +142,9 @@
     .landing-center .nick-row { margin-bottom: 16px; }
     .landing-center .nick-row label { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.8); display: block; margin-bottom: 4px; }
     .landing-center .nick-row input { padding: 8px 12px; border-radius: 8px; border: 2px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.3); color: #fff; font: 600 14px Rubik, sans-serif; width: 180px; }
+    .landing-center .landing-music-row { margin-bottom: 12px; }
+    .landing-center .landing-music-row label { font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
+    .landing-center .landing-music-row input[type="checkbox"] { margin: 0; }
     .landing-center .play-btn { padding: 14px 48px; font: 700 18px Rubik, sans-serif; background: #7bed9f; color: #1a1a2e; border: none; border-radius: 10px; cursor: pointer; margin: 16px 0; box-shadow: 0 4px 16px rgba(123,237,159,0.4); }
     .landing-center .play-btn:hover { background: #9bffbf; }
     .landing-center .auth-buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin: 12px 0; }
@@ -165,7 +173,7 @@
     #cookie-banner .cookie-accept { background: #7bed9f; color: #1a1a2e; }
     #cookie-banner .cookie-essential { background: rgba(255,255,255,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.4); }
   </style>
-  <script type="module" crossorigin src="/rescueworld/assets/index-DNVFTx84.js"></script>
+  <script type="module" crossorigin src="/rescueworld/assets/index-BnPHomPU.js"></script>
 </head>
 <body>
   <div id="cookie-banner" class="hidden">
@@ -174,7 +182,7 @@
   </div>
   <div id="landing">
     <header class="landing-top">
-      <span class="logo">PUPPY RESCUE</span>
+      <span class="logo">Adoptar.io</span>
       <nav class="policy-links">
         <a href="privacy.html">Privacy</a>
         <a href="cookies.html">Cookies</a>
@@ -198,10 +206,13 @@
         </div>
       </aside>
       <section class="landing-center">
-        <h1 class="title">PUPPY RESCUE</h1>
+        <h1 class="title">Adoptar.io</h1>
         <div class="nick-row">
           <label for="landing-nick">Nick</label>
-          <input type="text" id="landing-nick" placeholder="rescue123" maxlength="24" autocomplete="off" />
+          <input type="text" id="landing-nick" placeholder="Nickname" maxlength="24" autocomplete="off" />
+        </div>
+        <div class="landing-music-row">
+          <label><input type="checkbox" id="landing-music-toggle" checked /> Music</label>
         </div>
         <button type="button" id="landing-play" class="play-btn">Play</button>
         <div class="auth-buttons" id="landing-auth-buttons">
@@ -229,7 +240,7 @@
   <div id="ui">
     <div class="top-bar">
       <span class="score" id="score">Size: 1</span>
-      <span class="game-title">PUPPY RESCUE</span>
+      <span class="game-title">Adoptar.io</span>
       <span class="timer" id="timer">5:00</span>
       <span id="ping" class="ping-display"></span>
       <div id="auth-area"></div>
@@ -255,6 +266,7 @@
       <p id="lobby-message" class="lobby-message">Waiting for another player…</p>
       <p id="lobby-countdown" class="lobby-countdown hidden"></p>
       <button type="button" id="lobby-ready-btn" class="fight-ally-btn ally-btn hidden">Ready</button>
+      <button type="button" id="lobby-back-btn" class="fight-ally-btn fight-btn" style="margin-top:12px">Back to lobby</button>
     </div>
     <div id="fight-ally-overlay" class="fight-ally-overlay hidden">
       <p class="fight-ally-title">Shelters touching</p>
@@ -264,6 +276,7 @@
         <button type="button" id="fight-ally-ally" class="fight-ally-btn ally-btn">Ally</button>
       </div>
     </div>
+    <div id="cpu-warning" class="cpu-warning hidden">CPU attacking!</div>
     <div id="how-to-play" class="hidden">
       <strong>You are a shelter.</strong> WASD or tap to move. Collect <strong>strays</strong> (brown) — you can hold as many as your size. Bring them to the <strong>Adoption Center</strong> (green circle) to adopt out and <strong>grow</strong>. Green orbs = +size, blue = speed boost.
     </div>
