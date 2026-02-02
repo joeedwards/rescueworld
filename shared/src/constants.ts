@@ -5,8 +5,8 @@ export const TICK_RATE = 25;
 export const TICK_MS = 1000 / TICK_RATE;
 
 /** Map size (world units). */
-export const MAP_WIDTH = 2400;
-export const MAP_HEIGHT = 2400;
+export const MAP_WIDTH = 4800;
+export const MAP_HEIGHT = 4800;
 
 /** Shelter (player) movement speed (units per second). */
 export const SHELTER_SPEED = 280;
@@ -27,7 +27,7 @@ export const RESCUE_RADIUS = 70;
 export const PET_RADIUS = 16;
 
 /** Adoption zone radius. */
-export const ADOPTION_ZONE_RADIUS = 90;
+export const ADOPTION_ZONE_RADIUS = 140;
 /** When shelter radius >= 2x zone radius, shelter is grounded (no move, gravity pulls strays). */
 export const GROUNDED_ZONE_RATIO = 2;
 /** Auto-jump to new area when total adoptions reach this. */
@@ -45,12 +45,14 @@ export const ADOPTION_TICKS_GROUNDED = 80;
 /** Size growth per adoption (higher = faster growth). */
 export const GROWTH_PER_ADOPTION = 1;
 
-/** Combat: minimum size to engage (size 4+). */
-export const COMBAT_MIN_SIZE = 4;
+/** Combat: minimum size to engage (size 10+). No attacks below this size! */
+export const COMBAT_MIN_SIZE = 10;
 /** Combat: grace period ticks before combat starts (gives time to click Ally). */
 export const COMBAT_GRACE_TICKS = 50; // 2 seconds at 25Hz
-/** Combat: size units transferred per resolved fight. */
+/** Combat: size units transferred per resolved fight (base). */
 export const COMBAT_TRANSFER_PER_WIN = 2;
+/** Combat: winner size divisor for scaling transfer (e.g. 10 → 200 vs 20 transfers 20 in one tick). */
+export const COMBAT_TRANSFER_SIZE_RATIO_DIVISOR = 10;
 /** Combat: weight for pets carried when computing strength. */
 export const COMBAT_PET_WEIGHT = 2;
 /** Combat: strength to win-probability weight. */
@@ -59,6 +61,13 @@ export const COMBAT_STRENGTH_WEIGHT = 0.15;
 export const COMBAT_STRAY_VARIANCE = 0.005;
 /** Combat: maximum variance applied to win chance. */
 export const COMBAT_MAX_VARIANCE = 0.2;
+
+/** Early-game protection: minimum size before elimination is allowed. */
+export const EARLY_GAME_PROTECTION_SIZE = 10;
+/** Early-game protection ends when someone reaches this many adoptions. */
+export const EARLY_GAME_PROTECTION_ADOPTIONS = 50;
+/** Early-game protection ends after this many ticks (60 seconds at 25 Hz). */
+export const EARLY_GAME_PROTECTION_TICKS = 60 * 25;
 
 /** Initial shelter size (capacity = size). */
 export const INITIAL_SHELTER_SIZE = 1;
@@ -87,3 +96,27 @@ export const SPEED_BOOST_MULTIPLIER = 1.5;
 
 /** Pickup spawn interval (ticks). */
 export const PICKUP_SPAWN_TICKS = 200;
+
+/** Adoption milestone to win the match. */
+export const ADOPTION_MILESTONE_WIN = 150;
+
+/** Anti-stall: ticks without any adoption before scarcity kicks in (30 seconds). */
+export const SCARCITY_TRIGGER_TICKS = 30 * 25;
+
+/** Total match adoptions milestone to spawn satellite adoption zones. */
+export const SATELLITE_ZONE_MILESTONE = 75;
+
+/** Event milestones for global events. */
+export const EVENT_MILESTONES = [50, 100, 200, 300] as const;
+
+/** Rescue Tokens earned per pet adopted out. */
+export const TOKENS_PER_ADOPTION = 5;
+
+/** Cost to build a shelter (ground at location). */
+export const SHELTER_BUILD_COST = 250;
+
+/** Van base size for drawing (fixed, doesn't grow). */
+export const VAN_BASE_SIZE = 50;
+
+/** Max pets a van can carry (before building shelter). */
+export const VAN_MAX_CAPACITY = 50;

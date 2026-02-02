@@ -18,7 +18,7 @@ import {
   SPEED_BOOST_MULTIPLIER,
   COMBAT_MIN_SIZE,
 } from 'shared';
-import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED } from 'shared';
+import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED, PICKUP_TYPE_PORT, PICKUP_TYPE_BREEDER, VAN_MAX_CAPACITY } from 'shared';
 import {
   INPUT_LEFT,
   INPUT_RIGHT,
@@ -28,7 +28,7 @@ import {
   decodeSnapshot,
   MSG_SNAPSHOT,
 } from 'shared';
-import type { GameSnapshot, PlayerState, PetState, AdoptionZoneState, PickupState } from 'shared';
+import type { GameSnapshot, PlayerState, PetState, AdoptionZoneState, PickupState, ShelterState, BreederShelterState } from 'shared';
 import {
   playMusic,
   playWelcome,
@@ -82,6 +82,7 @@ let lastTotalAdoptions = 0;
 let lastPetsInsideLength = 0;
 let lastSpeedBoostUntil = 0;
 let matchEndPlayed = false;
+let matchEndTokensAwarded = false;
 let growthPopUntil = 0;
 let currentRttMs = 0;
 let highLatencySince = 0;
@@ -98,6 +99,7 @@ const scoreEl = document.getElementById('score')!;
 const carriedEl = document.getElementById('carried')!;
 const tagCooldownEl = document.getElementById('tag-cooldown')!;
 const timerEl = document.getElementById('timer')!;
+const gameClockEl = document.getElementById('game-clock')!;
 const leaderboardEl = document.getElementById('leaderboard')!;
 const connectionOverlayEl = document.getElementById('connection-overlay')!;
 const howToPlayEl = document.getElementById('how-to-play')!;
@@ -119,6 +121,10 @@ const landingProfileName = document.getElementById('landing-profile-name')!;
 const landingProfileAvatar = document.getElementById('landing-profile-avatar')!;
 const landingProfileActions = document.getElementById('landing-profile-actions')!;
 const landingAuthButtons = document.getElementById('landing-auth-buttons')!;
+const referralStatusEl = document.getElementById('referral-status')!;
+const referralLinkEl = document.getElementById('referral-link')!;
+const referralCopyBtn = document.getElementById('referral-copy-btn') as HTMLButtonElement;
+const referralClaimBtn = document.getElementById('referral-claim-btn') as HTMLButtonElement;
 const cookieBannerEl = document.getElementById('cookie-banner')!;
 const cookieAcceptBtn = document.getElementById('cookie-accept')!;
 const cookieEssentialBtn = document.getElementById('cookie-essential')!;
@@ -127,48 +133,487 @@ const fightAllyNameEl = document.getElementById('fight-ally-name')!;
 const fightAllyFightBtn = document.getElementById('fight-ally-fight')!;
 const fightAllyAllyBtn = document.getElementById('fight-ally-ally')!;
 const cpuWarningEl = document.getElementById('cpu-warning')!;
+const actionMenuEl = document.getElementById('action-menu')!;
+const actionMenuCloseEl = document.getElementById('action-menu-close')!;
+const actionSizeTextEl = document.getElementById('action-size-text')!;
+const actionSizeBarEl = document.getElementById('action-size-bar')!;
+const actionTokensTextEl = document.getElementById('action-tokens-text')!;
+const actionTokensBarEl = document.getElementById('action-tokens-bar')!;
+const actionBuildBtnEl = document.getElementById('action-build-btn') as HTMLButtonElement;
+// Upgrade menu elements
+const actionBuildShelterItemEl = document.getElementById('action-build-shelter')!;
+const actionAdoptionCenterItemEl = document.getElementById('action-adoption-center')!;
+const actionGravityItemEl = document.getElementById('action-gravity')!;
+const actionAdvertisingItemEl = document.getElementById('action-advertising')!;
+const actionVanSpeedItemEl = document.getElementById('action-van-speed')!;
+const actionAdoptionBtnEl = document.getElementById('action-adoption-btn') as HTMLButtonElement;
+const actionGravityBtnEl = document.getElementById('action-gravity-btn') as HTMLButtonElement;
+const actionAdvertisingBtnEl = document.getElementById('action-advertising-btn') as HTMLButtonElement;
+const actionVanSpeedBtnEl = document.getElementById('action-van-speed-btn') as HTMLButtonElement;
+const groundBtnEl = document.getElementById('ground-btn')!;
+const portBtnEl = document.getElementById('port-btn')!;
+const buildShelterBtnEl = document.getElementById('build-shelter-btn') as HTMLButtonElement;
+const centerVanBtnEl = document.getElementById('center-van-btn')!;
+const centerShelterBtnEl = document.getElementById('center-shelter-btn')!;
+const gameTokensEl = document.getElementById('game-tokens')!;
 const lobbyOverlayEl = document.getElementById('lobby-overlay')!;
 const lobbyMessageEl = document.getElementById('lobby-message')!;
 const lobbyCountdownEl = document.getElementById('lobby-countdown')!;
 const lobbyReadyBtnEl = document.getElementById('lobby-ready-btn')!;
 const lobbyBackBtnEl = document.getElementById('lobby-back-btn')!;
+const lobbyGiftBtnEl = document.getElementById('lobby-gift-btn')!;
+
+// Breeder Mini-Game Elements
+const breederMinigameEl = document.getElementById('breeder-minigame')!;
+const breederTimerEl = document.getElementById('breeder-timer')!;
+const breederTokensEl = document.getElementById('breeder-tokens')!;
+const breederPetsEl = document.getElementById('breeder-pets')!;
+const breederFoodsEl = document.getElementById('breeder-foods')!;
+const breederResultEl = document.getElementById('breeder-result')!;
+const breederResultTitleEl = document.getElementById('breeder-result-title')!;
+const breederRewardsEl = document.getElementById('breeder-rewards')!;
+const breederCloseBtnEl = document.getElementById('breeder-close-btn')!;
+
+// Daily Gift Elements
+const dailyGiftModalEl = document.getElementById('daily-gift-modal')!;
+const dailyGiftCloseEl = document.getElementById('daily-gift-close')!;
+const dailyGiftSubtitleEl = document.getElementById('daily-gift-subtitle')!;
+const dailyGiftGridEl = document.getElementById('daily-gift-grid')!;
+const dailyGiftClaimBtnEl = document.getElementById('daily-gift-claim-btn') as HTMLButtonElement;
+const dailyGiftBtnEl = document.getElementById('daily-gift-btn')!;
+
+// Breeder Mini-Game State
+type PetType = 'dog' | 'cat' | 'horse' | 'bird';
+type FoodType = 'apple' | 'carrot' | 'chicken' | 'seeds' | 'water' | 'bowl';
+interface BreederPet {
+  type: PetType;
+  rescued: boolean;
+}
+interface BreederGameState {
+  active: boolean;
+  pets: BreederPet[];
+  selectedPetIndex: number | null;
+  timeLeft: number;
+  timerInterval: ReturnType<typeof setInterval> | null;
+  totalPets: number;
+  rescuedCount: number;
+  level: number;
+  selectedIngredients: FoodType[];
+}
+const breederGame: BreederGameState = {
+  active: false,
+  pets: [],
+  selectedPetIndex: null,
+  timeLeft: 30,
+  timerInterval: null,
+  totalPets: 0,
+  rescuedCount: 0,
+  level: 1,
+  selectedIngredients: [],
+};
+
+// Food costs and pet matching
+const FOOD_COSTS: Record<FoodType, number> = {
+  apple: 5,
+  carrot: 8,
+  chicken: 15,
+  seeds: 5,
+  water: 20,
+  bowl: 20,
+};
+
+// Simple food matching for level 1-2 (single ingredient)
+const FOOD_WORKS_ON: Record<FoodType, PetType[]> = {
+  apple: ['horse'],
+  carrot: ['horse', 'bird'],
+  chicken: ['dog', 'cat'],
+  seeds: ['bird'],
+  water: [], // Water alone doesn't work - needs combination
+  bowl: [],  // Bowl alone doesn't work - needs combination
+};
+
+// Meal recipes for higher level breeders
+// Level 3-5: 2 ingredients, Level 6-9: 3 ingredients (water), Level 10+: 4 ingredients (bowl)
+interface MealRecipe {
+  ingredients: FoodType[];
+  worksOn: PetType[];
+}
+
+const MEAL_RECIPES: { [ingredientCount: number]: MealRecipe[] } = {
+  // Level 3-5: 2 ingredients
+  2: [
+    { ingredients: ['chicken', 'carrot'], worksOn: ['dog', 'cat'] },
+    { ingredients: ['seeds', 'apple'], worksOn: ['bird'] },
+    { ingredients: ['apple', 'carrot'], worksOn: ['horse'] },
+  ],
+  // Level 6-9: 3 ingredients (add water)
+  3: [
+    { ingredients: ['water', 'chicken', 'carrot'], worksOn: ['dog', 'cat'] },
+    { ingredients: ['water', 'seeds', 'apple'], worksOn: ['bird'] },
+    { ingredients: ['water', 'apple', 'carrot'], worksOn: ['horse'] },
+  ],
+  // Level 10+: 4 ingredients (add bowl)
+  4: [
+    { ingredients: ['bowl', 'water', 'chicken', 'carrot'], worksOn: ['dog', 'cat'] },
+    { ingredients: ['bowl', 'water', 'seeds', 'apple'], worksOn: ['bird'] },
+    { ingredients: ['bowl', 'water', 'apple', 'carrot'], worksOn: ['horse'] },
+  ],
+};
+
+// Get required ingredient count based on breeder level
+function getRequiredIngredients(level: number): number {
+  if (level <= 2) return 1;
+  if (level <= 5) return 2;
+  if (level <= 9) return 3;
+  return 4; // level 10+
+}
+const PET_EMOJIS: Record<PetType, string> = {
+  dog: '🐕',
+  cat: '🐱',
+  horse: '🐴',
+  bird: '🐦',
+};
 
 const COOKIE_CONSENT_KEY = 'cookieConsent';
 const MODE_KEY = 'rescueworld_mode';
+const REF_KEY = 'rescueworld_ref';
+const SKIN_KEY = 'rescueworld_skin_unlocked';
 let fightAllyTargetId: string | null = null;
 const fightAllyChosenTargets = new Set<string>();
+const sentAllyRequests = new Set<string>(); // Track ally requests we've sent (before overlap)
 let lastAttackWarnTime = 0;
 const ATTACK_WARN_COOLDOWN_MS = 2000;
+
+// Van facing direction: 1 = right, -1 = left (persists when stopped)
+const vanFacingDirections = new Map<string, number>();
+
+// Port animation state: tracks players who are porting
+interface PortAnimation {
+  startTime: number;
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  phase: 'fadeOut' | 'fadeIn';
+}
+const portAnimations = new Map<string, PortAnimation>();
+const PORT_ANIMATION_DURATION = 400; // ms for each phase
+
+// Track previous positions to detect teleports
+const prevPlayerPositions = new Map<string, { x: number; y: number }>();
+
+// Adoption animation state: floating pets traveling to adoption center
+interface AdoptionAnimation {
+  id: string;
+  startTime: number;
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  petType: 'dog' | 'cat' | 'horse' | 'bird';
+}
+const adoptionAnimations: AdoptionAnimation[] = [];
+const ADOPTION_ANIMATION_DURATION = 800; // ms
+const ADOPTION_PET_EMOJIS = { dog: '🐕', cat: '🐈', horse: '🐴', bird: '🐦' };
+let adoptionAnimationId = 0;
+
+function triggerAdoptionAnimation(fromX: number, fromY: number, toX: number, toY: number, count: number): void {
+  const petTypes: Array<'dog' | 'cat' | 'horse' | 'bird'> = ['dog', 'cat', 'horse', 'bird'];
+  const now = Date.now();
+  
+  // Create staggered animations for each adopted pet
+  for (let i = 0; i < count; i++) {
+    const petType = petTypes[Math.floor(Math.random() * petTypes.length)];
+    // Stagger start times and add slight random offset to source position
+    const delay = i * 100;
+    const offsetX = (Math.random() - 0.5) * 30;
+    const offsetY = (Math.random() - 0.5) * 30;
+    
+    adoptionAnimations.push({
+      id: `adopt-${adoptionAnimationId++}`,
+      startTime: now + delay,
+      fromX: fromX + offsetX,
+      fromY: fromY + offsetY,
+      toX,
+      toY,
+      petType,
+    });
+  }
+}
+
 type MatchPhase = 'lobby' | 'countdown' | 'playing';
 let matchPhase: MatchPhase = 'playing';
 let countdownRemainingSec = 0;
 let readyCount = 0;
 let iAmReady = false;
-const MONEY_KEY = 'rescueworld_money';
+const TOKENS_KEY = 'rescueworld_tokens';
+const COLOR_KEY = 'rescueworld_color';
+const UNLOCKED_COLORS_KEY = 'rescueworld_unlocked_colors';
 const BOOST_PRICES = { size: 50, speed: 30, adoptSpeed: 40 } as const;
+const COLOR_PRICES = { preset: 50, custom: 200, gradient: 500 } as const;
+const FREE_COLORS = ['#7bed9f', '#70a3ff', '#ff9f43'];
+const PRESET_COLORS = ['#e74c3c', '#9b59b6', '#f1c40f', '#1abc9c', '#e91e63', '#00bcd4'];
 
 type AuthMe = { displayName: string | null; signedIn: boolean };
+type ReferralInfo = {
+  referralCode: string;
+  referralCount: number;
+  rewardEligible: boolean;
+  rewardClaimed: boolean;
+  rewardType: string;
+  rewardThreshold: number;
+  tokensBonus: number;
+};
 let selectedMode: 'ffa' | 'teams' | 'solo' = 'ffa';
 const pendingBoosts = { sizeBonus: 0, speedBoost: false, adoptSpeed: false };
 let currentDisplayName: string | null = null;
 let isSignedIn = false;
 
-function getMoney(): number {
-  return parseInt(localStorage.getItem(MONEY_KEY) || '0', 10);
+function getTokens(): number {
+  return parseInt(localStorage.getItem(TOKENS_KEY) || '0', 10);
 }
-function setMoney(n: number): void {
-  localStorage.setItem(MONEY_KEY, String(Math.max(0, n)));
+function setTokens(n: number): void {
+  localStorage.setItem(TOKENS_KEY, String(Math.max(0, n)));
 }
-function updateLandingMoney(): void {
-  const el = document.getElementById('landing-money');
-  if (el) el.textContent = `Money: ${getMoney()}`;
-  const m = getMoney();
+function updateLandingTokens(): void {
+  const el = document.getElementById('landing-tokens');
+  if (el) el.textContent = `Tokens: ${getTokens()} RT`;
+  const m = getTokens();
   document.querySelectorAll('.landing-buy').forEach((btn) => {
     const b = (btn as HTMLElement).dataset.boost as keyof typeof BOOST_PRICES;
     if (!b || !(b in BOOST_PRICES)) return;
     const price = BOOST_PRICES[b as keyof typeof BOOST_PRICES];
     (btn as HTMLButtonElement).disabled = m < price || (b === 'speed' && pendingBoosts.speedBoost) || (b === 'adoptSpeed' && pendingBoosts.adoptSpeed);
   });
+}
+
+// Color management
+function getSelectedColor(): string {
+  return localStorage.getItem(COLOR_KEY) || '#7bed9f';
+}
+function setSelectedColor(color: string): void {
+  localStorage.setItem(COLOR_KEY, color);
+}
+function getUnlockedColors(): { preset: boolean; custom: string | null; gradient: string | null } {
+  try {
+    const data = localStorage.getItem(UNLOCKED_COLORS_KEY);
+    if (data) return JSON.parse(data);
+  } catch { /* ignore */ }
+  return { preset: false, custom: null, gradient: null };
+}
+function setUnlockedColors(data: { preset: boolean; custom: string | null; gradient: string | null }): void {
+  localStorage.setItem(UNLOCKED_COLORS_KEY, JSON.stringify(data));
+}
+function updateColorUI(): void {
+  const selected = getSelectedColor();
+  const unlocked = getUnlockedColors();
+  const m = getTokens();
+  
+  // Update free color buttons
+  document.querySelectorAll('.color-btn').forEach((btn) => {
+    const color = (btn as HTMLElement).dataset.color;
+    btn.classList.toggle('selected', color === selected);
+  });
+  
+  // Update preset colors row
+  const presetRow = document.getElementById('preset-colors-row');
+  if (presetRow) {
+    presetRow.style.display = unlocked.preset ? 'flex' : 'none';
+    presetRow.querySelectorAll('.preset-color').forEach((btn) => {
+      const color = (btn as HTMLElement).dataset.color;
+      btn.classList.toggle('selected', color === selected);
+    });
+  }
+  
+  // Update buy buttons
+  document.querySelectorAll('.color-buy').forEach((btn) => {
+    const colorType = (btn as HTMLElement).dataset.color as keyof typeof COLOR_PRICES;
+    const price = COLOR_PRICES[colorType];
+    const isUnlocked = colorType === 'preset' ? unlocked.preset : 
+                       colorType === 'custom' ? !!unlocked.custom :
+                       !!unlocked.gradient;
+    (btn as HTMLButtonElement).disabled = isUnlocked || m < price;
+    btn.classList.toggle('unlocked', isUnlocked);
+    if (isUnlocked) {
+      if (colorType === 'preset') (btn as HTMLElement).textContent = 'Preset Colors Unlocked';
+      else if (colorType === 'custom') (btn as HTMLElement).textContent = 'Custom Color: Click to use';
+      else if (colorType === 'gradient') (btn as HTMLElement).textContent = 'Gradient: Click to use';
+    }
+  });
+}
+
+let toastTimeout: ReturnType<typeof setTimeout> | null = null;
+function showToast(message: string): void {
+  let toastEl = document.getElementById('toast');
+  if (!toastEl) {
+    toastEl = document.createElement('div');
+    toastEl.id = 'toast';
+    toastEl.className = 'toast';
+    document.body.appendChild(toastEl);
+  }
+  toastEl.textContent = message;
+  toastEl.classList.add('show');
+  if (toastTimeout) clearTimeout(toastTimeout);
+  toastTimeout = setTimeout(() => {
+    toastEl!.classList.remove('show');
+  }, 3000);
+}
+
+// Match-wide announcement system
+const announcementQueue: string[] = [];
+let announcementEl: HTMLElement | null = null;
+let announcementAnimating = false;
+
+function showAnnouncement(messages: string[]): void {
+  announcementQueue.push(...messages);
+  processAnnouncementQueue();
+}
+
+function processAnnouncementQueue(): void {
+  if (announcementAnimating || announcementQueue.length === 0) return;
+  
+  const message = announcementQueue.shift()!;
+  announcementAnimating = true;
+  
+  // Create or get announcement container
+  if (!announcementEl) {
+    announcementEl = document.createElement('div');
+    announcementEl.id = 'announcement-bar';
+    announcementEl.style.cssText = `
+      position: fixed;
+      top: 60px;
+      left: 0;
+      width: 100%;
+      height: 40px;
+      background: linear-gradient(90deg, rgba(255,107,107,0) 0%, rgba(255,107,107,0.9) 15%, rgba(255,107,107,0.9) 85%, rgba(255,107,107,0) 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      z-index: 150;
+      pointer-events: none;
+    `;
+    document.body.appendChild(announcementEl);
+  }
+  
+  // Create scrolling text
+  const textEl = document.createElement('div');
+  textEl.style.cssText = `
+    white-space: nowrap;
+    font: bold 18px 'Rubik', sans-serif;
+    color: #fff;
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.8), 0 0 10px rgba(255,107,107,0.8);
+    animation: announcementScroll 9s linear forwards;
+  `;
+  textEl.textContent = `⚠️ ${message} ⚠️`;
+  
+  // Add animation keyframes if not already added
+  if (!document.getElementById('announcement-keyframes')) {
+    const style = document.createElement('style');
+    style.id = 'announcement-keyframes';
+    style.textContent = `
+      @keyframes announcementScroll {
+        0% { transform: translateX(100vw); opacity: 0; }
+        10% { opacity: 1; }
+        90% { opacity: 1; }
+        100% { transform: translateX(-100vw); opacity: 0; }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+  
+  announcementEl.style.display = 'flex'; // Show bar when new announcement
+  announcementEl.innerHTML = '';
+  announcementEl.appendChild(textEl);
+  
+  // When animation ends, hide bar and process next in queue
+  textEl.addEventListener('animationend', () => {
+    announcementAnimating = false;
+    // Hide the bar if no more announcements
+    if (announcementQueue.length === 0 && announcementEl) {
+      announcementEl.style.display = 'none';
+    }
+    processAnnouncementQueue();
+  });
+}
+
+function getReferralBasePath(): string {
+  const pathname = window.location.pathname;
+  if (pathname.includes('rescueworld')) return '/rescueworld/';
+  const lastSlash = pathname.lastIndexOf('/');
+  return lastSlash <= 0 ? '/' : pathname.slice(0, lastSlash + 1);
+}
+
+function storeReferralFromUrl(): void {
+  try {
+    const url = new URL(window.location.href);
+    const ref = url.searchParams.get('ref');
+    if (ref) {
+      localStorage.setItem(REF_KEY, ref);
+      url.searchParams.delete('ref');
+      window.history.replaceState({}, document.title, url.toString());
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function getStoredReferralCode(): string | null {
+  try {
+    const ref = localStorage.getItem(REF_KEY);
+    return ref && ref.length ? ref : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildAuthUrl(path: string): string {
+  const ref = getStoredReferralCode();
+  return ref ? `${path}?ref=${encodeURIComponent(ref)}` : path;
+}
+
+function buildReferralLink(code: string): string {
+  const base = getReferralBasePath();
+  return `${window.location.origin}${base}?ref=${encodeURIComponent(code)}`;
+}
+
+let referralInfo: ReferralInfo | null = null;
+
+async function fetchReferralInfo(): Promise<void> {
+  if (!isSignedIn) {
+    referralInfo = null;
+    return;
+  }
+  try {
+    const res = await fetch('/referrals/me', { credentials: 'include' });
+    if (!res.ok) {
+      referralInfo = null;
+      return;
+    }
+    referralInfo = (await res.json()) as ReferralInfo;
+  } catch {
+    referralInfo = null;
+  }
+}
+
+function updateReferralUI(): void {
+  if (!isSignedIn || !referralInfo) {
+    referralStatusEl.textContent = 'Sign in to get your referral link.';
+    referralLinkEl.classList.add('referral-hidden');
+    referralCopyBtn.classList.add('referral-hidden');
+    referralClaimBtn.classList.add('referral-hidden');
+    return;
+  }
+
+  const link = buildReferralLink(referralInfo.referralCode);
+  referralStatusEl.textContent = `Referrals: ${referralInfo.referralCount}/${referralInfo.rewardThreshold} (OAuth signups)`;
+  referralLinkEl.textContent = link;
+  referralLinkEl.classList.remove('referral-hidden');
+  referralCopyBtn.classList.remove('referral-hidden');
+
+  const showClaim = referralInfo.rewardEligible && !referralInfo.rewardClaimed;
+  if (showClaim) referralClaimBtn.classList.remove('referral-hidden');
+  else referralClaimBtn.classList.add('referral-hidden');
 }
 
 async function fetchAndRenderAuth(): Promise<void> {
@@ -187,20 +632,21 @@ async function fetchAndRenderAuth(): Promise<void> {
       landingProfileName.textContent = name;
       landingProfileAvatar.textContent = name.charAt(0).toUpperCase();
       landingProfileActions.innerHTML = `<a href="/auth/signout" class="auth-link" style="font-size:12px">Sign out</a>`;
-      landingAuthButtons.innerHTML = `<a href="/auth/google" class="auth-link" style="display:inline-block">Sign in with Google</a> <a href="#" id="landing-facebook" style="opacity:0.7">Sign in with Facebook</a>`;
+      landingAuthButtons.innerHTML = `<a href="${buildAuthUrl('/auth/google')}" class="auth-link" style="display:inline-block">Sign in with Google</a> <a href="${buildAuthUrl('/auth/facebook')}" class="auth-link" style="display:inline-block">Sign in with Facebook</a>`;
       if (landingNickInput) landingNickInput.placeholder = name;
     } else {
       const guestLabel = name ? `${escapeHtml(name)}` : 'Guest';
       authAreaEl.innerHTML = `
-        <a href="/auth/google" class="auth-link">Sign in with Google</a>
+        <a href="${buildAuthUrl('/auth/google')}" class="auth-link">Sign in with Google</a>
+        <a href="${buildAuthUrl('/auth/facebook')}" class="auth-link">Sign in with Facebook</a>
         <span class="auth-guest">${guestLabel}</span>
       `;
       landingProfileName.textContent = name || 'Guest';
       landingProfileAvatar.textContent = name ? name.charAt(0).toUpperCase() : '?';
       landingProfileActions.innerHTML = '';
       landingAuthButtons.innerHTML = `
-        <a href="/auth/google">Sign in with Google</a>
-        <a href="#" id="landing-facebook" style="opacity:0.7">Sign in with Facebook</a>
+        <a href="${buildAuthUrl('/auth/google')}">Sign in with Google</a>
+        <a href="${buildAuthUrl('/auth/facebook')}">Sign in with Facebook</a>
       `;
       if (landingNickInput) landingNickInput.placeholder = name || 'Nickname';
     }
@@ -209,15 +655,19 @@ async function fetchAndRenderAuth(): Promise<void> {
     currentDisplayName = null;
     isSignedIn = false;
     authAreaEl.innerHTML = `
-      <a href="/auth/google" class="auth-link">Sign in with Google</a>
+      <a href="${buildAuthUrl('/auth/google')}" class="auth-link">Sign in with Google</a>
+      <a href="${buildAuthUrl('/auth/facebook')}" class="auth-link">Sign in with Facebook</a>
       <span class="auth-guest">Guest</span>
     `;
     landingProfileName.textContent = 'Guest';
     landingProfileAvatar.textContent = '?';
     landingProfileActions.innerHTML = '';
-    landingAuthButtons.innerHTML = `<a href="/auth/google">Sign in with Google</a> <a href="#" id="landing-facebook" style="opacity:0.7">Sign in with Facebook</a>`;
+    landingAuthButtons.innerHTML = `<a href="${buildAuthUrl('/auth/google')}">Sign in with Google</a> <a href="${buildAuthUrl('/auth/facebook')}">Sign in with Facebook</a>`;
     if (landingNickInput) landingNickInput.placeholder = 'Nickname';
   }
+  await fetchReferralInfo();
+  updateReferralUI();
+  await fetchDailyGiftStatus();
 }
 
 async function getOrCreateDisplayName(): Promise<string> {
@@ -269,8 +719,40 @@ function setInputFlag(flag: number, on: boolean): void {
   else inputFlags &= ~flag;
 }
 
+let wasPlayerObserver = false;
+function isPlayerObserver(): boolean {
+  const me = latestSnapshot?.players.find((p) => p.id === myPlayerId);
+  return me?.eliminated === true;
+}
+
+function checkObserverModeStart(): void {
+  const isObserver = isPlayerObserver();
+  if (isObserver && !wasPlayerObserver) {
+    // Just got eliminated - initialize observer camera at player's last position
+    const me = latestSnapshot?.players.find((p) => p.id === myPlayerId);
+    if (me) {
+      observerCameraX = me.x;
+      observerCameraY = me.y;
+    }
+  }
+  wasPlayerObserver = isObserver;
+}
+
 function onKeyDown(e: KeyboardEvent): void {
   keys[e.code] = true;
+  
+  // Block movement during breeder mini-game
+  if (breederGame.active) {
+    e.preventDefault();
+    return;
+  }
+  
+  // Observer mode: use keys for camera panning instead of movement
+  if (isPlayerObserver()) {
+    e.preventDefault();
+    return; // Handle panning in tick loop
+  }
+  
   if (e.code === 'KeyW' || e.code === 'ArrowUp') setInputFlag(INPUT_UP, true);
   if (e.code === 'KeyS' || e.code === 'ArrowDown') setInputFlag(INPUT_DOWN, true);
   if (e.code === 'KeyA' || e.code === 'ArrowLeft') setInputFlag(INPUT_LEFT, true);
@@ -280,6 +762,19 @@ function onKeyDown(e: KeyboardEvent): void {
 
 function onKeyUp(e: KeyboardEvent): void {
   keys[e.code] = false;
+  
+  // Block movement during breeder mini-game
+  if (breederGame.active) {
+    e.preventDefault();
+    return;
+  }
+  
+  // Observer mode: don't change movement flags
+  if (isPlayerObserver()) {
+    e.preventDefault();
+    return;
+  }
+  
   if (e.code === 'KeyW' || e.code === 'ArrowUp') setInputFlag(INPUT_UP, false);
   if (e.code === 'KeyS' || e.code === 'ArrowDown') setInputFlag(INPUT_DOWN, false);
   if (e.code === 'KeyA' || e.code === 'ArrowLeft') setInputFlag(INPUT_LEFT, false);
@@ -294,6 +789,16 @@ function hasMovementKeyDown(): boolean {
 
 function applyJoystickToInput(): void {
   if (hasMovementKeyDown()) return;
+  
+  // Block joystick movement during breeder mini-game
+  if (breederGame.active) {
+    setInputFlag(INPUT_LEFT, false);
+    setInputFlag(INPUT_RIGHT, false);
+    setInputFlag(INPUT_UP, false);
+    setInputFlag(INPUT_DOWN, false);
+    return;
+  }
+  
   if (!joystickActive) {
     // Clear all movement flags when joystick is inactive
     setInputFlag(INPUT_LEFT, false);
@@ -374,18 +879,68 @@ canvas.addEventListener('touchcancel', (e) => {
   setInputFlag(INPUT_DOWN, false);
   sendInputImmediately(); // Send stop immediately to prevent momentum
 }, { passive: false });
+// Observer mode drag state
+let observerDragging = false;
+let observerDragStartX = 0;
+let observerDragStartY = 0;
+
 canvas.addEventListener('mousedown', (e) => {
   e.preventDefault();
+  if (isPlayerObserver()) {
+    observerDragging = true;
+    observerDragStartX = e.clientX;
+    observerDragStartY = e.clientY;
+  }
 });
 canvas.addEventListener('mousemove', (e) => {
   e.preventDefault();
+  if (isPlayerObserver() && observerDragging) {
+    const dx = e.clientX - observerDragStartX;
+    const dy = e.clientY - observerDragStartY;
+    observerCameraX -= dx;
+    observerCameraY -= dy;
+    // Clamp to map bounds
+    observerCameraX = Math.max(canvas.width / 2, Math.min(MAP_WIDTH - canvas.width / 2, observerCameraX));
+    observerCameraY = Math.max(canvas.height / 2, Math.min(MAP_HEIGHT - canvas.height / 2, observerCameraY));
+    observerDragStartX = e.clientX;
+    observerDragStartY = e.clientY;
+  }
 });
 canvas.addEventListener('mouseup', (e) => {
   e.preventDefault();
+  observerDragging = false;
 });
 canvas.addEventListener('contextmenu', (e) => {
   e.preventDefault();
 });
+
+// --- Click on other shelters to send ally request ---
+canvas.addEventListener('click', (e) => {
+  if (!latestSnapshot || !myPlayerId || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const screenX = (e.clientX - rect.left) * scaleX;
+  const screenY = (e.clientY - rect.top) * scaleY;
+  const cam = getCamera();
+  const worldX = screenX + cam.x;
+  const worldY = screenY + cam.y;
+  // Check if click is on another player's shelter
+  for (const pl of latestSnapshot.players) {
+    if (pl.id === myPlayerId) continue;
+    if (pl.eliminated) continue;
+    const half = SHELTER_BASE_RADIUS + pl.size * SHELTER_RADIUS_PER_SIZE;
+    if (worldX >= pl.x - half && worldX <= pl.x + half && worldY >= pl.y - half && worldY <= pl.y + half) {
+      // Clicked on this player's shelter - send ally request
+      if (!sentAllyRequests.has(pl.id)) {
+        gameWs.send(JSON.stringify({ type: 'allyRequest', targetId: pl.id }));
+        sentAllyRequests.add(pl.id);
+      }
+      break;
+    }
+  }
+});
+
 window.addEventListener('keydown', onKeyDown);
 window.addEventListener('keyup', onKeyUp);
 
@@ -457,6 +1012,10 @@ const CAMERA_SMOOTH = 0.22;
 let cameraPanOffsetX = 0;
 let cameraPanOffsetY = 0;
 const PAN_THRESHOLD_PX = 10;
+// Observer mode: camera position for eliminated players
+let observerCameraX = MAP_WIDTH / 2;
+let observerCameraY = MAP_HEIGHT / 2;
+const OBSERVER_PAN_SPEED = 15; // pixels per frame
 let isPanning = false;
 let panStartClientX = 0;
 let panStartClientY = 0;
@@ -471,6 +1030,18 @@ const PLAYER_DISPLAY_SMOOTH = 0.28; // lerp toward predicted position per frame
 function getCamera(): { x: number; y: number; w: number; h: number } {
   const w = canvas.width;
   const h = canvas.height;
+  
+  // Check if player is eliminated (observer mode)
+  const me = latestSnapshot?.players.find((p) => p.id === myPlayerId);
+  const isObserver = me?.eliminated === true;
+  
+  if (isObserver) {
+    // Observer mode: free camera panning
+    const camX = Math.max(0, Math.min(MAP_WIDTH - w, observerCameraX - w / 2));
+    const camY = Math.max(0, Math.min(MAP_HEIGHT - h, observerCameraY - h / 2));
+    return { x: camX, y: camY, w, h };
+  }
+  
   let px = predictedPlayer?.x ?? MAP_WIDTH / 2;
   let py = predictedPlayer?.y ?? MAP_HEIGHT / 2;
   if (!Number.isFinite(px) || !Number.isFinite(py)) {
@@ -528,6 +1099,9 @@ function predictPlayerTick(p: PlayerState, inputFlags: number): PlayerState {
   return predictPlayerByDt(p, inputFlags, 1 / TICK_RATE);
 }
 
+// Fixed radius for van collision - matches server VAN_FIXED_RADIUS
+const VAN_FIXED_RADIUS = 30;
+
 // --- Prediction: advance by dt seconds (per-frame for smooth camera) ---
 function predictPlayerByDt(p: PlayerState, inputFlags: number, dtSec: number): PlayerState {
   let dx = 0,
@@ -545,7 +1119,8 @@ function predictPlayerByDt(p: PlayerState, inputFlags: number, dtSec: number): P
     vx = (dx / len) * step;
     vy = (dy / len) * step;
   }
-  const radius = SHELTER_BASE_RADIUS + p.size * SHELTER_RADIUS_PER_SIZE;
+  // Use fixed van radius for map edge clamping (vans don't grow, shelters are separate)
+  const radius = VAN_FIXED_RADIUS;
   let x = p.x + vx;
   let y = p.y + vy;
   x = Math.max(radius, Math.min(MAP_WIDTH - radius, x));
@@ -638,6 +1213,18 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
       pendingBoosts.speedBoost = false;
       pendingBoosts.adoptSpeed = false;
     }
+    // Send selected color
+    const selectedColor = getSelectedColor();
+    if (selectedColor) {
+      gameWs.send(JSON.stringify({ type: 'setColor', color: selectedColor }));
+    }
+    // Send CPU breeder behavior option for solo mode
+    if (options?.mode === 'solo' && cpuShutdownBreedersEl) {
+      gameWs.send(JSON.stringify({ 
+        type: 'setCpuBreederBehavior', 
+        canShutdown: cpuShutdownBreedersEl.checked 
+      }));
+    }
   };
   gameWsLocal.onmessage = (e) => {
     if (typeof e.data === 'string') {
@@ -677,6 +1264,23 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           if (currentRttMs > RTT_HIGH_MS) highLatencySince = highLatencySince || Date.now();
           else highLatencySince = 0;
         }
+        if (msg.type === 'groundFailed' && typeof msg.reason === 'string') {
+          showToast(msg.reason);
+        }
+        // Breeder mini-game messages
+        if (msg.type === 'breederStart' && typeof msg.petCount === 'number') {
+          const level = typeof msg.level === 'number' ? msg.level : 1;
+          startBreederMiniGame(msg.petCount, level);
+        }
+        if (msg.type === 'breederRewards') {
+          const tokenBonus = typeof msg.tokenBonus === 'number' ? msg.tokenBonus : 0;
+          const rewards = Array.isArray(msg.rewards) ? msg.rewards : [];
+          showBreederRewards(tokenBonus, rewards);
+        }
+        // Match-wide announcements
+        if (msg.type === 'announcement' && Array.isArray(msg.messages)) {
+          showAnnouncement(msg.messages);
+        }
       } catch {
         // ignore
       }
@@ -694,6 +1298,26 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
       for (const p of snap.players) {
         const prev = interpolatedPlayers.get(p.id)?.next ?? p;
         interpolatedPlayers.set(p.id, { prev, next: { ...p }, t: 0 });
+        
+        // Detect teleport (large position change) and trigger port animation
+        const prevPos = prevPlayerPositions.get(p.id);
+        if (prevPos) {
+          const dx = p.x - prevPos.x;
+          const dy = p.y - prevPos.y;
+          const dist = Math.hypot(dx, dy);
+          // If moved more than 200 units in one tick, it's a teleport
+          if (dist > 200 && !portAnimations.has(p.id)) {
+            portAnimations.set(p.id, {
+              startTime: Date.now(),
+              fromX: prevPos.x,
+              fromY: prevPos.y,
+              toX: p.x,
+              toY: p.y,
+              phase: 'fadeIn', // Start appearing at new location
+            });
+          }
+        }
+        prevPlayerPositions.set(p.id, { x: p.x, y: p.y });
       }
       for (const pet of snap.pets) {
         const prev = interpolatedPets.get(pet.id)?.next ?? pet;
@@ -701,13 +1325,37 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
       }
       const me = snap.players.find((q) => q.id === myPlayerId);
       if (me) {
-        if (me.size > lastKnownSize) {
+        // Only show +1 Size popup if:
+        // - Size increased (me.size > lastKnownSize)
+        // - Van doesn't have a shelter (size growth goes to van)
+        // - Van size is under 50
+        const hasShelter = !!me.shelterId;
+        if (me.size > lastKnownSize && !hasShelter && me.size < 50) {
           growthPopUntil = Date.now() + 1500;
+          playPickupGrowth();
+        } else if (me.size > lastKnownSize) {
+          // Still play sound but don't show popup
           playPickupGrowth();
         }
         if ((me.speedBoostUntil ?? 0) > lastSpeedBoostUntil) playPickupSpeed();
         lastSpeedBoostUntil = me.speedBoostUntil ?? 0;
-        if (me.totalAdoptions > lastTotalAdoptions) playAdoption();
+        if (me.totalAdoptions > lastTotalAdoptions) {
+          playAdoption();
+          // Trigger adoption animation
+          const adoptionCount = me.totalAdoptions - lastTotalAdoptions;
+          const myShelter = latestSnapshot?.shelters?.find(s => s.ownerId === myPlayerId);
+          
+          if (myShelter?.hasAdoptionCenter) {
+            // Pets leaving shelter and being adopted (float up and fade out)
+            triggerAdoptionAnimation(myShelter.x, myShelter.y, myShelter.x, myShelter.y - 100, adoptionCount);
+          } else {
+            // Pets going from van to main adoption center
+            const zone = latestSnapshot?.adoptionZones?.[0];
+            if (zone) {
+              triggerAdoptionAnimation(me.x, me.y, zone.x, zone.y, adoptionCount);
+            }
+          }
+        }
         lastTotalAdoptions = me.totalAdoptions;
         if (me.petsInside.length > lastPetsInsideLength) playStrayCollected();
         lastPetsInsideLength = me.petsInside.length;
@@ -734,6 +1382,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     latestSnapshot = null;
     predictedPlayer = null;
     matchPhase = 'playing';
+    sentAllyRequests.clear();
     iAmReady = false;
   };
   await new Promise<void>((resolve, reject) => {
@@ -746,8 +1395,8 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     check();
   });
   connectionOverlayEl.classList.add('hidden');
-  howToPlayEl.classList.remove('hidden');
-  setTimeout(() => howToPlayEl.classList.add('hidden'), 12000);
+  // How-to-play is now on the landing page, no need to show in-game
+  howToPlayEl.classList.add('hidden');
   playMusic();
   pingIntervalId = setInterval(() => {
     if (gameWs?.readyState === WebSocket.OPEN) {
@@ -765,6 +1414,20 @@ function tick(now: number): void {
   lastTickTime = now;
 
   applyJoystickToInput();
+  
+  // Check if player just became an observer (eliminated)
+  checkObserverModeStart();
+  
+  // Observer mode: pan camera with WASD/arrows when eliminated
+  if (isPlayerObserver()) {
+    if (keys['KeyW'] || keys['ArrowUp']) observerCameraY -= OBSERVER_PAN_SPEED;
+    if (keys['KeyS'] || keys['ArrowDown']) observerCameraY += OBSERVER_PAN_SPEED;
+    if (keys['KeyA'] || keys['ArrowLeft']) observerCameraX -= OBSERVER_PAN_SPEED;
+    if (keys['KeyD'] || keys['ArrowRight']) observerCameraX += OBSERVER_PAN_SPEED;
+    // Clamp to map bounds
+    observerCameraX = Math.max(canvas.width / 2, Math.min(MAP_WIDTH - canvas.width / 2, observerCameraX));
+    observerCameraY = Math.max(canvas.height / 2, Math.min(MAP_HEIGHT - canvas.height / 2, observerCameraY));
+  }
 
   const matchOver = latestSnapshot != null && latestSnapshot.matchEndAt > 0 && latestSnapshot.tick >= latestSnapshot.matchEndAt;
   const meForActive = latestSnapshot?.players.find((p) => p.id === myPlayerId);
@@ -782,20 +1445,8 @@ function tick(now: number): void {
     const prevX = predictedPlayer.x;
     const prevY = predictedPlayer.y;
     predictedPlayer = predictPlayerByDt(predictedPlayer, inputFlags, dt);
-    const myR = SHELTER_BASE_RADIUS + predictedPlayer.size * SHELTER_RADIUS_PER_SIZE;
-    if (latestSnapshot) {
-      for (const pl of latestSnapshot.players) {
-        if (pl.id === myPlayerId) continue;
-        const other = getInterpolatedPlayer(pl.id) ?? pl;
-        const or = SHELTER_BASE_RADIUS + other.size * SHELTER_RADIUS_PER_SIZE;
-        const overlap =
-          Math.abs(predictedPlayer.x - other.x) <= myR + or && Math.abs(predictedPlayer.y - other.y) <= myR + or;
-        if (overlap) {
-          predictedPlayer = { ...predictedPlayer, x: prevX, y: prevY };
-          break;
-        }
-      }
-    }
+    // Vans can pass through each other - collision is only between shelters (handled by server)
+    // No client-side van-van collision check needed
     // Smoothed display position so shelter doesn't jitter when server snapshots overwrite predictedPlayer
     let tx = predictedPlayer.x;
     let ty = predictedPlayer.y;
@@ -814,30 +1465,42 @@ function tick(now: number): void {
       playerDisplayX = tx;
       playerDisplayY = ty;
     }
-    // Show Fight/Ally when my shelter overlaps another HUMAN player — AABB to match server
-    // Show CPU warning when overlapping a CPU (no prompt)
+    // Show Fight/Ally when my SHELTER overlaps another player's SHELTER — vans cannot attack
+    // Show CPU warning when overlapping a CPU shelter (no prompt)
     let overlappingId: string | null = null;
     let cpuOverlapping = false;
     if (latestSnapshot) {
-      const myX = playerDisplayX ?? predictedPlayer.x;
-      const myY = playerDisplayY ?? predictedPlayer.y;
-      const mySize = predictedPlayer.size;
-      const myR = SHELTER_BASE_RADIUS + mySize * SHELTER_RADIUS_PER_SIZE;
-      for (const pl of latestSnapshot.players) {
-        if (pl.id === myPlayerId) continue;
-        const other = getInterpolatedPlayer(pl.id) ?? pl;
-        const or = SHELTER_BASE_RADIUS + other.size * SHELTER_RADIUS_PER_SIZE;
-        const overlap = Math.abs(myX - other.x) <= myR + or && Math.abs(myY - other.y) <= myR + or;
-        if (!overlap) continue;
-        // Combat only starts at size 4+
-        if (mySize < COMBAT_MIN_SIZE || other.size < COMBAT_MIN_SIZE) continue;
-        if (pl.id.startsWith('cpu-')) {
-          cpuOverlapping = true;
-          continue;
-        }
-        if (!fightAllyChosenTargets.has(pl.id)) {
-          overlappingId = pl.id;
-          break;
+      const me = latestSnapshot.players.find(p => p.id === myPlayerId);
+      const myShelter = me?.shelterId ? latestSnapshot.shelters?.find(s => s.id === me.shelterId) : null;
+      
+      // Only show combat if I have a shelter
+      if (myShelter) {
+        const myR = SHELTER_BASE_RADIUS + myShelter.size * SHELTER_RADIUS_PER_SIZE;
+        
+        for (const pl of latestSnapshot.players) {
+          if (pl.id === myPlayerId) continue;
+          
+          // Other player must also have a shelter for combat
+          const otherShelter = pl.shelterId ? latestSnapshot.shelters?.find(s => s.id === pl.shelterId) : null;
+          if (!otherShelter) continue;
+          
+          const or = SHELTER_BASE_RADIUS + otherShelter.size * SHELTER_RADIUS_PER_SIZE;
+          // Use SHELTER positions for overlap detection
+          const overlap = Math.abs(myShelter.x - otherShelter.x) <= myR + or && 
+                          Math.abs(myShelter.y - otherShelter.y) <= myR + or;
+          if (!overlap) continue;
+          
+          // Combat only starts at size 10+
+          if (myShelter.size < COMBAT_MIN_SIZE || otherShelter.size < COMBAT_MIN_SIZE) continue;
+          
+          if (pl.id.startsWith('cpu-')) {
+            cpuOverlapping = true;
+            continue;
+          }
+          if (!fightAllyChosenTargets.has(pl.id)) {
+            overlappingId = pl.id;
+            break;
+          }
         }
       }
     }
@@ -964,25 +1627,486 @@ function drawAdoptionZone(z: AdoptionZoneState): void {
   ctx.restore();
 }
 
+/** Draw teleport/port effect at a location */
+function drawPortEffect(x: number, y: number, progress: number, isAppearing: boolean): void {
+  ctx.save();
+  
+  const radius = 60;
+  const alpha = isAppearing ? progress : (1 - progress);
+  const scale = isAppearing ? (0.5 + progress * 0.5) : (1 + progress * 0.5);
+  
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
+  
+  // Outer ring
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(200, 150, 255, ${alpha * 0.8})`;
+  ctx.lineWidth = 4;
+  ctx.stroke();
+  
+  // Inner glow
+  const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
+  gradient.addColorStop(0, `rgba(180, 120, 255, ${alpha * 0.6})`);
+  gradient.addColorStop(0.5, `rgba(140, 80, 220, ${alpha * 0.3})`);
+  gradient.addColorStop(1, 'rgba(100, 50, 180, 0)');
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fill();
+  
+  // Sparkles
+  const sparkleCount = 8;
+  const time = Date.now() / 100;
+  for (let i = 0; i < sparkleCount; i++) {
+    const angle = (i / sparkleCount) * Math.PI * 2 + time * 0.5;
+    const dist = radius * 0.6 * (0.8 + Math.sin(time + i) * 0.2);
+    const sx = Math.cos(angle) * dist;
+    const sy = Math.sin(angle) * dist;
+    const sparkleSize = 3 + Math.sin(time * 2 + i) * 1.5;
+    
+    ctx.beginPath();
+    ctx.arc(sx, sy, sparkleSize, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255, 255, 255, ${alpha * 0.9})`;
+    ctx.fill();
+  }
+  
+  ctx.restore();
+}
+
+/** Draw animated fire/boost flames behind the van when speed boost is active
+ * @param size 'small' for permanent 20% upgrade, 'large' for temporary boost */
+function drawSpeedBoostFire(cx: number, cy: number, vanHalf: number, facingDir: number, size: 'small' | 'large' = 'large'): void {
+  ctx.save();
+  
+  // Scale factors based on flame size
+  const scale = size === 'small' ? 0.5 : 1.0;
+  const alphaMultiplier = size === 'small' ? 0.6 : 1.0;
+  
+  // Fire is at the back of the van (opposite of facing direction)
+  const fireX = cx - facingDir * (vanHalf + 8 * scale);
+  const fireY = cy;
+  
+  // Animated flame effect using time
+  const time = Date.now() / 100;
+  const flicker = Math.sin(time * 3) * 0.3 + 0.7;
+  const flicker2 = Math.cos(time * 4) * 0.2 + 0.8;
+  
+  // Outer glow
+  const glowRadius = 25 * scale;
+  const gradient = ctx.createRadialGradient(fireX, fireY, 0, fireX, fireY, glowRadius);
+  gradient.addColorStop(0, `rgba(255, 200, 50, ${0.6 * flicker * alphaMultiplier})`);
+  gradient.addColorStop(0.5, `rgba(255, 100, 20, ${0.4 * flicker * alphaMultiplier})`);
+  gradient.addColorStop(1, 'rgba(255, 50, 0, 0)');
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(fireX, fireY, glowRadius, 0, Math.PI * 2);
+  ctx.fill();
+  
+  // Main flame (pointing away from van)
+  const baseFlameLength = 18 * scale;
+  const baseFlameWidth = 10 * scale;
+  const flameLength = baseFlameLength + Math.sin(time * 5) * 4 * scale;
+  const flameWidth = baseFlameWidth + Math.cos(time * 6) * 2 * scale;
+  
+  ctx.beginPath();
+  ctx.moveTo(fireX + facingDir * 5, fireY - flameWidth / 2);
+  ctx.quadraticCurveTo(
+    fireX - facingDir * flameLength * 0.6, fireY - flameWidth * 0.3 * flicker2,
+    fireX - facingDir * flameLength, fireY
+  );
+  ctx.quadraticCurveTo(
+    fireX - facingDir * flameLength * 0.6, fireY + flameWidth * 0.3 * flicker2,
+    fireX + facingDir * 5, fireY + flameWidth / 2
+  );
+  ctx.closePath();
+  
+  const flameGrad = ctx.createLinearGradient(
+    fireX + facingDir * 5, fireY,
+    fireX - facingDir * flameLength, fireY
+  );
+  flameGrad.addColorStop(0, '#FFD700');
+  flameGrad.addColorStop(0.3, '#FF8C00');
+  flameGrad.addColorStop(0.7, '#FF4500');
+  flameGrad.addColorStop(1, 'rgba(255, 69, 0, 0.3)');
+  ctx.fillStyle = flameGrad;
+  ctx.fill();
+  
+  // Inner bright flame
+  const innerLength = flameLength * 0.6;
+  const innerWidth = flameWidth * 0.5;
+  ctx.beginPath();
+  ctx.moveTo(fireX + facingDir * 5, fireY - innerWidth / 2);
+  ctx.quadraticCurveTo(
+    fireX - facingDir * innerLength * 0.5, fireY - innerWidth * 0.2,
+    fireX - facingDir * innerLength, fireY
+  );
+  ctx.quadraticCurveTo(
+    fireX - facingDir * innerLength * 0.5, fireY + innerWidth * 0.2,
+    fireX + facingDir * 5, fireY + innerWidth / 2
+  );
+  ctx.closePath();
+  ctx.fillStyle = '#FFFF80';
+  ctx.fill();
+  
+  ctx.restore();
+}
+
 function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
-  const half = SHELTER_BASE_RADIUS + p.size * SHELTER_RADIUS_PER_SIZE;
+  // Vans are ALWAYS fixed size - shelters are now separate entities drawn by drawShelter()
+  const VAN_FIXED_SIZE = 50;
+  const half = VAN_FIXED_SIZE; // Vans never grow visually
   const cx = p.x;
   const cy = p.y;
+  
+  // Handle port animation
+  const portAnim = portAnimations.get(p.id);
+  let portAlpha = 1;
+  if (portAnim) {
+    const elapsed = Date.now() - portAnim.startTime;
+    if (portAnim.phase === 'fadeIn') {
+      // Fading in at new location
+      portAlpha = Math.min(1, elapsed / PORT_ANIMATION_DURATION);
+      if (elapsed >= PORT_ANIMATION_DURATION) {
+        portAnimations.delete(p.id);
+        portAlpha = 1;
+      }
+    }
+  }
+  
+  // Determine facing direction (left/right) based on horizontal velocity only
+  // Update only when there's significant horizontal movement
+  if (Math.abs(p.vx) > 0.01) {
+    vanFacingDirections.set(p.id, p.vx > 0 ? 1 : -1);
+  }
+  // Get current facing direction (default to right = 1)
+  const facingDir = vanFacingDirections.get(p.id) ?? 1;
+  
   ctx.save();
+  ctx.globalAlpha = portAlpha;
   ctx.shadowColor = 'rgba(0,0,0,0.4)';
   ctx.shadowBlur = 10;
-  const color = isMe ? '#7bed9f' : hashColor(p.id);
-  ctx.fillStyle = color;
-  ctx.fillRect(cx - half, cy - half, half * 2, half * 2);
-  ctx.strokeStyle = isMe ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)';
-  ctx.lineWidth = isMe ? 3 : 2;
-  ctx.strokeRect(cx - half, cy - half, half * 2, half * 2);
+  
+  // Check if speed boost is active (temporary or permanent)
+  const nowTick = latestSnapshot?.tick ?? 0;
+  const hasTemporaryBoost = (p.speedBoostUntil ?? 0) > nowTick;
+  const hasPermanentSpeed = !!p.vanSpeedUpgrade;
+  
+  // Draw speed boost fire effect behind van (before van body)
+  // Large flame for temporary boost, small flame for permanent 20% upgrade
+  if (!p.eliminated) {
+    if (hasTemporaryBoost) {
+      drawSpeedBoostFire(cx, cy, half, facingDir, 'large');
+    } else if (hasPermanentSpeed) {
+      drawSpeedBoostFire(cx, cy, half, facingDir, 'small');
+    }
+  }
+  
+  // Determine fill color/gradient
+  let fillStyle: string | CanvasGradient;
+  let baseColor = isMe ? '#7bed9f' : hashColor(p.id);
+  if (p.eliminated) {
+    fillStyle = 'rgba(100,100,100,0.5)';
+    baseColor = '#666';
+  } else if (p.shelterColor) {
+    if (p.shelterColor.startsWith('gradient:')) {
+      const parts = p.shelterColor.split(':');
+      const color1 = parts[1] || '#ff5500';
+      const color2 = parts[2] || '#00aaff';
+      const grad = ctx.createLinearGradient(cx - half, cy - half * 0.6, cx + half, cy + half * 0.6);
+      grad.addColorStop(0, color1);
+      grad.addColorStop(1, color2);
+      fillStyle = grad;
+      baseColor = color1;
+    } else {
+      fillStyle = p.shelterColor;
+      baseColor = p.shelterColor;
+    }
+  } else {
+    fillStyle = baseColor;
+  }
+  
+  // Van dimensions - always van shape (shelters are separate entities now)
+  const vanWidth = half * 2;
+  const vanHeight = half * 1.2; // Van is elongated rectangle
+  const vanLeft = cx - half;
+  const vanTop = cy - vanHeight * 0.5;
+  const cornerRadius = Math.min(12, half * 0.3);
+  const wheelRadius = Math.min(10, half * 0.25);
+  
+  // For left-facing, we flip the van body horizontally around its center
+  // Move to center, scale X by -1 if facing left, then draw
+  ctx.translate(cx, cy);
+  if (facingDir < 0) {
+    ctx.scale(-1, 1); // Flip horizontally
+  }
+  
+  // Draw van body relative to origin (rounded rectangle)
+  ctx.fillStyle = fillStyle;
+  ctx.beginPath();
+  ctx.roundRect(-half, -vanHeight * 0.5, vanWidth, vanHeight, cornerRadius);
+  ctx.fill();
+  
+  // Van cabin (front section - darker) - front is on the right (+x direction when facing right)
+  const cabinWidth = vanWidth * 0.3;
+  ctx.fillStyle = 'rgba(0,0,0,0.15)';
+  ctx.beginPath();
+  ctx.roundRect(-half + vanWidth - cabinWidth, -vanHeight * 0.5, cabinWidth, vanHeight, [0, cornerRadius, cornerRadius, 0]);
+  ctx.fill();
+  
+  // Window (in cabin)
+  const windowPad = 4;
+  const windowWidth = cabinWidth - windowPad * 2;
+  const windowHeight = vanHeight * 0.4;
+  ctx.fillStyle = 'rgba(135,206,250,0.7)';
+  ctx.beginPath();
+  ctx.roundRect(-half + vanWidth - cabinWidth + windowPad, -vanHeight * 0.5 + windowPad, windowWidth, windowHeight, 4);
+  ctx.fill();
+  
+  // Van border (draw before wheels so border is on body only)
+  const hasAllyRequest = !isMe && sentAllyRequests.has(p.id);
+  if (hasAllyRequest) {
+    ctx.strokeStyle = '#7bed9f';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([6, 4]);
+  } else {
+    ctx.strokeStyle = isMe ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = isMe ? 3 : 2;
+  }
+  ctx.beginPath();
+  ctx.roundRect(-half, -vanHeight * 0.5, vanWidth, vanHeight, cornerRadius);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  
+  // Reset scale for wheels - wheels should NOT be flipped, they stay at bottom
+  if (facingDir < 0) {
+    ctx.scale(-1, 1); // Undo flip
+  }
+  ctx.translate(-cx, -cy); // Undo translate
+  
+  // Wheels (always at bottom of van, regardless of facing direction)
+  ctx.fillStyle = '#333';
+  const wheelY = vanTop + vanHeight + wheelRadius * 0.3;
+  const wheel1X = vanLeft + vanWidth * 0.2;
+  const wheel2X = vanLeft + vanWidth * 0.7;
+  ctx.beginPath();
+  ctx.arc(wheel1X, wheelY, wheelRadius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(wheel2X, wheelY, wheelRadius, 0, Math.PI * 2);
+  ctx.fill();
+  // Wheel hubcaps
+  ctx.fillStyle = '#888';
+  ctx.beginPath();
+  ctx.arc(wheel1X, wheelY, wheelRadius * 0.4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(wheel2X, wheelY, wheelRadius * 0.4, 0, Math.PI * 2);
+  ctx.fill();
+  
+  // Labels (not transformed)
   ctx.fillStyle = '#2d2d2d';
   ctx.font = 'bold 12px Rubik, sans-serif';
   ctx.textAlign = 'center';
   const label = isMe ? 'You' : (p.displayName ?? p.id);
-  ctx.fillText(label, cx, cy - half - 6);
-  ctx.fillText(`Pets: ${p.petsInside.length}/${Math.floor(p.size)}`, cx, cy + 4);
+  ctx.fillText(label, cx, vanTop - 6);
+  if (hasAllyRequest) {
+    ctx.fillStyle = '#7bed9f';
+    ctx.fillText('\uD83E\uDD1D', cx + half + 10, vanTop + 10);
+    ctx.fillStyle = '#2d2d2d';
+  }
+  if (p.eliminated) {
+    ctx.font = '18px sans-serif';
+    ctx.fillText('\uD83D\uDC7B', cx - half * 0.3, cy);
+    ctx.font = 'bold 12px Rubik, sans-serif';
+  }
+  // Pet count on van body - vans always capped at VAN_MAX_CAPACITY (shelters are separate)
+  const displayCapacity = Math.min(Math.floor(p.size), VAN_MAX_CAPACITY);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(`Pets: ${p.petsInside.length}/${displayCapacity}`, cx, cy + 4);
+  ctx.restore();
+}
+
+/** Draw a stationary pet shelter building */
+function drawShelter(shelter: ShelterState, isOwner: boolean, ownerColor?: string): void {
+  const cx = shelter.x;
+  const cy = shelter.y;
+  const baseSize = SHELTER_BASE_RADIUS + shelter.size * SHELTER_RADIUS_PER_SIZE;
+  const half = Math.max(40, baseSize);
+  
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.4)';
+  ctx.shadowBlur = 12;
+  
+  // Main building body - use owner's van color (including gradients)
+  let buildingFill: string | CanvasGradient;
+  if (ownerColor?.startsWith('gradient:')) {
+    const parts = ownerColor.split(':');
+    const color1 = parts[1] || '#7bed9f';
+    const color2 = parts[2] || '#3cb371';
+    const grad = ctx.createLinearGradient(cx - half, cy, cx + half, cy);
+    grad.addColorStop(0, color1);
+    grad.addColorStop(1, color2);
+    buildingFill = grad;
+  } else if (ownerColor) {
+    buildingFill = ownerColor;
+  } else {
+    buildingFill = isOwner ? '#7bed9f' : hashColor(shelter.ownerId);
+  }
+  ctx.fillStyle = buildingFill;
+  const buildingW = half * 2;
+  const buildingH = half * 1.4;
+  const buildingL = cx - half;
+  const buildingT = cy - buildingH * 0.4;
+  ctx.beginPath();
+  ctx.roundRect(buildingL, buildingT, buildingW, buildingH, 6);
+  ctx.fill();
+  
+  // Roof (triangle/peaked roof)
+  ctx.fillStyle = '#8B4513'; // Brown roof
+  ctx.beginPath();
+  ctx.moveTo(buildingL - 10, buildingT);
+  ctx.lineTo(cx, buildingT - half * 0.5);
+  ctx.lineTo(buildingL + buildingW + 10, buildingT);
+  ctx.closePath();
+  ctx.fill();
+  
+  // Roof outline
+  ctx.strokeStyle = '#654321';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  
+  // Door
+  const doorW = buildingW * 0.2;
+  const doorH = buildingH * 0.5;
+  ctx.fillStyle = '#654321';
+  ctx.fillRect(cx - doorW / 2, buildingT + buildingH - doorH, doorW, doorH);
+  
+  // Kennels/cages (small squares representing pet cages)
+  const kennelSize = 12;
+  const kennelPad = 4;
+  const kennelsPerRow = Math.floor((buildingW - 40) / (kennelSize + kennelPad));
+  const numKennels = Math.min(shelter.petsInside.length + 2, kennelsPerRow * 2);
+  
+  for (let i = 0; i < numKennels; i++) {
+    const row = Math.floor(i / kennelsPerRow);
+    const col = i % kennelsPerRow;
+    const kx = buildingL + 20 + col * (kennelSize + kennelPad);
+    const ky = buildingT + 15 + row * (kennelSize + kennelPad);
+    
+    // Kennel background
+    const hasPet = i < shelter.petsInside.length;
+    ctx.fillStyle = hasPet ? '#c9a86c' : '#aaa';
+    ctx.fillRect(kx, ky, kennelSize, kennelSize);
+    
+    // Kennel bars
+    ctx.strokeStyle = '#666';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(kx, ky, kennelSize, kennelSize);
+  }
+  
+  // Fence around building
+  ctx.setLineDash([5, 5]);
+  ctx.strokeStyle = isOwner ? '#7bed9f' : 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 2;
+  const fenceMargin = 15;
+  ctx.strokeRect(
+    buildingL - fenceMargin,
+    buildingT - half * 0.5 - fenceMargin,
+    buildingW + fenceMargin * 2,
+    buildingH + half * 0.5 + fenceMargin * 2
+  );
+  ctx.setLineDash([]);
+  
+  // Upgrade indicators (icons)
+  const iconY = buildingT - half * 0.5 - 25;
+  let iconX = cx - 30;
+  ctx.font = '14px sans-serif';
+  ctx.textAlign = 'center';
+  
+  if (shelter.hasAdoptionCenter) {
+    ctx.fillText('🐾', iconX, iconY); // Paw for adoption center
+    iconX += 20;
+  }
+  if (shelter.hasGravity) {
+    ctx.fillText('🧲', iconX, iconY); // Magnet for gravity
+    iconX += 20;
+  }
+  if (shelter.hasAdvertising) {
+    ctx.fillText('📢', iconX, iconY); // Megaphone for advertising
+    iconX += 20;
+  }
+  
+  // Owner label
+  ctx.fillStyle = '#333';
+  ctx.font = 'bold 11px Rubik, sans-serif';
+  ctx.textAlign = 'center';
+  const ownerLabel = isOwner ? 'Your Shelter' : `Shelter`;
+  ctx.fillText(ownerLabel, cx, buildingT - half * 0.5 - 8);
+  
+  // Pet count
+  ctx.fillStyle = '#fff';
+  ctx.font = '10px Rubik, sans-serif';
+  ctx.fillText(`Pets: ${shelter.petsInside.length}`, cx, buildingT + buildingH + 12);
+  
+  // Adoptions count
+  ctx.fillStyle = '#7bed9f';
+  ctx.fillText(`Adoptions: ${shelter.totalAdoptions}`, cx, buildingT + buildingH + 24);
+  
+  ctx.restore();
+}
+
+/** Draw a breeder shelter - enemy structure that spawns wild strays */
+function drawBreederShelter(shelter: BreederShelterState): void {
+  const cx = shelter.x;
+  const cy = shelter.y;
+  const half = 40 + shelter.size * 0.5;
+  
+  ctx.save();
+  ctx.shadowColor = 'rgba(255, 0, 0, 0.4)';
+  ctx.shadowBlur = 15;
+  
+  // Main building body - dark red/brown
+  ctx.fillStyle = '#4a1a1a';
+  const buildingW = half * 2;
+  const buildingH = half * 1.4;
+  const buildingL = cx - half;
+  const buildingT = cy - buildingH * 0.4;
+  ctx.beginPath();
+  ctx.roundRect(buildingL, buildingT, buildingW, buildingH, 6);
+  ctx.fill();
+  
+  // Glowing red border (pulsing)
+  const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
+  ctx.strokeStyle = `rgba(255, 68, 68, ${0.6 + pulse * 0.4})`;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  
+  // Roof (dark, ominous)
+  ctx.fillStyle = '#2a0a0a';
+  ctx.beginPath();
+  ctx.moveTo(buildingL - 10, buildingT);
+  ctx.lineTo(cx, buildingT - half * 0.5);
+  ctx.lineTo(buildingL + buildingW + 10, buildingT);
+  ctx.closePath();
+  ctx.fill();
+  
+  // Warning skull/danger symbol
+  ctx.font = 'bold 24px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('☠️', cx, cy);
+  
+  // Label
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 12px Rubik, sans-serif';
+  ctx.fillText(`Breeder Shelter Lv${shelter.level}`, cx, buildingT - half * 0.5 - 12);
+  
+  // Warning text
+  ctx.fillStyle = '#ffaa00';
+  ctx.font = '10px Rubik, sans-serif';
+  ctx.fillText('Spawning wild strays!', cx, buildingT + buildingH + 14);
+  
   ctx.restore();
 }
 
@@ -1002,19 +2126,162 @@ function drawStray(x: number, y: number): void {
   ctx.restore();
 }
 
+/** Draw a fortified breeder camp with wooden palisade walls */
+function drawBreederCamp(x: number, y: number, level: number = 1): void {
+  const campRadius = 35;
+  const postCount = 12;
+  const postHeight = 18;
+  const postWidth = 5;
+  
+  ctx.save();
+  ctx.translate(x, y);
+  
+  // Ground circle (dirt floor)
+  ctx.beginPath();
+  ctx.arc(0, 0, campRadius - 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#5a4a3a';
+  ctx.fill();
+  
+  // Draw wooden palisade posts around the perimeter
+  ctx.fillStyle = '#8B4513'; // Saddle brown
+  ctx.strokeStyle = '#5a3810';
+  ctx.lineWidth = 1;
+  
+  for (let i = 0; i < postCount; i++) {
+    const angle = (i / postCount) * Math.PI * 2;
+    const px = Math.cos(angle) * (campRadius - 2);
+    const py = Math.sin(angle) * (campRadius - 2);
+    
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(angle + Math.PI / 2);
+    
+    // Draw pointed post
+    ctx.beginPath();
+    ctx.moveTo(-postWidth / 2, postHeight / 2);
+    ctx.lineTo(-postWidth / 2, -postHeight / 2 + 3);
+    ctx.lineTo(0, -postHeight / 2 - 3); // Pointed top
+    ctx.lineTo(postWidth / 2, -postHeight / 2 + 3);
+    ctx.lineTo(postWidth / 2, postHeight / 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+  
+  // Draw tent (triangle)
+  ctx.beginPath();
+  ctx.moveTo(-12, 8);
+  ctx.lineTo(0, -10);
+  ctx.lineTo(12, 8);
+  ctx.closePath();
+  ctx.fillStyle = '#D2B48C'; // Tan
+  ctx.fill();
+  ctx.strokeStyle = '#8B7355';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  
+  // Tent entrance
+  ctx.beginPath();
+  ctx.moveTo(-4, 8);
+  ctx.lineTo(0, 2);
+  ctx.lineTo(4, 8);
+  ctx.fillStyle = '#4a3a2a';
+  ctx.fill();
+  
+  // Draw campfire (orange glow + flame)
+  const fireX = 16;
+  const fireY = 4;
+  
+  // Glow effect
+  const gradient = ctx.createRadialGradient(fireX, fireY, 0, fireX, fireY, 12);
+  gradient.addColorStop(0, 'rgba(255, 107, 53, 0.6)');
+  gradient.addColorStop(0.5, 'rgba(255, 165, 0, 0.3)');
+  gradient.addColorStop(1, 'rgba(255, 69, 0, 0)');
+  ctx.beginPath();
+  ctx.arc(fireX, fireY, 12, 0, Math.PI * 2);
+  ctx.fillStyle = gradient;
+  ctx.fill();
+  
+  // Fire logs
+  ctx.fillStyle = '#5a4a3a';
+  ctx.fillRect(fireX - 6, fireY + 2, 12, 3);
+  ctx.fillRect(fireX - 4, fireY + 1, 8, 3);
+  
+  // Flame
+  ctx.beginPath();
+  ctx.moveTo(fireX - 4, fireY + 2);
+  ctx.quadraticCurveTo(fireX - 2, fireY - 6, fireX, fireY - 8);
+  ctx.quadraticCurveTo(fireX + 2, fireY - 6, fireX + 4, fireY + 2);
+  ctx.fillStyle = '#FF6B35';
+  ctx.fill();
+  
+  // Inner flame
+  ctx.beginPath();
+  ctx.moveTo(fireX - 2, fireY + 1);
+  ctx.quadraticCurveTo(fireX, fireY - 4, fireX + 2, fireY + 1);
+  ctx.fillStyle = '#FFD700';
+  ctx.fill();
+  
+  ctx.restore();
+  
+  // Level badge (white box with level number)
+  const badgeX = x + campRadius - 10;
+  const badgeY = y - campRadius + 5;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.roundRect(badgeX - 10, badgeY - 8, 20, 16, 3);
+  ctx.fill();
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.fillStyle = '#000';
+  ctx.font = 'bold 11px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`${level}`, badgeX, badgeY);
+  
+  // Label below camp
+  ctx.font = 'bold 10px Rubik, sans-serif';
+  ctx.fillStyle = '#ff6b6b';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(`Breeder Camp Lv${level}`, x, y + campRadius + 12);
+}
+
 function drawPickup(u: PickupState): void {
-  const isGrowth = u.type === PICKUP_TYPE_GROWTH;
   const h = GROWTH_ORB_RADIUS;
   ctx.save();
-  ctx.fillStyle = isGrowth ? '#7bed9f' : '#70a3ff';
+  
+  // Breeder camps get special detailed rendering
+  if (u.type === PICKUP_TYPE_BREEDER) {
+    drawBreederCamp(u.x, u.y, u.level ?? 1);
+    ctx.restore();
+    return;
+  }
+  
+  // Color by type: green=growth, blue=speed, purple=port
+  let fillColor = '#7bed9f';
+  let strokeColor = '#2d5a38';
+  let label = '+Size';
+  if (u.type === PICKUP_TYPE_SPEED) {
+    fillColor = '#70a3ff';
+    strokeColor = '#2d4a6e';
+    label = 'Speed';
+  } else if (u.type === PICKUP_TYPE_PORT) {
+    fillColor = '#c77dff';
+    strokeColor = '#6a3d7a';
+    label = 'Port';
+  }
+  ctx.fillStyle = fillColor;
   ctx.fillRect(u.x - h, u.y - h, h * 2, h * 2);
-  ctx.strokeStyle = isGrowth ? '#2d5a38' : '#2d4a6e';
+  ctx.strokeStyle = strokeColor;
   ctx.lineWidth = 2;
   ctx.strokeRect(u.x - h, u.y - h, h * 2, h * 2);
   ctx.fillStyle = '#333';
   ctx.font = '10px Rubik, sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText(isGrowth ? '+Size' : 'Speed', u.x, u.y + GROWTH_ORB_RADIUS + 10);
+  ctx.fillText(label, u.x, u.y + GROWTH_ORB_RADIUS + 10);
   ctx.restore();
 }
 
@@ -1035,12 +2302,25 @@ function render(dt: number): void {
     for (const u of latestSnapshot.pickups ?? []) {
       drawPickup(u);
     }
+    // Draw player-built shelters (stationary buildings)
+    for (const shelter of latestSnapshot.shelters ?? []) {
+      const isOwner = shelter.ownerId === myPlayerId;
+      const owner = latestSnapshot.players.find(p => p.id === shelter.ownerId);
+      const ownerColor = owner?.shelterColor;
+      drawShelter(shelter, isOwner, ownerColor);
+    }
+    // Draw breeder shelters (enemy structures)
+    for (const breederShelter of latestSnapshot.breederShelters ?? []) {
+      drawBreederShelter(breederShelter);
+    }
   }
 
   for (const pet of latestSnapshot?.pets ?? []) {
     if (pet.insideShelterId !== null) continue;
     const p = getInterpolatedPet(pet.id) ?? pet;
     if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    // Skip uninitialized pets at (0,0) - ghost stray fix
+    if (p.x === 0 && p.y === 0) continue;
     drawStray(p.x, p.y);
   }
 
@@ -1079,6 +2359,57 @@ function render(dt: number): void {
       ctx.restore();
     }
   }
+  
+  // Draw adoption animations (pets traveling to adoption center)
+  const nowMs = Date.now();
+  for (let i = adoptionAnimations.length - 1; i >= 0; i--) {
+    const anim = adoptionAnimations[i];
+    const elapsed = nowMs - anim.startTime;
+    
+    if (elapsed < 0) continue; // Hasn't started yet (staggered)
+    
+    if (elapsed > ADOPTION_ANIMATION_DURATION) {
+      // Animation finished, remove it
+      adoptionAnimations.splice(i, 1);
+      continue;
+    }
+    
+    const progress = elapsed / ADOPTION_ANIMATION_DURATION;
+    // Ease out curve for smooth deceleration
+    const easedProgress = 1 - Math.pow(1 - progress, 3);
+    
+    // Interpolate position
+    const x = anim.fromX + (anim.toX - anim.fromX) * easedProgress;
+    const y = anim.fromY + (anim.toY - anim.fromY) * easedProgress - Math.sin(progress * Math.PI) * 50; // Arc upward
+    
+    // Fade out near the end
+    const alpha = progress < 0.8 ? 1 : 1 - (progress - 0.8) / 0.2;
+    
+    // Draw the pet emoji
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.font = 'bold 32px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(ADOPTION_PET_EMOJIS[anim.petType], x, y);
+    ctx.restore();
+  }
+
+  // Draw port animations (teleport effects at old locations)
+  for (const [playerId, anim] of portAnimations) {
+    const elapsed = Date.now() - anim.startTime;
+    const progress = Math.min(1, elapsed / PORT_ANIMATION_DURATION);
+    
+    if (anim.phase === 'fadeIn') {
+      // Draw appearing effect at new location
+      drawPortEffect(anim.toX, anim.toY, progress, true);
+      
+      // Also draw disappearing effect at old location (only in first half)
+      if (progress < 0.5) {
+        drawPortEffect(anim.fromX, anim.fromY, progress * 2, false);
+      }
+    }
+  }
 
   ctx.restore();
 
@@ -1099,18 +2430,113 @@ function render(dt: number): void {
     }
     for (const pet of latestSnapshot.pets) {
       if (pet.insideShelterId !== null) continue;
+      // Skip uninitialized pets at (0,0)
+      if (pet.x === 0 && pet.y === 0) continue;
       minimapCtx.fillStyle = '#c9a86c';
       minimapCtx.fillRect(pet.x * scale - 2, pet.y * scale - 2, 4, 4);
     }
     for (const u of latestSnapshot.pickups ?? []) {
-      minimapCtx.fillStyle = u.type === PICKUP_TYPE_GROWTH ? '#7bed9f' : '#70a3ff';
-      minimapCtx.fillRect(u.x * scale - 2, u.y * scale - 2, 4, 4);
+      const px = u.x * scale;
+      const py = u.y * scale;
+      
+      if (u.type === PICKUP_TYPE_BREEDER) {
+        // Breeder camps: brown with pulsing glow effect
+        const glowIntensity = 0.5 + 0.5 * Math.sin(Date.now() / 200);
+        const glowRadius = 8 + glowIntensity * 4;
+        
+        // Draw glow layers
+        minimapCtx.save();
+        minimapCtx.shadowColor = '#ff4444';
+        minimapCtx.shadowBlur = glowRadius;
+        minimapCtx.fillStyle = '#8B4513'; // Brown
+        minimapCtx.beginPath();
+        minimapCtx.arc(px, py, 4, 0, Math.PI * 2);
+        minimapCtx.fill();
+        
+        // Draw border glow
+        minimapCtx.strokeStyle = `rgba(255, 68, 68, ${0.7 + glowIntensity * 0.3})`;
+        minimapCtx.lineWidth = 2;
+        minimapCtx.stroke();
+        minimapCtx.restore();
+      } else {
+        minimapCtx.fillStyle = u.type === PICKUP_TYPE_GROWTH ? '#7bed9f' : u.type === PICKUP_TYPE_PORT ? '#c77dff' : '#70a3ff';
+        minimapCtx.fillRect(px - 2, py - 2, 4, 4);
+      }
     }
+    // Draw shelters on minimap (buildings)
+    for (const shelter of latestSnapshot.shelters ?? []) {
+      const isOwner = shelter.ownerId === myPlayerId;
+      minimapCtx.fillStyle = isOwner ? '#e8d5b7' : '#d4c4a8';
+      const shelterSize = (SHELTER_BASE_RADIUS + shelter.size * SHELTER_RADIUS_PER_SIZE) * scale;
+      const half = Math.max(4, shelterSize);
+      minimapCtx.fillRect(shelter.x * scale - half, shelter.y * scale - half, half * 2, half * 2);
+      // Border
+      minimapCtx.strokeStyle = isOwner ? '#7bed9f' : '#8B4513';
+      minimapCtx.lineWidth = 1;
+      minimapCtx.strokeRect(shelter.x * scale - half, shelter.y * scale - half, half * 2, half * 2);
+      
+      // Draw home icon for player's own shelter
+      if (isOwner) {
+        const sx = shelter.x * scale;
+        const sy = shelter.y * scale;
+        // Draw a small house roof shape
+        minimapCtx.fillStyle = '#7bed9f';
+        minimapCtx.beginPath();
+        minimapCtx.moveTo(sx, sy - half - 4); // Top of roof
+        minimapCtx.lineTo(sx - 5, sy - half + 1); // Left corner
+        minimapCtx.lineTo(sx + 5, sy - half + 1); // Right corner
+        minimapCtx.closePath();
+        minimapCtx.fill();
+        // House body indicator
+        minimapCtx.fillRect(sx - 3, sy - half + 1, 6, 5);
+      }
+    }
+    // Draw breeder shelters on minimap (pulsing red)
+    for (const breederShelter of latestSnapshot.breederShelters ?? []) {
+      const bx = breederShelter.x * scale;
+      const by = breederShelter.y * scale;
+      const bHalf = Math.max(6, (40 + breederShelter.size * 0.5) * scale);
+      
+      // Pulsing glow effect
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
+      minimapCtx.save();
+      minimapCtx.shadowColor = '#ff4444';
+      minimapCtx.shadowBlur = 5 + pulse * 5;
+      minimapCtx.fillStyle = '#4a1a1a';
+      minimapCtx.fillRect(bx - bHalf, by - bHalf, bHalf * 2, bHalf * 2);
+      minimapCtx.strokeStyle = `rgba(255, 68, 68, ${0.7 + pulse * 0.3})`;
+      minimapCtx.lineWidth = 2;
+      minimapCtx.strokeRect(bx - bHalf, by - bHalf, bHalf * 2, bHalf * 2);
+      minimapCtx.restore();
+    }
+    // Sort players by adoption count for leader visibility scaling
+    const sortedByAdoptions = [...latestSnapshot.players].sort((a, b) => b.totalAdoptions - a.totalAdoptions);
     for (const pl of latestSnapshot.players) {
-      minimapCtx.fillStyle = pl.id === myPlayerId ? '#7bed9f' : hashColor(pl.id);
-      const r = (SHELTER_BASE_RADIUS + pl.size * SHELTER_RADIUS_PER_SIZE) * scale;
-      const half = Math.max(2, r);
+      let mapColor = pl.id === myPlayerId ? '#7bed9f' : hashColor(pl.id);
+      if (pl.shelterColor) {
+        if (pl.shelterColor.startsWith('gradient:')) {
+          // Use first gradient color for minimap
+          mapColor = pl.shelterColor.split(':')[1] || mapColor;
+        } else {
+          mapColor = pl.shelterColor;
+        }
+      }
+      minimapCtx.fillStyle = mapColor;
+      // Vans are always fixed size on minimap (shelters are drawn separately)
+      const VAN_MINIMAP_SIZE = 50;
+      const r = VAN_MINIMAP_SIZE * scale;
+      // Leader visibility: scale up dots based on adoption rank
+      const adoptionRank = sortedByAdoptions.indexOf(pl);
+      const leaderScale = adoptionRank === 0 ? 1.5 : adoptionRank <= 2 ? 1.2 : 1.0;
+      const half = Math.max(2, r) * leaderScale;
       minimapCtx.fillRect(pl.x * scale - half, pl.y * scale - half, half * 2, half * 2);
+      // Draw crown indicator for the leader
+      if (adoptionRank === 0 && latestSnapshot.players.length > 1) {
+        minimapCtx.fillStyle = '#ffd700';
+        minimapCtx.beginPath();
+        minimapCtx.arc(pl.x * scale, pl.y * scale - half - 3, 3, 0, Math.PI * 2);
+        minimapCtx.fill();
+      }
     }
   }
   // Draw viewport indicator on minimap
@@ -1169,11 +2595,82 @@ function render(dt: number): void {
 
   // UI
   const me = latestSnapshot?.players.find((p) => p.id === myPlayerId) ?? predictedPlayer;
-  const capacity = me ? Math.floor(me.size) : 0;
+  const rawCapacity = me ? Math.floor(me.size) : 0;
+  // Vans always capped at VAN_MAX_CAPACITY (shelter capacity shown on shelter building)
+  const capacity = Math.min(rawCapacity, VAN_MAX_CAPACITY);
   const inside = me?.petsInside.length ?? 0;
   const strayCount = latestSnapshot?.pets.filter((p) => p.insideShelterId === null).length ?? 0;
-  scoreEl.textContent = `Size: ${capacity}`;
-  carriedEl.textContent = `Pets: ${inside}/${capacity}`;
+  scoreEl.textContent = me?.eliminated ? 'Observer Mode' : `Size: ${rawCapacity}`;
+  carriedEl.textContent = me?.eliminated ? 'WASD to pan | Drag to move' : `Pets: ${inside}/${capacity}`;
+  
+  // Show/hide build shelter button - requires size >= 50 and tokens >= 250
+  const hasShelter = !!(me?.shelterId);
+  const isEliminated = !!(me?.eliminated);
+  const playerTokens = me?.money ?? 0;
+  const canBuildShelter = me && me.size >= 50 && !hasShelter && !isEliminated && matchPhase === 'playing';
+  
+  // Update tokens display
+  gameTokensEl.textContent = `${playerTokens} RT`;
+  
+  // Menu button - show when in match and not eliminated (always available, even after building shelter)
+  const showMenuButton = me && !isEliminated && matchPhase === 'playing';
+  if (showMenuButton) {
+    buildShelterBtnEl.classList.remove('hidden');
+    buildShelterBtnEl.disabled = false;
+    buildShelterBtnEl.textContent = `Menu [E]`;
+  } else {
+    buildShelterBtnEl.classList.add('hidden');
+  }
+  
+  // Update action menu if open
+  if (actionMenuOpen) {
+    if (!showMenuButton) {
+      // Close menu if player is eliminated
+      actionMenuOpen = false;
+      actionMenuEl.classList.add('hidden');
+    } else {
+      updateActionMenu();
+    }
+  }
+  
+  // Hide old ground button (replaced by build shelter)
+  groundBtnEl.classList.add('hidden');
+  
+  // Port button - show when player has port charges
+  const portCount = me?.portCharges ?? 0;
+  if (me && portCount > 0 && !isEliminated && matchPhase === 'playing') {
+    portBtnEl.textContent = `Port [P] (${portCount})`;
+    portBtnEl.classList.remove('hidden');
+  } else {
+    portBtnEl.classList.add('hidden');
+  }
+  
+  // Show "Center Van" and "Center Shelter" buttons when camera is panned away
+  const isPanned = Math.abs(cameraPanOffsetX) > 50 || Math.abs(cameraPanOffsetY) > 50;
+  const myShelter = me?.shelterId ? (latestSnapshot?.shelters?.find(s => s.id === me.shelterId) ?? null) : null;
+  
+  if (me && !isEliminated && matchPhase === 'playing' && isPanned) {
+    centerVanBtnEl.classList.remove('hidden');
+  } else {
+    centerVanBtnEl.classList.add('hidden');
+  }
+  
+  // Show shelter button if player has a shelter and is panned (or not near shelter)
+  if (me && !isEliminated && matchPhase === 'playing' && myShelter) {
+    const distToShelter = Math.hypot(
+      (myShelter.x - (predictedPlayer?.x ?? 0)) - cameraPanOffsetX,
+      (myShelter.y - (predictedPlayer?.y ?? 0)) - cameraPanOffsetY
+    );
+    // Show if camera isn't already centered on shelter
+    if (distToShelter > 100) {
+      centerShelterBtnEl.classList.remove('hidden');
+    } else {
+      centerShelterBtnEl.classList.add('hidden');
+    }
+  } else {
+    centerShelterBtnEl.classList.add('hidden');
+  }
+  
   const nowTick = latestSnapshot?.tick ?? 0;
   const tickRate = TICK_RATE;
   const speedBoostRemain = me && (me.speedBoostUntil ?? 0) > nowTick ? ((me.speedBoostUntil! - nowTick) / tickRate).toFixed(1) : '';
@@ -1181,7 +2678,28 @@ function render(dt: number): void {
   const matchEndAt = latestSnapshot?.matchEndAt ?? 0;
   const remainingTicks = Math.max(0, matchEndAt - nowTick);
   const remainingSec = remainingTicks / tickRate;
-  timerEl.textContent = remainingSec > 0 ? `${Math.floor(remainingSec / 60)}:${String(Math.floor(remainingSec % 60)).padStart(2, '0')}` : '0:00';
+  // Show domination progress - calculate shelter area as % of map area
+  const shelters = latestSnapshot?.shelters ?? [];
+  const mapArea = MAP_WIDTH * MAP_HEIGHT; // 4800 * 4800 = 23,040,000
+  const leaderShelter = shelters.reduce((best, s) => !best || s.size > best.size ? s : best, null as typeof shelters[0] | null);
+  // Calculate shelter area: π * r² where r = SHELTER_BASE_RADIUS + size * SHELTER_RADIUS_PER_SIZE
+  const leaderRadius = leaderShelter ? SHELTER_BASE_RADIUS + leaderShelter.size * SHELTER_RADIUS_PER_SIZE : 0;
+  const leaderArea = Math.PI * leaderRadius * leaderRadius;
+  const leaderPercent = mapArea > 0 ? Math.floor((leaderArea / mapArea) * 100) : 0;
+  const leaderPlayer = latestSnapshot?.players.find(p => p.shelterId === leaderShelter?.id);
+  const leaderName = leaderPlayer?.displayName ?? 'None';
+  const scarcity = latestSnapshot?.scarcityLevel ?? 0;
+  const scarcityText = scarcity > 0 ? ` [Scarcity ${scarcity}]` : '';
+  timerEl.textContent = matchPhase === 'playing' ? `Goal: 51% | ${leaderName}: ${leaderPercent}%${scarcityText}` : '';
+  
+  // Update game clock
+  const durationMs = latestSnapshot?.matchDurationMs ?? 0;
+  const totalSec = Math.floor(durationMs / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  gameClockEl.textContent = `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  
   const iAmEliminated = !!(me?.eliminated);
   if ((remainingSec <= 0 || iAmEliminated) && latestSnapshot?.players.length) {
     if (!matchEndPlayed) {
@@ -1189,23 +2707,57 @@ function render(dt: number): void {
       playMatchEnd();
     }
     leaderboardEl.classList.add('show');
-    const sorted = [...latestSnapshot.players].sort((a, b) => b.size - a.size);
+    const matchEndedByTime = remainingSec <= 0 && !latestSnapshot?.matchEndedEarly;
+    const sorted = [...latestSnapshot.players].sort((a, b) => {
+      if (matchEndedByTime) {
+        return b.size - a.size || b.totalAdoptions - a.totalAdoptions;
+      }
+      if (a.eliminated !== b.eliminated) return (a.eliminated ? 1 : 0) - (b.eliminated ? 1 : 0);
+      if (!a.eliminated) return b.size - a.size || b.totalAdoptions - a.totalAdoptions;
+      return a.totalAdoptions - b.totalAdoptions;
+    });
     const meResult = sorted.find((p) => p.id === myPlayerId);
-    const mySize = meResult ? Math.floor(meResult.size) : 0;
+    const mySize = meResult && !meResult.eliminated ? Math.floor(meResult.size) : 0;
     const placementBonus = [100, 50, 25];
     const myRank = meResult ? sorted.findIndex((p) => p.id === myPlayerId) + 1 : 0;
-    const bonus = myRank > 0 && myRank <= placementBonus.length ? placementBonus[myRank - 1] : 0;
+    const bonus = myRank > 0 && myRank <= placementBonus.length && !iAmEliminated ? placementBonus[myRank - 1] : 0;
     const earned = iAmEliminated ? 0 : mySize + bonus;
-    const newMoney = getMoney() + earned;
-    if (remainingSec <= 0) setMoney(newMoney);
+    // Only calculate newTokens once when match ends (matchEndPlayed was just set to true above)
+    const newTokens = matchEndPlayed && !matchEndTokensAwarded ? getTokens() + earned : getTokens();
+    if (!matchEndTokensAwarded) {
+      setTokens(newTokens);
+      matchEndTokensAwarded = true;
+    }
     const bonusLabel = myRank === 1 ? 'Win bonus' : myRank === 2 ? '2nd place' : myRank === 3 ? '3rd place' : myRank > 0 ? `${myRank}th place` : '';
-    const moneyLines = earned > 0
-      ? `<br><br><strong>Total: ${newMoney.toLocaleString()}</strong>${bonusLabel ? `<br>${bonusLabel}: +${bonus}` : ''}`
+    const tokenLines = earned > 0
+      ? `<br><br><strong>Total: ${newTokens.toLocaleString()} RT</strong>${bonusLabel ? `<br>${bonusLabel}: +${bonus} RT` : ''}`
       : iAmEliminated
-        ? `<br><br><strong>Total: ${getMoney().toLocaleString()}</strong>`
+        ? `<br><br><strong>Total: ${getTokens().toLocaleString()} RT</strong>`
         : '';
-    const title = iAmEliminated ? 'You were consumed' : 'Match over';
-    leaderboardEl.innerHTML = `<strong>${title}</strong><br><br>` + sorted.map((p, i) => `${i + 1}. ${p.id === myPlayerId ? 'You' : (p.displayName ?? p.id)}: size ${Math.floor(p.size)} (${p.totalAdoptions} adoptions)`).join('<br>') + moneyLines + '<br><br><button type="button" id="play-again-btn" class="fight-ally-btn ally-btn" style="margin-right:8px">Play again</button><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn">Back to lobby</button>';
+    // Determine win title
+    let title = 'Match over';
+    if (iAmEliminated) {
+      title = 'You were consumed';
+    } else if (latestSnapshot && latestSnapshot.winnerId) {
+      const winnerId = latestSnapshot.winnerId;
+      const winnerPlayer = latestSnapshot.players.find(p => p.id === winnerId);
+      const winnerName = winnerPlayer?.id === myPlayerId ? 'You' : (winnerPlayer?.displayName ?? 'Someone');
+      title = `${winnerName} achieved 51% domination!`;
+    }
+    const adHtml = `
+      <div class="match-ads">
+        <div class="match-ad-slot">
+          <h4>Sponsored</h4>
+          <div id="match-ad-slot" class="match-ad-placeholder">Ad placeholder</div>
+        </div>
+        <div class="match-self-promo">
+          <h4>Boost your shelter</h4>
+          <p>Earn Rescue Tokens each match to buy boosts. Invite friends with your referral link. For every 5 confirmed signups, unlock a special shelter skin.</p>
+        </div>
+      </div>
+    `;
+    const sizeLabel = (p: PlayerState) => (p.eliminated ? '—' : `${Math.floor(p.size)}`);
+    leaderboardEl.innerHTML = `<strong>${title}</strong><br><br>` + sorted.map((p, i) => `${i + 1}. ${p.id === myPlayerId ? 'You' : (p.displayName ?? p.id)}: size ${sizeLabel(p)} (${p.totalAdoptions} adoptions)`).join('<br>') + tokenLines + adHtml + '<button type="button" id="play-again-btn" class="fight-ally-btn ally-btn" style="margin-right:8px">Play again</button><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn">Back to lobby</button>';
   } else {
     leaderboardEl.classList.remove('show');
   }
@@ -1220,7 +2772,13 @@ function render(dt: number): void {
 }
 
 // --- End match menu (delegated: Play again, Back to lobby) ---
+let leaderboardActionInProgress = false;
 function handleLeaderboardButton(btn: HTMLButtonElement): void {
+  // Prevent double actions from multiple event handlers
+  if (leaderboardActionInProgress) return;
+  leaderboardActionInProgress = true;
+  setTimeout(() => { leaderboardActionInProgress = false; }, 500);
+  
   if (btn.id === 'play-again-btn') {
     if (gameWs) {
       gameWs.close();
@@ -1228,6 +2786,7 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
     }
     leaderboardEl.classList.remove('show');
     matchEndPlayed = false;
+    wasPlayerObserver = false; // Reset observer state for new match
     latestSnapshot = null;
     connectionOverlayEl.classList.remove('hidden');
     connectionOverlayEl.innerHTML = selectedMode === 'ffa'
@@ -1249,15 +2808,17 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
     }
     leaderboardEl.classList.remove('show');
     matchEndPlayed = false;
+    matchEndTokensAwarded = false;
     latestSnapshot = null;
     gameWrapEl.classList.remove('visible');
     landingEl.classList.remove('hidden');
     authAreaEl.classList.remove('hidden');
-    updateLandingMoney();
+    updateLandingTokens();
     restoreModeSelection();
   }
 }
 
+// Desktop click handler for leaderboard buttons (capture phase to ensure we get the event)
 leaderboardEl.addEventListener('click', (e) => {
   const target = e.target as HTMLElement;
   const btn = target.closest('button') as HTMLButtonElement | null;
@@ -1265,8 +2826,21 @@ leaderboardEl.addEventListener('click', (e) => {
   e.preventDefault();
   e.stopPropagation();
   handleLeaderboardButton(btn);
-});
+}, true); // Use capture phase
 
+// Desktop mouseup handler as fallback (more reliable than click on some systems)
+leaderboardEl.addEventListener('mouseup', (e) => {
+  const target = e.target as HTMLElement;
+  const btn = target.closest('button') as HTMLButtonElement | null;
+  if (!btn) return;
+  // Only trigger on primary button (left click)
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  handleLeaderboardButton(btn);
+}, true);
+
+// Mobile touch handler
 leaderboardEl.addEventListener('touchend', (e) => {
   const target = e.target as HTMLElement;
   const btn = target.closest('button') as HTMLButtonElement | null;
@@ -1274,7 +2848,7 @@ leaderboardEl.addEventListener('touchend', (e) => {
   e.preventDefault();
   e.stopPropagation();
   handleLeaderboardButton(btn);
-}, { passive: false });
+}, { passive: false, capture: true });
 
 // --- Lobby: Ready button ---
 lobbyReadyBtnEl.addEventListener('click', () => {
@@ -1295,7 +2869,7 @@ lobbyBackBtnEl.addEventListener('click', () => {
   gameWrapEl.classList.remove('visible');
   landingEl.classList.remove('hidden');
   authAreaEl.classList.remove('hidden'); // Show auth when returning to lobby
-  updateLandingMoney();
+  updateLandingTokens();
   restoreModeSelection(); // Restore sticky mode
 });
 
@@ -1309,6 +2883,193 @@ function sendFightAllyChoice(choice: 'fight' | 'ally'): void {
 }
 fightAllyFightBtn.addEventListener('click', () => sendFightAllyChoice('fight'));
 fightAllyAllyBtn.addEventListener('click', () => sendFightAllyChoice('ally'));
+
+// --- Ground button ---
+groundBtnEl.addEventListener('click', () => {
+  if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  gameWs.send(JSON.stringify({ type: 'ground' }));
+  groundBtnEl.classList.add('hidden');
+});
+
+// --- Port button ---
+portBtnEl.addEventListener('click', () => {
+  if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  gameWs.send(JSON.stringify({ type: 'usePort' }));
+});
+
+// --- Center Van button - resets camera pan to follow the van ---
+centerVanBtnEl.addEventListener('click', () => {
+  cameraPanOffsetX = 0;
+  cameraPanOffsetY = 0;
+  centerVanBtnEl.classList.add('hidden');
+});
+
+// --- Center Shelter button - pans camera to player's shelter ---
+centerShelterBtnEl.addEventListener('click', () => {
+  const me = latestSnapshot?.players.find((p) => p.id === myPlayerId);
+  const shelter = me?.shelterId ? latestSnapshot?.shelters?.find(s => s.id === me.shelterId) : null;
+  if (shelter && predictedPlayer) {
+    // Calculate offset to center camera on shelter
+    cameraPanOffsetX = shelter.x - predictedPlayer.x;
+    cameraPanOffsetY = shelter.y - predictedPlayer.y;
+  }
+  centerShelterBtnEl.classList.add('hidden');
+});
+
+// --- Build shelter button - opens action menu ---
+buildShelterBtnEl.addEventListener('click', () => {
+  toggleActionMenu();
+});
+
+// --- E key for action menu toggle ---
+let actionMenuOpen = false;
+function toggleActionMenu(): void {
+  if (matchPhase !== 'playing') return;
+  const me = latestSnapshot?.players.find((p) => p.id === myPlayerId);
+  if (!me || me.eliminated) return;
+  actionMenuOpen = !actionMenuOpen;
+  if (actionMenuOpen) {
+    actionMenuEl.classList.remove('hidden');
+    updateActionMenu();
+  } else {
+    actionMenuEl.classList.add('hidden');
+  }
+}
+
+function getPlayerShelter(): { hasAdoptionCenter: boolean; hasGravity: boolean; hasAdvertising: boolean } | null {
+  if (!latestSnapshot) return null;
+  const me = latestSnapshot.players.find((p) => p.id === myPlayerId);
+  if (!me?.shelterId) return null;
+  const shelter = latestSnapshot.shelters?.find((s) => s.id === me.shelterId);
+  return shelter ?? null;
+}
+
+function updateActionMenu(): void {
+  const me = latestSnapshot?.players.find((p) => p.id === myPlayerId);
+  if (!me) return;
+  const size = Math.floor(me.size);
+  const tokens = me.money ?? 0;
+  const hasShelter = !!me.shelterId;
+  const shelter = getPlayerShelter();
+  const hasVanSpeed = !!me.vanSpeedUpgrade;
+  
+  // Show/hide sections based on shelter ownership
+  if (hasShelter) {
+    actionBuildShelterItemEl.classList.add('hidden');
+    actionAdoptionCenterItemEl.classList.remove('hidden');
+    actionGravityItemEl.classList.remove('hidden');
+    actionAdvertisingItemEl.classList.remove('hidden');
+  } else {
+    actionBuildShelterItemEl.classList.remove('hidden');
+    actionAdoptionCenterItemEl.classList.add('hidden');
+    actionGravityItemEl.classList.add('hidden');
+    actionAdvertisingItemEl.classList.add('hidden');
+  }
+  
+  // Update build shelter progress
+  const sizeProgress = Math.min(100, (size / 50) * 100);
+  const tokensProgress = Math.min(100, (tokens / 250) * 100);
+  actionSizeTextEl.textContent = `${size}/50`;
+  actionSizeBarEl.style.width = `${sizeProgress}%`;
+  actionTokensTextEl.textContent = `${tokens}/250 RT`;
+  actionTokensBarEl.style.width = `${tokensProgress}%`;
+  const canBuild = size >= 50 && tokens >= 250 && !hasShelter;
+  actionBuildBtnEl.disabled = !canBuild;
+  if (canBuild) {
+    actionBuildBtnEl.textContent = 'Build Shelter';
+    actionBuildBtnEl.classList.add('ready');
+  } else if (hasShelter) {
+    actionBuildBtnEl.textContent = 'Already Built';
+    actionBuildBtnEl.classList.remove('ready');
+  } else {
+    const needs: string[] = [];
+    if (size < 50) needs.push(`Size ${size}/50`);
+    if (tokens < 250) needs.push(`${tokens}/250 RT`);
+    actionBuildBtnEl.textContent = `Need: ${needs.join(' & ')}`;
+    actionBuildBtnEl.classList.remove('ready');
+  }
+  
+  // Update upgrade buttons
+  const canBuyAdoption = hasShelter && !shelter?.hasAdoptionCenter && tokens >= 250;
+  const canBuyGravity = hasShelter && !shelter?.hasGravity && tokens >= 300;
+  const canBuyAdvertising = hasShelter && !shelter?.hasAdvertising && tokens >= 200;
+  const canBuyVanSpeed = !hasVanSpeed && tokens >= 150;
+  
+  actionAdoptionBtnEl.disabled = !canBuyAdoption;
+  actionAdoptionBtnEl.textContent = shelter?.hasAdoptionCenter ? 'Owned' : 'Buy';
+  if (canBuyAdoption) actionAdoptionBtnEl.classList.add('ready');
+  else actionAdoptionBtnEl.classList.remove('ready');
+  if (shelter?.hasAdoptionCenter) actionAdoptionCenterItemEl.classList.add('owned');
+  else actionAdoptionCenterItemEl.classList.remove('owned');
+  
+  actionGravityBtnEl.disabled = !canBuyGravity;
+  actionGravityBtnEl.textContent = shelter?.hasGravity ? 'Owned' : 'Buy';
+  if (canBuyGravity) actionGravityBtnEl.classList.add('ready');
+  else actionGravityBtnEl.classList.remove('ready');
+  if (shelter?.hasGravity) actionGravityItemEl.classList.add('owned');
+  else actionGravityItemEl.classList.remove('owned');
+  
+  actionAdvertisingBtnEl.disabled = !canBuyAdvertising;
+  actionAdvertisingBtnEl.textContent = shelter?.hasAdvertising ? 'Owned' : 'Buy';
+  if (canBuyAdvertising) actionAdvertisingBtnEl.classList.add('ready');
+  else actionAdvertisingBtnEl.classList.remove('ready');
+  if (shelter?.hasAdvertising) actionAdvertisingItemEl.classList.add('owned');
+  else actionAdvertisingItemEl.classList.remove('owned');
+  
+  actionVanSpeedBtnEl.disabled = !canBuyVanSpeed;
+  actionVanSpeedBtnEl.textContent = hasVanSpeed ? 'Owned' : 'Buy';
+  if (canBuyVanSpeed) actionVanSpeedBtnEl.classList.add('ready');
+  else actionVanSpeedBtnEl.classList.remove('ready');
+  if (hasVanSpeed) actionVanSpeedItemEl.classList.add('owned');
+  else actionVanSpeedItemEl.classList.remove('owned');
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'e' || e.key === 'E') {
+    toggleActionMenu();
+  }
+  if (e.key === 'p' || e.key === 'P') {
+    // Use port charge
+    if (gameWs && gameWs.readyState === WebSocket.OPEN) {
+      const me = latestSnapshot?.players.find((pl) => pl.id === myPlayerId);
+      if (me && (me.portCharges ?? 0) > 0 && !me.eliminated && matchPhase === 'playing') {
+        gameWs.send(JSON.stringify({ type: 'usePort' }));
+      }
+    }
+  }
+});
+actionMenuCloseEl.addEventListener('click', () => {
+  actionMenuOpen = false;
+  actionMenuEl.classList.add('hidden');
+});
+actionBuildBtnEl.addEventListener('click', () => {
+  if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  const me = latestSnapshot?.players.find((p) => p.id === myPlayerId);
+  if (!me || me.eliminated || me.shelterId) return;
+  if (me.size < 50 || (me.money ?? 0) < 250) return;
+  gameWs.send(JSON.stringify({ type: 'buildShelter' }));
+  updateActionMenu();
+});
+actionAdoptionBtnEl.addEventListener('click', () => {
+  if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  gameWs.send(JSON.stringify({ type: 'buyAdoptionCenter' }));
+  updateActionMenu();
+});
+actionGravityBtnEl.addEventListener('click', () => {
+  if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  gameWs.send(JSON.stringify({ type: 'buyGravity' }));
+  updateActionMenu();
+});
+actionAdvertisingBtnEl.addEventListener('click', () => {
+  if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  gameWs.send(JSON.stringify({ type: 'buyAdvertising' }));
+  updateActionMenu();
+});
+actionVanSpeedBtnEl.addEventListener('click', () => {
+  if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  gameWs.send(JSON.stringify({ type: 'buyVanSpeed' }));
+  updateActionMenu();
+});
 
 // --- Settings ---
 musicToggleEl.checked = getMusicEnabled();
@@ -1355,19 +3116,67 @@ if (savedMode === 'ffa' || savedMode === 'teams' || savedMode === 'solo') {
   selectedMode = savedMode;
 }
 restoreModeSelection();
+const soloOptionsEl = document.getElementById('solo-options');
+const cpuShutdownBreedersEl = document.getElementById('cpu-shutdown-breeders') as HTMLInputElement | null;
+
+function updateSoloOptionsVisibility(): void {
+  if (soloOptionsEl) {
+    if (selectedMode === 'solo') {
+      soloOptionsEl.classList.remove('hidden');
+    } else {
+      soloOptionsEl.classList.add('hidden');
+    }
+  }
+}
+
 document.querySelectorAll('.mode-option').forEach((btn) => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.mode-option').forEach((b) => b.classList.remove('selected'));
     btn.classList.add('selected');
     selectedMode = (btn as HTMLElement).dataset.mode as 'ffa' | 'teams' | 'solo';
     localStorage.setItem(MODE_KEY, selectedMode);
+    updateSoloOptionsVisibility();
   });
 });
 
-// --- Landing: Facebook placeholder (no nav) ---
-landingAuthButtons.addEventListener('click', (e) => {
-  const a = (e.target as HTMLElement).closest('a[href="#"]');
-  if (a) e.preventDefault();
+updateSoloOptionsVisibility();
+
+// --- Landing: Referral actions ---
+referralCopyBtn.addEventListener('click', async () => {
+  if (!referralInfo || !referralInfo.referralCode) return;
+  const link = buildReferralLink(referralInfo.referralCode);
+  try {
+    await navigator.clipboard.writeText(link);
+    referralStatusEl.textContent = 'Referral link copied.';
+  } catch {
+    const input = document.createElement('input');
+    input.value = link;
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand('copy');
+    document.body.removeChild(input);
+    referralStatusEl.textContent = 'Referral link copied.';
+  }
+});
+
+referralClaimBtn.addEventListener('click', async () => {
+  try {
+    const res = await fetch('/referrals/claim', { method: 'POST', credentials: 'include' });
+    const data = await res.json();
+    if (data.ok) {
+      const bonus = typeof data.moneyBonus === 'number' ? data.moneyBonus : 0;
+      if (bonus > 0) setTokens(getTokens() + bonus);
+      localStorage.setItem(SKIN_KEY, '1');
+      referralStatusEl.textContent = 'Reward claimed. Special skin unlocked.';
+      await fetchReferralInfo();
+      updateReferralUI();
+      updateLandingTokens();
+    } else {
+      referralStatusEl.textContent = 'Reward not available yet.';
+    }
+  } catch {
+    referralStatusEl.textContent = 'Unable to claim reward. Try again.';
+  }
 });
 
 // --- Landing: Play ---
@@ -1404,21 +3213,123 @@ cookieEssentialBtn.addEventListener('click', () => {
   cookieBannerEl.classList.add('hidden');
 });
 
-// --- Landing: money and shop ---
-updateLandingMoney();
+// --- Landing: tokens and shop ---
+updateLandingTokens();
 document.querySelectorAll('.landing-buy').forEach((btn) => {
   btn.addEventListener('click', () => {
     const boost = (btn as HTMLElement).dataset.boost as keyof typeof BOOST_PRICES;
     if (!boost || !(boost in BOOST_PRICES)) return;
     const price = BOOST_PRICES[boost as keyof typeof BOOST_PRICES];
-    const m = getMoney();
+    const m = getTokens();
     if (m < price) return;
-    setMoney(m - price);
+    setTokens(m - price);
     if (boost === 'size') pendingBoosts.sizeBonus += 1;
     else if (boost === 'speed') pendingBoosts.speedBoost = true;
     else if (boost === 'adoptSpeed') pendingBoosts.adoptSpeed = true;
-    updateLandingMoney();
+    updateLandingTokens();
   });
+});
+
+// --- Color selection ---
+updateColorUI();
+// Free color buttons
+document.querySelectorAll('.color-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const color = (btn as HTMLElement).dataset.color;
+    if (color) {
+      setSelectedColor(color);
+      updateColorUI();
+    }
+  });
+});
+// Preset color buttons
+document.querySelectorAll('.preset-color').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const color = (btn as HTMLElement).dataset.color;
+    if (color && getUnlockedColors().preset) {
+      setSelectedColor(color);
+      updateColorUI();
+    }
+  });
+});
+// Color purchase buttons
+const colorPickerModal = document.getElementById('color-picker-modal');
+const colorPickerInput = document.getElementById('color-picker-input') as HTMLInputElement;
+const colorPickerInput2 = document.getElementById('color-picker-input2') as HTMLInputElement;
+const colorPickerTitle = document.getElementById('color-picker-title');
+const colorPickerCancel = document.getElementById('color-picker-cancel');
+const colorPickerConfirm = document.getElementById('color-picker-confirm');
+let colorPickerMode: 'custom' | 'gradient' = 'custom';
+
+document.querySelectorAll('.color-buy').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const colorType = (btn as HTMLElement).dataset.color as keyof typeof COLOR_PRICES;
+    const price = COLOR_PRICES[colorType];
+    const unlocked = getUnlockedColors();
+    const m = getTokens();
+    
+    if (colorType === 'preset') {
+      if (unlocked.preset) return; // Already unlocked
+      if (m < price) return;
+      setTokens(m - price);
+      setUnlockedColors({ ...unlocked, preset: true });
+      updateLandingTokens();
+      updateColorUI();
+    } else if (colorType === 'custom') {
+      if (unlocked.custom) {
+        // Already unlocked - use it
+        setSelectedColor(unlocked.custom);
+        updateColorUI();
+        return;
+      }
+      if (m < price) return;
+      // Show color picker
+      colorPickerMode = 'custom';
+      if (colorPickerTitle) colorPickerTitle.textContent = 'Pick Your Custom Color';
+      if (colorPickerInput2) colorPickerInput2.style.display = 'none';
+      colorPickerModal?.classList.remove('hidden');
+    } else if (colorType === 'gradient') {
+      if (unlocked.gradient) {
+        // Already unlocked - use it
+        setSelectedColor(unlocked.gradient);
+        updateColorUI();
+        return;
+      }
+      if (m < price) return;
+      // Show gradient picker
+      colorPickerMode = 'gradient';
+      if (colorPickerTitle) colorPickerTitle.textContent = 'Pick Gradient Colors';
+      if (colorPickerInput2) colorPickerInput2.style.display = 'block';
+      colorPickerModal?.classList.remove('hidden');
+    }
+  });
+});
+
+colorPickerCancel?.addEventListener('click', () => {
+  colorPickerModal?.classList.add('hidden');
+});
+
+colorPickerConfirm?.addEventListener('click', () => {
+  const unlocked = getUnlockedColors();
+  const m = getTokens();
+  
+  if (colorPickerMode === 'custom') {
+    const color = colorPickerInput?.value || '#ff5500';
+    setTokens(m - COLOR_PRICES.custom);
+    setUnlockedColors({ ...unlocked, custom: color });
+    setSelectedColor(color);
+  } else {
+    const color1 = colorPickerInput?.value || '#ff5500';
+    const color2 = colorPickerInput2?.value || '#00aaff';
+    const gradientColor = `gradient:${color1}:${color2}`;
+    setTokens(m - COLOR_PRICES.gradient);
+    setUnlockedColors({ ...unlocked, gradient: gradientColor });
+    setSelectedColor(gradientColor);
+  }
+  
+  colorPickerModal?.classList.add('hidden');
+  updateLandingTokens();
+  updateColorUI();
 });
 
 // --- Landing: music toggle + play on load ---
@@ -1432,8 +3343,637 @@ if (landingMusicToggleEl) {
 // Start music when the first page loads (may be blocked by browser until user interaction)
 if (getMusicEnabled()) playMusic();
 
+// --- Breeder Mini-Game Functions ---
+function startBreederMiniGame(petCount: number, level: number = 1): void {
+  breederGame.active = true;
+  breederGame.pets = [];
+  breederGame.selectedPetIndex = null;
+  breederGame.timeLeft = 30 + level * 5; // More time for higher levels
+  breederGame.totalPets = petCount;
+  breederGame.rescuedCount = 0;
+  breederGame.level = level;
+  breederGame.selectedIngredients = [];
+  
+  // Generate random pets
+  const petTypes: PetType[] = ['dog', 'cat', 'horse', 'bird'];
+  for (let i = 0; i < petCount; i++) {
+    const type = petTypes[Math.floor(Math.random() * petTypes.length)];
+    breederGame.pets.push({ type, rescued: false });
+  }
+  
+  // Update UI to show level-appropriate foods
+  updateFoodButtonsForLevel(level);
+  
+  // Render pets
+  renderBreederPets();
+  updateBreederTokensDisplay();
+  renderSelectedIngredients();
+  
+  // Hide result, show game
+  breederResultEl.classList.add('hidden');
+  breederFoodsEl.style.display = 'flex';
+  breederMinigameEl.classList.add('show');
+  
+  // Update header to show level
+  const titleEl = breederMinigameEl.querySelector('.breeder-title');
+  if (titleEl) {
+    titleEl.textContent = `🚨 Stop Level ${level} Breeders!`;
+  }
+  
+  // Update instructions based on level
+  const inst1 = document.getElementById('breeder-instruction-1');
+  const inst2 = document.getElementById('breeder-instruction-2');
+  const requiredCount = getRequiredIngredients(level);
+  
+  if (inst1 && inst2) {
+    if (requiredCount === 1) {
+      inst1.textContent = '1. Click a pet to select it';
+      inst2.textContent = '2. Click the matching food to rescue it!';
+    } else {
+      inst1.textContent = `1. Click ${requiredCount} ingredients to make a meal`;
+      inst2.textContent = '2. Select a pet - if the meal matches, they\'re rescued!';
+    }
+  }
+  
+  // Start timer
+  breederGame.timerInterval = setInterval(() => {
+    breederGame.timeLeft--;
+    breederTimerEl.textContent = `${breederGame.timeLeft}s`;
+    if (breederGame.timeLeft <= 0) {
+      endBreederMiniGame(false);
+    }
+  }, 1000);
+}
+
+/** Show/hide water and bowl buttons based on breeder level */
+function updateFoodButtonsForLevel(level: number): void {
+  const waterBtn = breederFoodsEl.querySelector('[data-food="water"]') as HTMLElement | null;
+  const bowlBtn = breederFoodsEl.querySelector('[data-food="bowl"]') as HTMLElement | null;
+  
+  // Water is needed for level 6+
+  if (waterBtn) {
+    waterBtn.style.display = level >= 6 ? 'flex' : 'none';
+  }
+  // Bowl is needed for level 10+
+  if (bowlBtn) {
+    bowlBtn.style.display = level >= 10 ? 'flex' : 'none';
+  }
+}
+
+/** Render currently selected ingredients for meal building */
+function renderSelectedIngredients(): void {
+  const requiredCount = getRequiredIngredients(breederGame.level);
+  
+  // Find or create the ingredients display area
+  let ingredientsEl = document.getElementById('breeder-selected-ingredients');
+  if (!ingredientsEl) {
+    ingredientsEl = document.createElement('div');
+    ingredientsEl.id = 'breeder-selected-ingredients';
+    ingredientsEl.className = 'breeder-ingredients';
+    // Insert before food buttons
+    breederFoodsEl.parentNode?.insertBefore(ingredientsEl, breederFoodsEl);
+  }
+  
+  if (requiredCount <= 1) {
+    // Single ingredient mode - hide this area
+    ingredientsEl.style.display = 'none';
+    return;
+  }
+  
+  ingredientsEl.style.display = 'flex';
+  
+  const FOOD_ICONS: Record<FoodType, string> = {
+    apple: '🍎', carrot: '🥕', chicken: '🍗', seeds: '🌻', water: '💧', bowl: '🥣'
+  };
+  
+  // Show selected ingredients and empty slots
+  const slots: string[] = [];
+  for (let i = 0; i < requiredCount; i++) {
+    if (i < breederGame.selectedIngredients.length) {
+      const food = breederGame.selectedIngredients[i];
+      slots.push(`<div class="ingredient-slot filled">${FOOD_ICONS[food]}</div>`);
+    } else {
+      slots.push(`<div class="ingredient-slot empty">?</div>`);
+    }
+  }
+  
+  ingredientsEl.innerHTML = `
+    <span class="ingredients-label">Building meal (${breederGame.selectedIngredients.length}/${requiredCount}):</span>
+    <div class="ingredient-slots">${slots.join('')}</div>
+    ${breederGame.selectedIngredients.length > 0 ? '<button type="button" class="clear-ingredients-btn" id="clear-ingredients">Clear</button>' : ''}
+  `;
+  
+  // Add clear button handler
+  const clearBtn = document.getElementById('clear-ingredients');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      breederGame.selectedIngredients = [];
+      renderSelectedIngredients();
+      updateBreederTokensDisplay();
+    });
+  }
+}
+
+function renderBreederPets(): void {
+  breederPetsEl.innerHTML = breederGame.pets.map((pet, i) => `
+    <div class="breeder-pet${pet.rescued ? ' rescued' : ''}${breederGame.selectedPetIndex === i ? ' selected' : ''}" 
+         data-index="${i}">
+      <span>${PET_EMOJIS[pet.type]}</span>
+      <span class="breeder-pet-label">${pet.type}</span>
+    </div>
+  `).join('');
+  
+  // Add click handlers to select pets
+  breederPetsEl.querySelectorAll('.breeder-pet:not(.rescued)').forEach((el) => {
+    el.addEventListener('click', () => {
+      const index = parseInt((el as HTMLElement).dataset.index ?? '-1', 10);
+      if (index >= 0 && !breederGame.pets[index].rescued) {
+        breederGame.selectedPetIndex = index;
+        renderBreederPets();
+        updateBreederTokensDisplay(); // Update food button states
+      }
+    });
+  });
+}
+
+function updateBreederTokensDisplay(): void {
+  const me = latestSnapshot?.players.find((p) => p.id === myPlayerId);
+  const tokens = me?.money ?? 0;
+  breederTokensEl.textContent = `Your Tokens: ${tokens} RT`;
+  
+  const requiredCount = getRequiredIngredients(breederGame.level);
+  
+  // Update button states based on available tokens and level requirements
+  breederFoodsEl.querySelectorAll('.breeder-food-btn').forEach((btn) => {
+    const food = (btn as HTMLElement).dataset.food as FoodType;
+    const cost = FOOD_COSTS[food];
+    
+    // For single ingredient mode, need a pet selected
+    // For meal mode, can add ingredients anytime but need a pet to complete the meal
+    const canAfford = tokens >= cost;
+    const alreadyAdded = breederGame.selectedIngredients.includes(food);
+    
+    if (requiredCount === 1) {
+      // Single ingredient mode - need pet selected
+      (btn as HTMLButtonElement).disabled = !canAfford || breederGame.selectedPetIndex === null;
+    } else {
+      // Meal mode - can add ingredients if affordable and not already added
+      (btn as HTMLButtonElement).disabled = !canAfford || alreadyAdded;
+    }
+  });
+}
+
+/** Check if selected ingredients form a valid meal for a pet type */
+function checkMealMatch(ingredients: FoodType[], petType: PetType): boolean {
+  const ingredientCount = getRequiredIngredients(breederGame.level);
+  const recipes = MEAL_RECIPES[ingredientCount];
+  if (!recipes) return false;
+  
+  // Sort ingredients for comparison
+  const sortedIngredients = [...ingredients].sort();
+  
+  for (const recipe of recipes) {
+    if (!recipe.worksOn.includes(petType)) continue;
+    
+    const sortedRecipe = [...recipe.ingredients].sort();
+    if (sortedIngredients.length !== sortedRecipe.length) continue;
+    
+    let matches = true;
+    for (let i = 0; i < sortedIngredients.length; i++) {
+      if (sortedIngredients[i] !== sortedRecipe[i]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return true;
+  }
+  return false;
+}
+
+function useFood(food: FoodType): void {
+  const cost = FOOD_COSTS[food];
+  const me = latestSnapshot?.players.find((p) => p.id === myPlayerId);
+  const tokens = me?.money ?? 0;
+  
+  if (tokens < cost) return;
+  
+  const requiredCount = getRequiredIngredients(breederGame.level);
+  
+  // Level 1-2: Single ingredient mode (original behavior)
+  if (requiredCount === 1) {
+    if (breederGame.selectedPetIndex === null) return;
+    
+    const pet = breederGame.pets[breederGame.selectedPetIndex];
+    if (!pet || pet.rescued) return;
+    
+    // Send food use to server (will deduct tokens)
+    if (gameWs?.readyState === WebSocket.OPEN) {
+      const worksOn = FOOD_WORKS_ON[food];
+      const success = worksOn.includes(pet.type);
+      
+      gameWs.send(JSON.stringify({
+        type: 'breederUseFood',
+        food,
+        petIndex: breederGame.selectedPetIndex,
+        petType: pet.type,
+        success,
+      }));
+      
+      if (success) {
+        pet.rescued = true;
+        breederGame.rescuedCount++;
+        breederGame.selectedPetIndex = null;
+        playPickupGrowth();
+        
+        if (breederGame.rescuedCount >= breederGame.totalPets) {
+          endBreederMiniGame(true);
+        } else {
+          renderBreederPets();
+        }
+      } else {
+        playAttackWarning();
+      }
+      
+      updateBreederTokensDisplay();
+    }
+    return;
+  }
+  
+  // Level 3+: Meal combination mode
+  // Check if ingredient already added
+  if (breederGame.selectedIngredients.includes(food)) {
+    showToast('Already added to meal!');
+    return;
+  }
+  
+  // Deduct tokens immediately when adding ingredient
+  if (gameWs?.readyState === WebSocket.OPEN) {
+    gameWs.send(JSON.stringify({
+      type: 'breederUseFood',
+      food,
+      petIndex: -1, // Not targeting a specific pet yet
+      petType: 'ingredient',
+      success: false, // Will validate when meal is complete
+    }));
+  }
+  
+  // Add ingredient to the meal
+  breederGame.selectedIngredients.push(food);
+  renderSelectedIngredients();
+  updateBreederTokensDisplay();
+  
+  // Check if we have all required ingredients
+  if (breederGame.selectedIngredients.length >= requiredCount) {
+    // Now validate against the selected pet
+    if (breederGame.selectedPetIndex === null) {
+      showToast('Select a pet to feed this meal to!');
+      return;
+    }
+    
+    const pet = breederGame.pets[breederGame.selectedPetIndex];
+    if (!pet || pet.rescued) {
+      breederGame.selectedIngredients = [];
+      renderSelectedIngredients();
+      return;
+    }
+    
+    const success = checkMealMatch(breederGame.selectedIngredients, pet.type);
+    
+    if (success) {
+      pet.rescued = true;
+      breederGame.rescuedCount++;
+      breederGame.selectedPetIndex = null;
+      breederGame.selectedIngredients = [];
+      playPickupGrowth();
+      showToast('Meal complete! Pet rescued!');
+      
+      if (breederGame.rescuedCount >= breederGame.totalPets) {
+        endBreederMiniGame(true);
+      } else {
+        renderBreederPets();
+        renderSelectedIngredients();
+      }
+    } else {
+      // Wrong meal - lose the ingredients
+      breederGame.selectedIngredients = [];
+      playAttackWarning();
+      showToast('Wrong meal! Ingredients wasted.');
+      renderSelectedIngredients();
+    }
+    
+    updateBreederTokensDisplay();
+  }
+}
+
+function endBreederMiniGame(completed: boolean): void {
+  if (breederGame.timerInterval) {
+    clearInterval(breederGame.timerInterval);
+    breederGame.timerInterval = null;
+  }
+  
+  // Send completion to server
+  if (gameWs?.readyState === WebSocket.OPEN) {
+    gameWs.send(JSON.stringify({
+      type: 'breederComplete',
+      rescuedCount: breederGame.rescuedCount,
+      totalPets: breederGame.totalPets,
+    }));
+  }
+  
+  // Show result (will be updated when server responds with rewards)
+  breederFoodsEl.style.display = 'none';
+  breederResultEl.classList.remove('hidden');
+  breederResultTitleEl.textContent = completed 
+    ? 'All Pets Rescued!' 
+    : `Time's Up! (${breederGame.rescuedCount}/${breederGame.totalPets})`;
+  breederRewardsEl.innerHTML = '<p style="color:rgba(255,255,255,0.7)">Calculating rewards...</p>';
+}
+
+function showBreederRewards(tokenBonus: number, rewards: Array<{ type: string; amount: number }>): void {
+  const hasPenalty = rewards.some(r => r.type === 'penalty');
+  const hasRewards = tokenBonus > 0 || rewards.some(r => r.type !== 'penalty');
+  
+  const rewardLines: string[] = [];
+  
+  // Show penalty first (in red)
+  const penaltyReward = rewards.find(r => r.type === 'penalty');
+  if (penaltyReward) {
+    rewardLines.push(`<div class="breeder-reward-item" style="color:#ff6b6b;">-${penaltyReward.amount} Size (pets escaped!)</div>`);
+  }
+  
+  // Show positive rewards
+  if (tokenBonus > 0) {
+    rewardLines.push(`<div class="breeder-reward-item">+${tokenBonus} RT</div>`);
+  }
+  
+  rewards.forEach(r => {
+    if (r.type === 'size') rewardLines.push(`<div class="breeder-reward-item">+${r.amount} Size</div>`);
+    if (r.type === 'speed') rewardLines.push(`<div class="breeder-reward-item">Speed Boost!</div>`);
+    if (r.type === 'port') rewardLines.push(`<div class="breeder-reward-item">+${r.amount} Port Charge</div>`);
+  });
+  
+  const title = hasRewards 
+    ? '🎁 Rescue Chest' 
+    : (hasPenalty ? '❌ Breeder Escape!' : 'No Rewards');
+  const titleColor = hasRewards ? '#ffd93d' : '#ff6b6b';
+  
+  breederRewardsEl.innerHTML = `
+    <div class="breeder-result-title" style="color:${titleColor};margin-bottom:8px;">${title}</div>
+    ${rewardLines.join('')}
+  `;
+}
+
+function closeBreederMiniGame(): void {
+  breederGame.active = false;
+  breederMinigameEl.classList.remove('show');
+}
+
+// Breeder Mini-Game Event Listeners
+breederFoodsEl.querySelectorAll('.breeder-food-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const food = (btn as HTMLElement).dataset.food as FoodType;
+    if (food) useFood(food);
+  });
+});
+
+breederCloseBtnEl.addEventListener('click', closeBreederMiniGame);
+
+// --- Daily Gift System ---
+interface DailyGiftReward {
+  tokens: number;
+  sizeBonus?: number;
+  speedBoost?: boolean;
+  portCharge?: boolean;
+}
+
+interface DailyGiftStatus {
+  currentDay: number;
+  canClaimToday: boolean;
+  lastClaimDate: string | null;
+  totalClaims: number;
+  rewards: DailyGiftReward[];
+}
+
+let dailyGiftStatus: DailyGiftStatus | null = null;
+
+const GIFT_ICONS: Record<number, string> = {
+  1: '🎁',
+  2: '⚡',
+  3: '💰',
+  4: '📦',
+  5: '⚡',
+  6: '🌀',
+  7: '🏆',
+};
+
+function formatGiftReward(reward: DailyGiftReward): string {
+  const parts: string[] = [];
+  if (reward.tokens > 0) parts.push(`${reward.tokens} RT`);
+  if (reward.sizeBonus) parts.push(`+${reward.sizeBonus} Size`);
+  if (reward.speedBoost) parts.push('Speed');
+  if (reward.portCharge) parts.push('Port');
+  return parts.join(' + ');
+}
+
+function renderDailyGiftGrid(): void {
+  if (!dailyGiftStatus) return;
+  
+  const { currentDay, canClaimToday, rewards } = dailyGiftStatus;
+  
+  let html = '';
+  
+  // For non-signed-in users, show all days as locked/greyed out
+  const showAsLocked = !isSignedIn;
+  
+  for (let i = 0; i < 7; i++) {
+    const day = i + 1;
+    const reward = rewards[i];
+    
+    let isCurrent = false;
+    let isClaimed = false;
+    let isLocked = true;
+    
+    if (!showAsLocked) {
+      isCurrent = day === currentDay && canClaimToday;
+      isClaimed = day < currentDay || (day === currentDay && !canClaimToday);
+      isLocked = day > currentDay;
+    }
+    
+    const classes = [
+      'daily-gift-day',
+      isCurrent ? 'current' : '',
+      isClaimed ? 'claimed' : '',
+      isLocked || showAsLocked ? 'locked' : '',
+      day === 7 ? 'daily-gift-day7' : '',
+    ].filter(Boolean).join(' ');
+    
+    const icon = isClaimed ? '✓' : '🔒';
+    
+    html += `
+      <div class="${classes}">
+        <div class="daily-gift-day-label">Day ${day}</div>
+        <div class="daily-gift-day-icon">${icon}</div>
+        <div class="daily-gift-day-reward">${formatGiftReward(reward)}</div>
+      </div>
+    `;
+  }
+  
+  // Add sign-in overlay for non-signed-in users
+  if (!isSignedIn) {
+    html = `
+      <div class="daily-gift-signin-overlay">
+        <div class="daily-gift-signin-message">Sign in for daily gifts!</div>
+        <div class="daily-gift-signin-buttons">
+          <a href="${buildAuthUrl('/auth/google')}" class="daily-gift-signin-btn google">Sign in with Google</a>
+          <a href="${buildAuthUrl('/auth/facebook')}" class="daily-gift-signin-btn facebook">Sign in with Facebook</a>
+        </div>
+      </div>
+      <div class="daily-gift-grid-greyed">${html}</div>
+    `;
+    dailyGiftGridEl.innerHTML = html;
+    dailyGiftClaimBtnEl.classList.add('hidden');
+    dailyGiftSubtitleEl.textContent = '';
+  } else {
+    dailyGiftGridEl.innerHTML = html;
+    dailyGiftClaimBtnEl.classList.remove('hidden');
+    
+    if (canClaimToday) {
+      dailyGiftClaimBtnEl.disabled = false;
+      dailyGiftClaimBtnEl.textContent = `Claim Day ${currentDay} Gift`;
+      dailyGiftSubtitleEl.textContent = 'Play to unlock today\'s gift!';
+    } else {
+      dailyGiftClaimBtnEl.disabled = true;
+      dailyGiftClaimBtnEl.textContent = 'Come back tomorrow!';
+      dailyGiftSubtitleEl.textContent = `Next gift: Day ${currentDay > 7 ? 1 : currentDay}`;
+    }
+  }
+}
+
+async function fetchDailyGiftStatus(): Promise<void> {
+  // Always show daily gift button, but only fetch status if signed in
+  dailyGiftBtnEl.classList.remove('hidden');
+  
+  if (!isSignedIn) {
+    // Show default day 1 for non-signed-in users (they can view but not claim)
+    dailyGiftStatus = {
+      currentDay: 1,
+      canClaimToday: true, // They can "try" to claim but will be prompted to sign in
+      lastClaimDate: null,
+      totalClaims: 0,
+      rewards: [
+        { tokens: 15 },
+        { tokens: 25, speedBoost: true },
+        { tokens: 40 },
+        { tokens: 50, sizeBonus: 3 },
+        { tokens: 75, speedBoost: true },
+        { tokens: 100, portCharge: true },
+        { tokens: 150, sizeBonus: 5, speedBoost: true },
+      ],
+    };
+    dailyGiftBtnEl.classList.add('has-gift');
+    return;
+  }
+  
+  try {
+    const res = await fetch('/api/daily-gift', { credentials: 'include' });
+    if (!res.ok) {
+      // Default status for errors
+      dailyGiftStatus = null;
+      return;
+    }
+    
+    dailyGiftStatus = await res.json();
+    
+    // Add pulsing animation if gift is available
+    if (dailyGiftStatus?.canClaimToday) {
+      dailyGiftBtnEl.classList.add('has-gift');
+    } else {
+      dailyGiftBtnEl.classList.remove('has-gift');
+    }
+  } catch {
+    dailyGiftStatus = null;
+  }
+  
+  // Update lobby gift button too
+  updateLobbyGiftButton();
+}
+
+function openDailyGiftModal(): void {
+  if (!dailyGiftStatus) return;
+  renderDailyGiftGrid();
+  dailyGiftModalEl.classList.add('show');
+}
+
+function closeDailyGiftModal(): void {
+  dailyGiftModalEl.classList.remove('show');
+}
+
+async function claimDailyGiftAction(): Promise<void> {
+  // Check if user is signed in first
+  if (!isSignedIn) {
+    showToast('Sign in to collect daily rewards!');
+    closeDailyGiftModal();
+    return;
+  }
+  
+  if (!dailyGiftStatus?.canClaimToday) return;
+  
+  try {
+    const res = await fetch('/api/daily-gift/claim', {
+      method: 'POST',
+      credentials: 'include',
+    });
+    
+    if (!res.ok) {
+      const data = await res.json();
+      showToast(data.error || 'Failed to claim gift');
+      return;
+    }
+    
+    const data = await res.json();
+    
+    // Award tokens locally
+    if (data.reward?.tokens) {
+      setTokens(getTokens() + data.reward.tokens);
+      updateLandingTokens();
+    }
+    
+    // Update status
+    await fetchDailyGiftStatus();
+    renderDailyGiftGrid();
+    
+    // Show success message
+    const rewardText = formatGiftReward(data.reward);
+    showToast(`Gift claimed: ${rewardText}`);
+    
+  } catch {
+    showToast('Failed to claim gift');
+  }
+}
+
+// Daily Gift Event Listeners
+dailyGiftBtnEl.addEventListener('click', openDailyGiftModal);
+dailyGiftCloseEl.addEventListener('click', closeDailyGiftModal);
+dailyGiftClaimBtnEl.addEventListener('click', claimDailyGiftAction);
+lobbyGiftBtnEl.addEventListener('click', openDailyGiftModal);
+
+/** Update the lobby gift button visibility and animation */
+function updateLobbyGiftButton(): void {
+  if (dailyGiftStatus) {
+    lobbyGiftBtnEl.classList.remove('hidden');
+    if (dailyGiftStatus.canClaimToday || !isSignedIn) {
+      lobbyGiftBtnEl.classList.add('has-gift');
+    } else {
+      lobbyGiftBtnEl.classList.remove('has-gift');
+    }
+  } else {
+    lobbyGiftBtnEl.classList.add('hidden');
+  }
+}
+
 // --- Start ---
+storeReferralFromUrl();
 fetchAndRenderAuth();
-updateLandingMoney();
+updateLandingTokens();
 window.addEventListener('resize', resize);
 resize();

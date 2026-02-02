@@ -1,14 +1,14 @@
-# Adoptar.io a Pet Rescue/Adoption io game
+# Adoptar.io – Pet Rescue/Adoption io game
 
-.io-style multiplayer browser game: find pets, carry them to shelters, score points. Collect money from adopting out to buy boosts before game starts.
+Multiplayer browser game: rescue pets, adopt them out to grow your shelter, and earn money for boosts before matches.
 
 **How to play:** You are a shelter. WASD or tap to move. Collect strays (brown) up to your size; bring them to the Adoption Center (green circle) to adopt out and grow. Green orbs = +size, blue = speed boost.
 
-Each player always start the same size, if you save and build up, you earn money from adopting out and can buy boosts before game starts. Your name on the top of the world leaderboard is what every player wants to achieve.
+Each player starts the same size. As you adopt pets, you earn money and can buy boosts before matches.
 
-You grow your shelter until it gets large enough to have its own adoption center, however at that point you are "grounded" and cannot move, your gravity must increase (aka marketing that could be bought) to pull in both strays/dropped off pets and adopt out.
+When your shelter gets large enough to form its own adoption center, you become grounded (can’t move) and must rely on gravity to pull in strays and adopt out.
 
-When you touch another shelter, you can make allies or go to "war" by trying to take over their shelter. At the end of the 5 minute match, the largest shelter wins a bonus, top 3 always get something.
+When you touch another shelter, you can ally or fight. At the end of the 5‑minute match, the largest shelter wins a bonus and the top 3 earn rewards.
 
 ## Architecture
 
@@ -137,6 +137,30 @@ To enable "Sign in with Google", create OAuth 2.0 credentials and configure your
 
 **If you get "Google sign-in not configured" (503):** The server loads `.env` from the **repo root** (the directory that contains `server/` and `client/`). Ensure `.env` is there with `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` set (no quotes, no extra spaces). Restart the server after changing `.env`. If you start the process from another directory (e.g. systemd), the server still looks for `.env` relative to its own file path, so it should find the repo-root `.env`.
 
+## Facebook Login (OAuth) setup
+
+To enable "Sign in with Facebook", create a Facebook App and configure OAuth.
+
+1. **Create an app**
+   - Go to [Meta for Developers](https://developers.facebook.com/) and create an app.
+   - Add **Facebook Login** as a product.
+
+2. **Valid OAuth redirect URIs**
+   - The auth server uses: `{API_ORIGIN}/auth/facebook/callback`
+   - Add the exact callback URL for each environment:
+     - Local dev: `http://localhost:3000/auth/facebook/callback`
+     - Production: `https://games.vo.ly/auth/facebook/callback`
+
+3. **Set env vars in `.env`**
+   ```env
+   FACEBOOK_APP_ID=your-app-id
+   FACEBOOK_APP_SECRET=your-app-secret
+   API_ORIGIN=https://games.vo.ly
+   ```
+
+4. **Proxy `/auth` in production**  
+   Same as Google: ensure `/auth/*` routes go to the auth API server (port 4002).
+
 ## Redis and database setup
 
 ### Redis
@@ -171,7 +195,7 @@ If `REDIS_URL` is empty or unset, the app runs without Redis (single game server
 
 ### Database (optional)
 
-The auth API currently keeps users in memory. For production you can add a database (e.g. Postgres) for users, sessions, match results, and world leaderboard. In `.env`:
+The auth API uses SQLite for referral/user metadata. You can add a separate database (e.g. Postgres) for users, sessions, match results, and world leaderboard. In `.env`:
 
 ```env
 DATABASE_URL=postgresql://user:password@localhost:5432/rescueworld
@@ -182,9 +206,12 @@ DATABASE_URL=postgresql://user:password@localhost:5432/rescueworld
 ## Project layout
 
 - `shared/` – constants, types, binary protocol (input + snapshot).
-- `server/` – signaling (WebSocket), game server (WebSocket), auth API (Express, port 4002), optional Redis registry/replay.
+- `server/` – signaling (WebSocket), game server (WebSocket), auth API (Express, port 4002), Redis registry/replay, referral tracking (SQLite + Redis).
 - `client/` – browser client (Vite, canvas 2D, prediction + interpolation, audio, settings, ping/switch-server UI).
 
-## Backlog / planned
+## Referral system (OAuth signups)
 
-- **Facebook connection and referral:** Users can connect Facebook; “Invite friends” gives a shareable link. When an invited user plays, the inviter gets a referral boost (e.g. in-game bonus or future XP/currency). Implementation: Facebook App (Facebook Login), store referral codes/links, attribute joins to inviter, apply boost server-side when a referred user completes a match.
+- Referral code is generated per OAuth user
+- Shareable link: `?ref=CODE`
+- Confirmed signup = Google or Facebook OAuth login
+- Rewards: every 5 confirmed signups → special skin + money bonus

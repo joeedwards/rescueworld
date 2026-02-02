@@ -30,14 +30,29 @@ export interface PlayerState {
     allies?: string[];
     /** True if consumed/eliminated (size <= threshold). */
     eliminated?: boolean;
+    /** True if player has grounded themselves at a location. */
+    grounded?: boolean;
+    /** Number of port charges the player has (teleport ability). */
+    portCharges?: number;
+    /** Shelter color (hex like #ff9f43 or gradient like gradient:#color1:#color2). */
+    shelterColor?: string;
+    /** In-game money earned from adoptions. */
+    money?: number;
+    /** ID of player's built shelter (if any). */
+    shelterId?: string;
+    /** True if player has purchased permanent van speed upgrade. */
+    vanSpeedUpgrade?: boolean;
 }
 export declare const PICKUP_TYPE_GROWTH = 0;
 export declare const PICKUP_TYPE_SPEED = 1;
+export declare const PICKUP_TYPE_PORT = 2;
+export declare const PICKUP_TYPE_BREEDER = 3;
 export interface PickupState {
     id: string;
     x: number;
     y: number;
     type: number;
+    level?: number;
 }
 /** Stray: in world (insideShelterId null) or inside a shelter. */
 export interface PetState {
@@ -56,12 +71,53 @@ export interface AdoptionZoneState {
     y: number;
     radius: number;
 }
+/** Stationary shelter building built by player. Van delivers pets here. */
+export interface ShelterState {
+    id: string;
+    ownerId: string;
+    x: number;
+    y: number;
+    /** Has adoption center upgrade - enables adopting at shelter. */
+    hasAdoptionCenter: boolean;
+    /** Has gravity upgrade - pulls strays toward shelter. */
+    hasGravity: boolean;
+    /** Has advertising upgrade - increases stray spawn near shelter. */
+    hasAdvertising: boolean;
+    /** Pet ids currently inside this shelter waiting for adoption. */
+    petsInside: string[];
+    /** Shelter size - grows with adoptions. */
+    size: number;
+    /** Total adoptions at this shelter. */
+    totalAdoptions: number;
+}
+/** Breeder shelter - formed when breeders grow too large, spawns wild strays */
+export interface BreederShelterState {
+    id: string;
+    x: number;
+    y: number;
+    level: number;
+    size: number;
+}
 export interface GameSnapshot {
     tick: number;
     matchEndAt: number;
+    /** True if match ended by domination or milestone; false or undefined if ended by time. */
+    matchEndedEarly?: boolean;
+    /** ID of the winner (reached adoption milestone). */
+    winnerId?: string;
+    /** Total adoptions across all players in this match. */
+    totalMatchAdoptions?: number;
+    /** Current scarcity level (0-3). */
+    scarcityLevel?: number;
+    /** Match duration in milliseconds since start. */
+    matchDurationMs?: number;
     players: PlayerState[];
     pets: PetState[];
     adoptionZones: AdoptionZoneState[];
     pickups: PickupState[];
+    /** Player-built shelters (separate from vans). */
+    shelters?: ShelterState[];
+    /** Breeder shelters - enemy structures that spawn wild strays */
+    breederShelters?: BreederShelterState[];
     stateHash?: string;
 }

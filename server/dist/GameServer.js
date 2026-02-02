@@ -40,6 +40,7 @@ function createMatch(mode) {
         cpuIds: new Set(),
         readySet: new Set(),
         fightAllyChoices: new Map(),
+        allyRequests: new Map(),
         lastReplayTick: 0,
     };
     matches.set(match.id, match);
@@ -215,12 +216,101 @@ wss.on('connection', async (ws) => {
                     match.fightAllyChoices.set(`${playerId},${msg.targetId}`, msg.choice);
                     return;
                 }
+                if (msg.type === 'allyRequest' && typeof msg.targetId === 'string') {
+                    let requests = match.allyRequests.get(playerId);
+                    if (!requests) {
+                        requests = new Set();
+                        match.allyRequests.set(playerId, requests);
+                    }
+                    requests.add(msg.targetId);
+                    return;
+                }
+                if (msg.type === 'ground') {
+                    // Legacy: ground is now buildShelter
+                    const result = match.world.buildShelter(playerId);
+                    if (!result.success && result.reason) {
+                        ws.send(JSON.stringify({ type: 'groundFailed', reason: result.reason }));
+                    }
+                    return;
+                }
+                if (msg.type === 'buildShelter') {
+                    const result = match.world.buildShelter(playerId);
+                    if (!result.success && result.reason) {
+                        ws.send(JSON.stringify({ type: 'buildFailed', reason: result.reason }));
+                    }
+                    return;
+                }
+                if (msg.type === 'buyAdoptionCenter') {
+                    const result = match.world.buyAdoptionCenter(playerId);
+                    if (!result.success && result.reason) {
+                        ws.send(JSON.stringify({ type: 'upgradeFailed', upgrade: 'adoptionCenter', reason: result.reason }));
+                    }
+                    return;
+                }
+                if (msg.type === 'buyGravity') {
+                    const result = match.world.buyGravity(playerId);
+                    if (!result.success && result.reason) {
+                        ws.send(JSON.stringify({ type: 'upgradeFailed', upgrade: 'gravity', reason: result.reason }));
+                    }
+                    return;
+                }
+                if (msg.type === 'buyAdvertising') {
+                    const result = match.world.buyAdvertising(playerId);
+                    if (!result.success && result.reason) {
+                        ws.send(JSON.stringify({ type: 'upgradeFailed', upgrade: 'advertising', reason: result.reason }));
+                    }
+                    return;
+                }
+                if (msg.type === 'buyVanSpeed') {
+                    const result = match.world.buyVanSpeed(playerId);
+                    if (!result.success && result.reason) {
+                        ws.send(JSON.stringify({ type: 'upgradeFailed', upgrade: 'vanSpeed', reason: result.reason }));
+                    }
+                    return;
+                }
+                if (msg.type === 'usePort') {
+                    match.world.usePort(playerId);
+                    return;
+                }
+                if (msg.type === 'setColor' && typeof msg.color === 'string') {
+                    match.world.setPlayerColor(playerId, msg.color);
+                    return;
+                }
+                // Solo mode option: CPU breeder shutdown behavior
+                if (msg.type === 'setCpuBreederBehavior' && typeof msg.canShutdown === 'boolean') {
+                    if (match.mode === 'solo') {
+                        match.world.setCpuBreederBehavior(msg.canShutdown);
+                    }
+                    return;
+                }
                 if (msg.type === 'startingBoosts' && (typeof msg.sizeBonus === 'number' || msg.speedBoost || msg.adoptSpeed)) {
                     match.world.applyStartingBoosts(playerId, {
                         sizeBonus: typeof msg.sizeBonus === 'number' ? msg.sizeBonus : 0,
                         speedBoost: !!msg.speedBoost,
                         adoptSpeed: !!msg.adoptSpeed,
                     });
+                    return;
+                }
+                // Breeder mini-game messages
+                if (msg.type === 'breederUseFood' && typeof msg.food === 'string') {
+                    // Deduct tokens for food used
+                    const foodCosts = {
+                        apple: 5, carrot: 8, chicken: 15, seeds: 5, water: 20, bowl: 20
+                    };
+                    const cost = foodCosts[msg.food] ?? 0;
+                    if (cost > 0) {
+                        // Deduct tokens via world method (need to add this)
+                        match.world.deductTokens(playerId, cost);
+                    }
+                    return;
+                }
+                if (msg.type === 'breederComplete' && typeof msg.rescuedCount === 'number' && typeof msg.totalPets === 'number') {
+                    const result = match.world.completeBreederMiniGame(playerId, msg.rescuedCount, msg.totalPets);
+                    ws.send(JSON.stringify({
+                        type: 'breederRewards',
+                        tokenBonus: result.tokenBonus,
+                        rewards: result.rewards,
+                    }));
                     return;
                 }
             }
@@ -279,12 +369,34 @@ setInterval(() => {
                 }
             }
             else if (match.phase === 'playing') {
-                match.world.tickWorld(match.fightAllyChoices);
+                match.world.tickWorld(match.fightAllyChoices, match.allyRequests);
                 const snapshot = match.world.getSnapshot();
                 if (snapshot.tick - match.lastReplayTick >= 50) {
                     match.lastReplayTick = snapshot.tick;
                     const hash = snapshot.stateHash ?? String(snapshot.tick);
                     (0, registry_js_1.appendReplay)(matchId, snapshot.tick, hash).catch(() => { });
+                }
+                // Check for pending breeder mini-games and send start messages
+                for (const [playerId, ws] of match.players.entries()) {
+                    const pending = match.world.getPendingBreederMiniGame(playerId);
+                    if (pending && ws.readyState === 1) {
+                        ws.send(JSON.stringify({
+                            type: 'breederStart',
+                            petCount: pending.petCount,
+                            level: pending.level,
+                        }));
+                        match.world.clearPendingBreederMiniGame(playerId);
+                    }
+                }
+                // Broadcast match-wide announcements
+                const announcements = match.world.getPendingAnnouncements();
+                if (announcements.length > 0) {
+                    const announcementMsg = JSON.stringify({ type: 'announcement', messages: announcements });
+                    for (const ws of match.players.values()) {
+                        if (ws.readyState === 1)
+                            ws.send(announcementMsg);
+                    }
+                    match.world.clearPendingAnnouncements();
                 }
                 const buf = (0, shared_2.encodeSnapshot)(snapshot);
                 for (const ws of match.players.values()) {

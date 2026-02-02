@@ -26,6 +26,7 @@
       box-shadow: 0 4px 20px rgba(0,0,0,0.4);
     }
     .top-bar .score { font: 700 18px/1 Rubik, sans-serif; color: #7bed9f; text-shadow: 0 0 12px rgba(123,237,159,0.4); }
+    .top-bar .game-clock { font: 600 14px/1 monospace; color: rgba(255,255,255,0.7); background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px; }
     .top-bar .game-title { font: 700 16px/1 Rubik, sans-serif; color: rgba(255,255,255,0.9); letter-spacing: 0.12em; }
     .top-bar .timer { font: 700 18px/1 Rubik, sans-serif; color: #fff; letter-spacing: 0.05em; }
     .top-bar #auth-area { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -47,6 +48,10 @@
     .lobby-countdown { font: 600 14px Rubik, sans-serif; color: rgba(255,255,255,0.9); margin-bottom: 14px; }
     .lobby-countdown.hidden { display: none; }
     .lobby-ready-btn.hidden { display: none; }
+    .lobby-gift-btn { position: absolute; top: 10px; right: 10px; font-size: 24px; background: transparent; border: none; cursor: pointer; padding: 4px; border-radius: 6px; transition: transform 0.15s; }
+    .lobby-gift-btn:hover { transform: scale(1.2); }
+    .lobby-gift-btn.hidden { display: none; }
+    .lobby-gift-btn.has-gift { animation: pulse-gift 1.5s infinite; }
     .fight-ally-overlay { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 70; background: rgba(35,42,60,0.98); border: 2px solid #7bed9f; border-radius: 12px; padding: 20px; text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
     .fight-ally-overlay.hidden { display: none; }
     .fight-ally-title { font: 700 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 8px; }
@@ -57,6 +62,31 @@
     .ally-btn { background: #7bed9f; color: #1a1a2e; }
     .cpu-warning { position: fixed; top: 60px; right: 16px; z-index: 70; background: rgba(35,42,60,0.98); border: 2px solid #ff6b6b; border-radius: 10px; padding: 10px 14px; font: 700 12px Rubik, sans-serif; color: #ff6b6b; box-shadow: 0 6px 18px rgba(0,0,0,0.4); }
     .cpu-warning.hidden { display: none; }
+    .action-menu { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); z-index: 100; background: rgba(35,42,60,0.98); border: 2px solid #7bed9f; border-radius: 12px; padding: 16px 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); min-width: 260px; max-height: calc(100vh - 120px); overflow-y: auto; }
+    .action-menu.hidden { display: none; }
+    .action-menu-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .action-menu-title { font: 700 16px Rubik, sans-serif; color: #7bed9f; }
+    .action-menu-close { background: none; border: none; color: rgba(255,255,255,0.7); font-size: 18px; cursor: pointer; padding: 0 4px; }
+    .action-menu-close:hover { color: #ff6b6b; }
+    .action-menu-item { background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+    .action-menu-item:last-child { margin-bottom: 0; }
+    .action-menu-item-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .action-menu-item-name { font: 600 14px Rubik, sans-serif; color: #fff; }
+    .action-menu-item-cost { font: 600 12px Rubik, sans-serif; color: #ffd93d; }
+    .action-menu-item-desc { font: 400 11px Rubik, sans-serif; color: rgba(255,255,255,0.7); margin-bottom: 8px; }
+    .action-menu-item.owned { opacity: 0.5; }
+    .action-menu-item.owned .action-menu-btn { background: #666 !important; cursor: default; }
+    .action-menu-progress { margin-bottom: 8px; }
+    .action-menu-progress-label { font: 600 11px Rubik, sans-serif; color: rgba(255,255,255,0.7); margin-bottom: 4px; }
+    .action-menu-progress-bar { height: 6px; background: rgba(0,0,0,0.4); border-radius: 3px; overflow: hidden; }
+    .action-menu-progress-fill { height: 100%; border-radius: 3px; transition: width 0.2s; }
+    .action-menu-progress-fill.size { background: linear-gradient(90deg, #7bed9f, #5cd98b); }
+    .action-menu-progress-fill.tokens { background: linear-gradient(90deg, #ffd93d, #e6c235); }
+    .action-menu-btn { width: 100%; padding: 10px; font: 600 13px Rubik, sans-serif; border-radius: 6px; cursor: pointer; border: none; transition: all 0.15s; }
+    .action-menu-btn.ready { background: #7bed9f; color: #1a1a2e; }
+    .action-menu-btn.ready:hover { background: #5cd98b; }
+    .action-menu-btn:disabled { background: #555; color: rgba(255,255,255,0.5); cursor: not-allowed; }
+    .action-menu-hint { font: 600 10px Rubik, sans-serif; color: rgba(255,255,255,0.5); text-align: center; margin-top: 10px; }
     .settings-panel { position: fixed; top: 56px; right: 12px; background: rgba(35,42,60,0.98); border: 2px solid rgba(255,255,255,0.2); border-radius: 12px; padding: 16px; z-index: 60; min-width: 180px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
     .settings-panel.hidden { display: none; }
     .settings-panel h3 { margin-bottom: 12px; font: 700 14px Rubik, sans-serif; color: #7bed9f; }
@@ -81,6 +111,26 @@
     }
     #carried { font: 600 14px Rubik, sans-serif; color: #ffd93d; }
     #tag-cooldown { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.7); }
+    .ground-btn, .port-btn, .build-shelter-btn {
+      position: absolute; bottom: 90px; padding: 12px 24px; border-radius: 8px;
+      font: 700 14px Rubik, sans-serif; cursor: pointer; border: 2px solid;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: all 0.15s;
+    }
+    .ground-btn { right: 16px; background: #7bed9f; color: #1a1a2e; border-color: #5cd98b; }
+    .ground-btn:hover { background: #5cd98b; transform: translateY(-2px); }
+    .port-btn { right: 140px; background: #70a3ff; color: #1a1a2e; border-color: #5090f0; }
+    .port-btn:hover { background: #5090f0; transform: translateY(-2px); }
+    .build-shelter-btn { right: 16px; background: #ffd93d; color: #1a1a2e; border-color: #e6c235; }
+    .build-shelter-btn:hover { background: #e6c235; transform: translateY(-2px); }
+    .build-shelter-btn:disabled { background: #888; border-color: #666; cursor: not-allowed; opacity: 0.6; }
+    .ground-btn.hidden, .port-btn.hidden, .build-shelter-btn.hidden, .center-van-btn.hidden { display: none; }
+    .center-van-btn, .center-shelter-btn { position: absolute; bottom: 90px; padding: 10px 16px; border-radius: 8px; font: 700 12px Rubik, sans-serif; cursor: pointer; border: 2px solid; box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: all 0.15s; }
+    .center-van-btn { right: 260px; border-color: #888; background: rgba(50,60,80,0.9); color: #fff; }
+    .center-van-btn:hover { background: rgba(70,80,100,0.95); transform: translateY(-2px); }
+    .center-shelter-btn { right: 340px; border-color: #7bed9f; background: rgba(50,80,60,0.9); color: #7bed9f; }
+    .center-shelter-btn:hover { background: rgba(60,100,70,0.95); transform: translateY(-2px); }
+    .center-shelter-btn.hidden { display: none; }
+    .game-tokens { font: 700 14px Rubik, sans-serif; color: #ffd93d; margin-left: 12px; }
     #leaderboard {
       position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
       background: linear-gradient(145deg, rgba(35,42,60,0.98), rgba(25,30,45,0.98));
@@ -91,6 +141,138 @@
     }
     #leaderboard.show { display: block; }
     #leaderboard strong { display: block; margin-bottom: 16px; font-size: 20px; color: #7bed9f; }
+    .match-ads { display: flex; gap: 12px; margin: 14px 0 10px; flex-wrap: wrap; }
+    .match-ad-slot, .match-self-promo {
+      flex: 1 1 200px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 10px; padding: 10px 12px; min-width: 180px;
+    }
+    .match-ad-slot h4, .match-self-promo h4 { font: 700 13px Rubik, sans-serif; color: #7bed9f; margin-bottom: 6px; }
+    .match-ad-placeholder {
+      height: 100px; border: 1px dashed rgba(255,255,255,0.2); border-radius: 8px;
+      display: flex; align-items: center; justify-content: center; font: 600 12px Rubik, sans-serif;
+      color: rgba(255,255,255,0.6); background: rgba(0,0,0,0.2);
+    }
+    .match-self-promo p { font: 600 12px/1.4 Rubik, sans-serif; color: rgba(255,255,255,0.85); }
+    
+    /* Breeder Mini-Game Modal */
+    #breeder-minigame {
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      background: linear-gradient(145deg, rgba(60,30,30,0.98), rgba(40,20,20,0.98));
+      border: 3px solid #ff6b6b; border-radius: 16px; padding: 24px 28px;
+      min-width: 340px; max-width: 90vw; max-height: 90vh; overflow-y: auto;
+      font: 600 14px Rubik, sans-serif; color: #fff;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.08);
+      z-index: 90; display: none;
+    }
+    #breeder-minigame.show { display: block; }
+    .breeder-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+    .breeder-title { font: 700 18px Rubik, sans-serif; color: #ff6b6b; }
+    .breeder-timer { font: 700 16px Rubik, sans-serif; color: #ffd93d; }
+    .breeder-tokens { font: 600 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 12px; }
+    .breeder-pets { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; justify-content: center; }
+    .breeder-pet {
+      width: 60px; height: 60px; border-radius: 12px; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; background: rgba(255,255,255,0.1);
+      border: 2px solid rgba(255,255,255,0.3); font-size: 28px; transition: all 0.2s; cursor: pointer;
+    }
+    .breeder-pet:hover:not(.rescued) { background: rgba(255,255,255,0.2); border-color: #ffd93d; transform: scale(1.05); }
+    .breeder-pet.selected { border-color: #ffd93d; background: rgba(255,215,61,0.2); transform: scale(1.1); box-shadow: 0 0 12px rgba(255,215,61,0.4); }
+    .breeder-pet.rescued { background: rgba(123,237,159,0.3); border-color: #7bed9f; opacity: 0.6; cursor: default; }
+    .breeder-pet-label { font: 600 10px Rubik, sans-serif; color: rgba(255,255,255,0.8); margin-top: 2px; }
+    .breeder-foods { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 16px; }
+    .breeder-food-btn {
+      padding: 10px 14px; border-radius: 8px; font: 600 12px Rubik, sans-serif;
+      cursor: pointer; border: 2px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.1);
+      color: #fff; transition: all 0.15s; display: flex; flex-direction: column; align-items: center;
+    }
+    .breeder-food-btn:hover { background: rgba(255,255,255,0.2); border-color: #ffd93d; }
+    .breeder-food-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .breeder-food-btn .food-icon { font-size: 20px; margin-bottom: 4px; }
+    .breeder-food-btn .food-cost { color: #ffd93d; font-size: 11px; }
+    /* Ingredient display for meal building */
+    .breeder-ingredients {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+      padding: 10px; background: rgba(0,0,0,0.3); border-radius: 8px;
+      justify-content: center; flex-wrap: wrap;
+    }
+    .ingredients-label { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.9); }
+    .ingredient-slots { display: flex; gap: 6px; }
+    .ingredient-slot {
+      width: 36px; height: 36px; border-radius: 8px; display: flex;
+      align-items: center; justify-content: center; font-size: 20px;
+      border: 2px dashed rgba(255,255,255,0.4); background: rgba(0,0,0,0.2);
+    }
+    .ingredient-slot.filled { border-style: solid; border-color: #7bed9f; background: rgba(123,237,159,0.2); }
+    .ingredient-slot.empty { color: rgba(255,255,255,0.4); font-size: 16px; }
+    .clear-ingredients-btn {
+      padding: 6px 12px; border-radius: 6px; border: 1px solid rgba(255,100,100,0.5);
+      background: rgba(255,100,100,0.2); color: #ff6b6b; font: 600 11px Rubik, sans-serif;
+      cursor: pointer; transition: all 0.15s;
+    }
+    .clear-ingredients-btn:hover { background: rgba(255,100,100,0.3); }
+    .breeder-result { text-align: center; margin-top: 16px; }
+    .breeder-result.hidden { display: none; }
+    .breeder-result-title { font: 700 16px Rubik, sans-serif; color: #7bed9f; margin-bottom: 8px; }
+    .breeder-rewards { margin-top: 10px; }
+    .breeder-reward-item { font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); margin: 4px 0; }
+    .breeder-close-btn {
+      width: 100%; padding: 12px; margin-top: 12px; border-radius: 8px; font: 700 14px Rubik, sans-serif;
+      cursor: pointer; border: none; background: #7bed9f; color: #1a1a2e; transition: all 0.15s;
+    }
+    .breeder-close-btn:hover { background: #5cd98b; }
+    
+    /* Daily Gift Modal */
+    #daily-gift-modal {
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      background: linear-gradient(145deg, rgba(75,60,120,0.98), rgba(50,40,90,0.98));
+      border: 3px solid #9b59b6; border-radius: 16px; padding: 20px 24px;
+      min-width: 320px; max-width: 400px;
+      font: 600 14px Rubik, sans-serif; color: #fff;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+      z-index: 95; display: none;
+    }
+    #daily-gift-modal.show { display: block; }
+    .daily-gift-header { text-align: center; margin-bottom: 16px; }
+    .daily-gift-title { font: 700 20px Rubik, sans-serif; color: #ffd93d; margin-bottom: 4px; }
+    .daily-gift-subtitle { font: 600 13px Rubik, sans-serif; color: #9b59b6; }
+    .daily-gift-grid {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px;
+    }
+    .daily-gift-day {
+      background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.2);
+      border-radius: 10px; padding: 10px 8px; text-align: center; position: relative;
+    }
+    .daily-gift-day.current { border-color: #ffd93d; background: rgba(255,215,61,0.15); }
+    .daily-gift-day.claimed { border-color: #7bed9f; background: rgba(123,237,159,0.15); opacity: 0.7; }
+    .daily-gift-day.locked { opacity: 0.5; }
+    .daily-gift-day-label { font: 700 11px Rubik, sans-serif; color: rgba(255,255,255,0.7); margin-bottom: 6px; }
+    .daily-gift-day-icon { font-size: 24px; margin-bottom: 4px; }
+    .daily-gift-day-reward { font: 600 10px Rubik, sans-serif; color: #ffd93d; }
+    .daily-gift-day7 { grid-column: span 3; }
+    .daily-gift-claim-btn {
+      width: 100%; padding: 14px; border-radius: 10px; font: 700 15px Rubik, sans-serif;
+      cursor: pointer; border: none; background: linear-gradient(135deg, #ffd93d, #f39c12);
+      color: #1a1a2e; transition: all 0.15s; margin-top: 8px;
+    }
+    .daily-gift-claim-btn:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(255,215,61,0.4); }
+    .daily-gift-claim-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    .daily-gift-close {
+      position: absolute; top: 10px; right: 14px; font-size: 20px; cursor: pointer;
+      color: rgba(255,255,255,0.6); transition: color 0.15s;
+    }
+    .daily-gift-close:hover { color: #fff; }
+    .daily-gift-signin { text-align: center; padding: 20px; }
+    .daily-gift-signin a { color: #9b59b6; text-decoration: underline; }
+    .daily-gift-signin-overlay { position: relative; z-index: 2; text-align: center; padding: 20px 10px; background: rgba(0,0,0,0.7); border-radius: 12px; margin-bottom: 12px; }
+    .daily-gift-signin-message { font: 700 18px Rubik, sans-serif; color: #ffd93d; margin-bottom: 16px; }
+    .daily-gift-signin-buttons { display: flex; flex-direction: column; gap: 10px; }
+    .daily-gift-signin-btn { display: block; padding: 12px 20px; border-radius: 8px; font: 600 14px Rubik, sans-serif; text-decoration: none; text-align: center; transition: all 0.15s; }
+    .daily-gift-signin-btn.google { background: #fff; color: #333; border: 1px solid #ddd; }
+    .daily-gift-signin-btn.google:hover { background: #f5f5f5; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+    .daily-gift-signin-btn.facebook { background: #1877f2; color: #fff; }
+    .daily-gift-signin-btn.facebook:hover { background: #166fe5; box-shadow: 0 2px 8px rgba(24,119,242,0.4); }
+    .daily-gift-grid-greyed { opacity: 0.4; pointer-events: none; filter: grayscale(0.8); display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    
     #connection-overlay {
       position: fixed; inset: 0; background: rgba(26,26,46,0.95); display: flex; flex-direction: column;
       align-items: center; justify-content: center; padding: 24px; text-align: center; z-index: 100;
@@ -101,14 +283,40 @@
     #connection-overlay p { max-width: 420px; line-height: 1.5; margin-bottom: 8px; color: rgba(255,255,255,0.9); }
     #connection-overlay code { background: rgba(0,0,0,0.3); padding: 2px 8px; border-radius: 4px; font-size: 14px; }
     #connection-overlay .error { color: #ff6b6b; margin-top: 16px; }
+    .toast {
+      position: fixed; top: 20px; left: 50%; transform: translateX(-50%) translateY(-100px);
+      background: rgba(255, 100, 100, 0.95); color: #fff; padding: 12px 24px;
+      border-radius: 8px; font: 600 14px Rubik, sans-serif; z-index: 200;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: transform 0.3s ease;
+      pointer-events: none;
+    }
+    .toast.show { transform: translateX(-50%) translateY(0); }
     #how-to-play {
-      position: fixed; bottom: 80px; left: 12px; right: 12px; max-width: 360px; margin: 0 auto;
-      background: rgba(35,42,60,0.95); border: 2px solid rgba(255,255,255,0.15); border-radius: 12px;
-      padding: 14px 18px; font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.95);
-      line-height: 1.45; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+      position: fixed; bottom: 80px; right: 12px; width: 280px;
+      background: rgba(245,245,245,0.97); border: 3px solid #444; border-radius: 6px;
+      padding: 0; font: 400 13px Arial, sans-serif; color: #333;
+      line-height: 1.5; z-index: 50; box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+      overflow: hidden;
     }
     #how-to-play.hidden { display: none; }
-    #how-to-play strong { color: #7bed9f; }
+    #how-to-play .htp-header {
+      background: #7bed9f; color: #1a1a2e; font-weight: 700; font-size: 16px;
+      padding: 10px 14px; border-bottom: 2px solid #444;
+    }
+    #how-to-play .htp-content { padding: 12px 14px; }
+    #how-to-play h4 { margin: 0 0 8px 0; font-size: 15px; color: #222; font-weight: 700; }
+    #how-to-play p { margin: 0 0 12px 0; font-size: 13px; color: #444; }
+    #how-to-play .htp-controls { margin-top: 8px; }
+    #how-to-play .htp-controls h4 { margin-bottom: 6px; }
+    #how-to-play .htp-key { 
+      display: inline-block; background: #ddd; border: 1px solid #999; border-radius: 4px;
+      padding: 2px 8px; font-family: monospace; font-weight: 700; margin: 2px;
+    }
+    #how-to-play .htp-close {
+      position: absolute; top: 8px; right: 10px; background: none; border: none;
+      font-size: 18px; cursor: pointer; color: #1a1a2e; font-weight: 700;
+    }
+    #how-to-play strong { color: #2d8a4e; }
     /* Landing screen */
     #landing {
       position: fixed; inset: 0; background: #1a1a2e; z-index: 90;
@@ -134,7 +342,40 @@
     }
     .landing-left { max-width: 240px; }
     .landing-center { flex: 1; max-width: 420px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
-    .landing-right { max-width: 220px; }
+    .landing-right { max-width: 260px; }
+    /* Mobile: reorder landing sections - play at top, player below, how-to at bottom */
+    @media (max-width: 768px) {
+      .landing-main { flex-direction: column; }
+      .landing-center { order: 1; max-width: 100%; width: 100%; }
+      .landing-left { order: 2; max-width: 100%; width: 100%; }
+      .landing-right { order: 3; max-width: 100%; width: 100%; }
+    }
+    .game-mode-center { margin-top: 16px; text-align: center; }
+    .game-mode-center h3 { font: 700 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 10px; }
+    .game-mode-center .mode-buttons { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    .game-mode-center .mode-option {
+      padding: 10px 18px; font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9);
+      background: rgba(0,0,0,0.3); border: 2px solid rgba(255,255,255,0.2); border-radius: 8px; cursor: pointer;
+    }
+    .game-mode-center .mode-option:hover { border-color: rgba(255,255,255,0.4); }
+    .game-mode-center .mode-option.selected { border-color: #7bed9f; background: rgba(123,237,159,0.15); color: #7bed9f; }
+    .solo-options { margin-top: 12px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 8px; }
+    .solo-options.hidden { display: none; }
+    .solo-option-label { font: 400 12px Rubik, sans-serif; color: rgba(255,255,255,0.85); cursor: pointer; display: flex; align-items: center; gap: 8px; }
+    .solo-option-label input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+    .howto-text { font: 400 12px Rubik, sans-serif; color: rgba(255,255,255,0.85); line-height: 1.5; margin: 0 0 10px 0; }
+    .howto-text strong { color: #7bed9f; }
+    .howto-subtitle { font: 600 13px Rubik, sans-serif; color: #7bed9f; margin: 12px 0 6px 0; }
+    .howto-keys .key {
+      display: inline-block; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3); border-radius: 4px;
+      padding: 2px 8px; font-family: monospace; font-weight: 700; font-size: 11px; margin: 2px; color: #fff;
+    }
+    .howto-text .orb {
+      display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; margin-right: 3px;
+    }
+    .howto-text .orb.green { background: #7bed9f; }
+    .howto-text .orb.blue { background: #70a3ff; }
+    .howto-text .orb.purple { background: #c77dff; }
     .landing-left h3, .landing-right h3 { font: 700 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 12px; }
     .landing-profile-name { font: 600 16px/1 Rubik, sans-serif; color: #fff; margin-bottom: 8px; }
     .landing-profile-avatar { width: 56px; height: 56px; border-radius: 50%; background: rgba(123,237,159,0.2); border: 2px solid #7bed9f; margin-bottom: 12px; display: flex; align-items: center; justify-content: center; font: 700 24px Rubik, sans-serif; color: #7bed9f; }
@@ -154,11 +395,47 @@
     .landing-right .mode-option { display: block; margin-bottom: 10px; padding: 10px 14px; border-radius: 8px; border: 2px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.2); cursor: pointer; font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); text-align: left; }
     .landing-right .mode-option:hover { border-color: rgba(255,255,255,0.4); }
     .landing-right .mode-option.selected { border-color: #7bed9f; background: rgba(123,237,159,0.15); color: #7bed9f; }
+    .referral-panel { margin-top: 16px; padding: 12px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.15); border-radius: 10px; }
+    .color-selector { margin-top: 16px; }
+    .color-selector h4 { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.8); margin-bottom: 8px; }
+    .color-free { display: flex; gap: 8px; margin-bottom: 10px; }
+    .color-btn { width: 32px; height: 32px; border-radius: 6px; border: 2px solid rgba(255,255,255,0.3); cursor: pointer; transition: all 0.15s; }
+    .color-btn:hover { transform: scale(1.1); }
+    .color-btn.selected { border-color: #fff; box-shadow: 0 0 8px rgba(255,255,255,0.5); }
+    .color-premium { display: flex; flex-direction: column; gap: 6px; }
+    .color-buy { padding: 6px 10px; font: 600 11px Rubik, sans-serif; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.2); border-radius: 6px; color: rgba(255,255,255,0.9); cursor: pointer; text-align: left; }
+    .color-buy:hover { border-color: rgba(255,255,255,0.4); }
+    .color-buy:disabled { opacity: 0.5; cursor: not-allowed; }
+    .color-buy.unlocked { border-color: #7bed9f; color: #7bed9f; }
+    .color-picker-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center; z-index: 150; }
+    .color-picker-modal.hidden { display: none; }
+    .color-picker-content { background: rgba(35,42,60,0.98); border: 2px solid rgba(255,255,255,0.2); border-radius: 12px; padding: 20px; max-width: 320px; }
+    .color-picker-content h3 { font: 700 16px Rubik, sans-serif; color: #7bed9f; margin-bottom: 12px; }
+    .color-picker-content input[type="color"] { width: 100%; height: 50px; border: none; border-radius: 8px; cursor: pointer; margin-bottom: 12px; }
+    .color-picker-btns { display: flex; gap: 10px; justify-content: flex-end; }
+    .color-picker-btns button { padding: 8px 16px; font: 600 13px Rubik, sans-serif; border-radius: 8px; cursor: pointer; border: none; }
+    .color-picker-cancel { background: rgba(255,255,255,0.2); color: #fff; }
+    .color-picker-confirm { background: #7bed9f; color: #1a1a2e; }
+    .preset-colors { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    .preset-color { width: 36px; height: 36px; border-radius: 6px; border: 2px solid rgba(255,255,255,0.3); cursor: pointer; }
+    .preset-color:hover { transform: scale(1.1); }
+    .preset-color.selected { border-color: #fff; }
+    .referral-panel h4 { font: 700 13px Rubik, sans-serif; color: #7bed9f; margin-bottom: 8px; }
+    .referral-status { font: 600 12px/1.4 Rubik, sans-serif; color: rgba(255,255,255,0.85); margin-bottom: 8px; }
+    .referral-link { font: 600 11px/1.4 Rubik, sans-serif; color: rgba(255,255,255,0.7); word-break: break-all; margin-bottom: 8px; }
+    .referral-btn { padding: 8px 10px; font: 600 12px Rubik, sans-serif; border-radius: 6px; border: 1px solid rgba(255,255,255,0.3); background: rgba(0,0,0,0.3); color: #fff; cursor: pointer; width: 100%; }
+    .referral-btn:hover { border-color: #7bed9f; color: #7bed9f; }
+    .referral-hidden { display: none; }
     .landing-shop { margin-top: 16px; }
-    .landing-money { font: 600 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 8px; }
+    .landing-tokens { font: 600 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 8px; }
     .landing-buy { display: block; width: 100%; margin-bottom: 6px; padding: 8px 10px; font: 600 12px Rubik, sans-serif; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.3); border-radius: 6px; color: #fff; cursor: pointer; }
     .landing-buy:hover { border-color: #7bed9f; color: #7bed9f; }
     .landing-buy:disabled { opacity: 0.5; cursor: not-allowed; }
+    .daily-gift-btn { display: block; width: 100%; margin-bottom: 10px; padding: 10px 12px; font: 700 13px Rubik, sans-serif; background: linear-gradient(135deg, #9b59b6, #8e44ad); border: 2px solid #ffd93d; border-radius: 8px; color: #fff; cursor: pointer; transition: all 0.15s; }
+    .daily-gift-btn:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(155,89,182,0.4); }
+    .daily-gift-btn.hidden { display: none; }
+    .daily-gift-btn.has-gift { animation: pulse-gift 1.5s infinite; }
+    @keyframes pulse-gift { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,215,61,0.5); } 50% { box-shadow: 0 0 0 8px rgba(255,215,61,0); } }
     #cookie-banner {
       position: fixed; bottom: 0; left: 0; right: 0; z-index: 200;
       background: rgba(30,35,50,0.98); border-top: 2px solid rgba(255,255,255,0.15);
@@ -179,6 +456,20 @@
     <span>We use cookies for session and preferences. <a href="privacy.html">Privacy Policy</a> <a href="cookies.html">Cookie Policy</a>.</span>
     <span class="cookie-btns"><button type="button" id="cookie-accept" class="cookie-accept">Accept</button><button type="button" id="cookie-essential" class="cookie-essential">Essential only</button></span>
   </div>
+  
+  <!-- Daily Gift Modal -->
+  <div id="daily-gift-modal">
+    <span class="daily-gift-close" id="daily-gift-close">&times;</span>
+    <div class="daily-gift-header">
+      <div class="daily-gift-title">Daily Gift</div>
+      <div class="daily-gift-subtitle" id="daily-gift-subtitle">New calendar started!</div>
+    </div>
+    <div class="daily-gift-grid" id="daily-gift-grid">
+      <!-- Days will be populated by JavaScript -->
+    </div>
+    <button type="button" class="daily-gift-claim-btn" id="daily-gift-claim-btn">Claim Today's Gift</button>
+  </div>
+  
   <div id="landing">
     <header class="landing-top">
       <span class="logo">Adoptar.io</span>
@@ -195,13 +486,35 @@
         <h3>Player</h3>
         <div id="landing-profile-avatar" class="landing-profile-avatar" aria-hidden="true">?</div>
         <div id="landing-profile-name" class="landing-profile-name">Guest</div>
-        <p class="landing-guest-hint" style="font-size:11px;color:rgba(255,255,255,0.7);margin-bottom:12px">Play to earn money. Boosts apply this match. Sign in to save progress.</p>
+        <p class="landing-guest-hint" style="font-size:11px;color:rgba(255,255,255,0.7);margin-bottom:12px">Play to earn Rescue Tokens. Boosts apply this match. Sign in to save progress.</p>
         <div id="landing-profile-actions"></div>
         <div class="landing-shop">
-          <div id="landing-money" class="landing-money">Money: 0</div>
+          <div id="landing-tokens" class="landing-tokens">Tokens: 0 RT</div>
+          <button type="button" class="daily-gift-btn hidden" id="daily-gift-btn">🎁 Daily Gift</button>
           <button type="button" class="landing-buy" data-boost="size">Buy +1 size (50)</button>
           <button type="button" class="landing-buy" data-boost="speed">Buy speed (30)</button>
           <button type="button" class="landing-buy" data-boost="adoptSpeed">Buy adopt speed (40)</button>
+        </div>
+        <div class="color-selector">
+          <h4>Shelter Color</h4>
+          <div class="color-free">
+            <button type="button" class="color-btn selected" data-color="#7bed9f" style="background:#7bed9f" title="Green"></button>
+            <button type="button" class="color-btn" data-color="#70a3ff" style="background:#70a3ff" title="Blue"></button>
+            <button type="button" class="color-btn" data-color="#ff9f43" style="background:#ff9f43" title="Orange"></button>
+          </div>
+          <div class="color-premium">
+            <button type="button" class="color-buy" data-color="preset" data-price="50">Unlock Preset Colors (50)</button>
+            <button type="button" class="color-buy" data-color="custom" data-price="200">Custom Color (200)</button>
+            <button type="button" class="color-buy" data-color="gradient" data-price="500">Gradient Color (500)</button>
+          </div>
+          <div id="preset-colors-row" class="preset-colors" style="display:none">
+            <button type="button" class="preset-color" data-color="#e74c3c" style="background:#e74c3c" title="Red"></button>
+            <button type="button" class="preset-color" data-color="#9b59b6" style="background:#9b59b6" title="Purple"></button>
+            <button type="button" class="preset-color" data-color="#f1c40f" style="background:#f1c40f" title="Yellow"></button>
+            <button type="button" class="preset-color" data-color="#1abc9c" style="background:#1abc9c" title="Teal"></button>
+            <button type="button" class="preset-color" data-color="#e91e63" style="background:#e91e63" title="Pink"></button>
+            <button type="button" class="preset-color" data-color="#00bcd4" style="background:#00bcd4" title="Cyan"></button>
+          </div>
         </div>
       </aside>
       <section class="landing-center">
@@ -218,13 +531,37 @@
           <a href="/auth/google">Sign in with Google</a>
           <a href="#" id="landing-facebook" style="opacity:0.7">Sign in with Facebook</a>
         </div>
-        <p class="hint">WASD or tap to move. Collect strays, bring to Adoption Center to grow.</p>
+        <div class="game-mode-center">
+          <h3>Game Mode</h3>
+          <div class="mode-buttons">
+            <button type="button" class="mode-option selected" data-mode="ffa">FFA</button>
+            <button type="button" class="mode-option" data-mode="teams">Teams</button>
+            <button type="button" class="mode-option" data-mode="solo">Solo / vs CPU</button>
+          </div>
+          <div id="solo-options" class="solo-options hidden">
+            <label class="solo-option-label">
+              <input type="checkbox" id="cpu-shutdown-breeders" checked />
+              CPUs help shut down breeders
+            </label>
+          </div>
+        </div>
       </section>
       <aside class="landing-right">
-        <h3>Game Mode</h3>
-        <button type="button" class="mode-option selected" data-mode="ffa">FFA</button>
-        <button type="button" class="mode-option" data-mode="teams">Teams</button>
-        <button type="button" class="mode-option" data-mode="solo">Solo / vs CPU</button>
+        <h3>How To Play</h3>
+        <p class="howto-text">Drive your <strong>van</strong> to rescue strays. Bring them to the <strong>Adoption Center</strong> (green zone) to adopt out, earn <strong>5 RT each</strong>.</p>
+        <p class="howto-text">Build a <strong>shelter</strong> (250 RT), then buy an <strong>Adoption Center</strong> (250 RT) to adopt at your shelter. Add <strong>Gravity</strong> (300 RT) to pull strays!</p>
+        <p class="howto-text">Press <span class="key">E</span> for build menu. First to <strong>150 adoptions</strong> wins!</p>
+        <h4 class="howto-subtitle">Controls</h4>
+        <p class="howto-text howto-keys"><span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> Move &nbsp; <span class="key">E</span> Build</p>
+        <h4 class="howto-subtitle">Power-ups</h4>
+        <p class="howto-text"><span class="orb green"></span> +Size &nbsp; <span class="orb blue"></span> Speed &nbsp; <span class="orb purple"></span> Port</p>
+      <div class="referral-panel">
+        <h4>Referrals</h4>
+        <div id="referral-status" class="referral-status">Sign in to get your referral link.</div>
+        <div id="referral-link" class="referral-link referral-hidden"></div>
+        <button type="button" id="referral-copy-btn" class="referral-btn referral-hidden">Copy referral link</button>
+        <button type="button" id="referral-claim-btn" class="referral-btn referral-hidden" style="margin-top:8px">Claim reward</button>
+      </div>
       </aside>
     </main>
   </div>
@@ -239,6 +576,7 @@
   <div id="ui">
     <div class="top-bar">
       <span class="score" id="score">Size: 1</span>
+      <span class="game-clock" id="game-clock">00:00:00</span>
       <span class="game-title">Adoptar.io</span>
       <span class="timer" id="timer">5:00</span>
       <span id="ping" class="ping-display"></span>
@@ -258,13 +596,68 @@
     <div id="minimap-wrap"><canvas id="minimap" width="120" height="120"></canvas></div>
     <div class="bottom-bar">
       <span id="carried"></span>
+      <span id="game-tokens" class="game-tokens">0 RT</span>
       <span id="tag-cooldown">Adoptions: 0</span>
     </div>
+    <button type="button" id="build-shelter-btn" class="build-shelter-btn hidden">Menu [E]</button>
     <div id="leaderboard"></div>
+    
+    <!-- Breeder Mini-Game Modal -->
+    <div id="breeder-minigame">
+      <div class="breeder-header">
+        <span class="breeder-title">🚨 Stop the Breeders!</span>
+        <span class="breeder-timer" id="breeder-timer">30s</span>
+      </div>
+      <div class="breeder-tokens" id="breeder-tokens">Your Tokens: 0 RT</div>
+      <p id="breeder-instruction-1" style="margin-bottom:8px;color:rgba(255,255,255,0.8);font-size:12px;">1. Click a pet to select it</p>
+      <p id="breeder-instruction-2" style="margin-bottom:12px;color:rgba(255,255,255,0.8);font-size:12px;">2. Click the matching food to rescue it!</p>
+      <div class="breeder-pets" id="breeder-pets">
+        <!-- Pets will be added dynamically -->
+      </div>
+      <div class="breeder-foods" id="breeder-foods">
+        <button type="button" class="breeder-food-btn" data-food="apple">
+          <span class="food-icon">🍎</span>
+          <span>Apple</span>
+          <span class="food-cost">5 RT</span>
+        </button>
+        <button type="button" class="breeder-food-btn" data-food="carrot">
+          <span class="food-icon">🥕</span>
+          <span>Carrot</span>
+          <span class="food-cost">8 RT</span>
+        </button>
+        <button type="button" class="breeder-food-btn" data-food="chicken">
+          <span class="food-icon">🍗</span>
+          <span>Chicken</span>
+          <span class="food-cost">15 RT</span>
+        </button>
+        <button type="button" class="breeder-food-btn" data-food="seeds">
+          <span class="food-icon">🌻</span>
+          <span>Seeds</span>
+          <span class="food-cost">5 RT</span>
+        </button>
+        <button type="button" class="breeder-food-btn" data-food="water" style="display:none;">
+          <span class="food-icon">💧</span>
+          <span>Water</span>
+          <span class="food-cost">20 RT</span>
+        </button>
+        <button type="button" class="breeder-food-btn" data-food="bowl" style="display:none;">
+          <span class="food-icon">🥣</span>
+          <span>Bowl</span>
+          <span class="food-cost">20 RT</span>
+        </button>
+      </div>
+      <div class="breeder-result hidden" id="breeder-result">
+        <div class="breeder-result-title" id="breeder-result-title">Rescue Complete!</div>
+        <div class="breeder-rewards" id="breeder-rewards"></div>
+        <button type="button" class="breeder-close-btn" id="breeder-close-btn">Continue</button>
+      </div>
+    </div>
+    
     <div id="lobby-overlay" class="lobby-overlay hidden">
       <p id="lobby-message" class="lobby-message">Waiting for another player…</p>
       <p id="lobby-countdown" class="lobby-countdown hidden"></p>
       <button type="button" id="lobby-ready-btn" class="fight-ally-btn ally-btn hidden">Ready</button>
+      <button type="button" id="lobby-gift-btn" class="lobby-gift-btn hidden" title="Daily Gift">🎁</button>
       <button type="button" id="lobby-back-btn" class="fight-ally-btn fight-btn" style="margin-top:12px">Back to lobby</button>
     </div>
     <div id="fight-ally-overlay" class="fight-ally-overlay hidden">
@@ -276,10 +669,105 @@
       </div>
     </div>
     <div id="cpu-warning" class="cpu-warning hidden">CPU attacking!</div>
+    <div id="action-menu" class="action-menu hidden">
+      <div class="action-menu-header">
+        <span class="action-menu-title">Build Menu [E]</span>
+        <button type="button" class="action-menu-close" id="action-menu-close">&times;</button>
+      </div>
+      <!-- Build Shelter (only shows if no shelter) -->
+      <div class="action-menu-item" id="action-build-shelter">
+        <div class="action-menu-item-header">
+          <span class="action-menu-item-name">Build Shelter</span>
+          <span class="action-menu-item-cost">250 RT</span>
+        </div>
+        <div class="action-menu-progress">
+          <div class="action-menu-progress-label">Size: <span id="action-size-text">0/50</span></div>
+          <div class="action-menu-progress-bar">
+            <div class="action-menu-progress-fill size" id="action-size-bar" style="width: 0%"></div>
+          </div>
+        </div>
+        <div class="action-menu-progress">
+          <div class="action-menu-progress-label">Tokens: <span id="action-tokens-text">0/250 RT</span></div>
+          <div class="action-menu-progress-bar">
+            <div class="action-menu-progress-fill tokens" id="action-tokens-bar" style="width: 0%"></div>
+          </div>
+        </div>
+        <button type="button" class="action-menu-btn" id="action-build-btn" disabled>Need Size 50 & 250 RT</button>
+      </div>
+      <!-- Adoption Center upgrade -->
+      <div class="action-menu-item hidden" id="action-adoption-center">
+        <div class="action-menu-item-header">
+          <span class="action-menu-item-name">🐾 Adoption Center</span>
+          <span class="action-menu-item-cost">250 RT</span>
+        </div>
+        <div class="action-menu-item-desc">Enable adoptions at your shelter</div>
+        <button type="button" class="action-menu-btn" id="action-adoption-btn" disabled>Buy</button>
+      </div>
+      <!-- Gravity upgrade -->
+      <div class="action-menu-item hidden" id="action-gravity">
+        <div class="action-menu-item-header">
+          <span class="action-menu-item-name">🧲 Gravity Pull</span>
+          <span class="action-menu-item-cost">300 RT</span>
+        </div>
+        <div class="action-menu-item-desc">Attract strays to your shelter</div>
+        <button type="button" class="action-menu-btn" id="action-gravity-btn" disabled>Buy</button>
+      </div>
+      <!-- Advertising upgrade -->
+      <div class="action-menu-item hidden" id="action-advertising">
+        <div class="action-menu-item-header">
+          <span class="action-menu-item-name">📢 Advertising</span>
+          <span class="action-menu-item-cost">200 RT</span>
+        </div>
+        <div class="action-menu-item-desc">Spawn more strays near shelter</div>
+        <button type="button" class="action-menu-btn" id="action-advertising-btn" disabled>Buy</button>
+      </div>
+      <!-- Van Speed upgrade -->
+      <div class="action-menu-item" id="action-van-speed">
+        <div class="action-menu-item-header">
+          <span class="action-menu-item-name">🚐 Van Speed</span>
+          <span class="action-menu-item-cost">150 RT</span>
+        </div>
+        <div class="action-menu-item-desc">Permanent 20% speed boost</div>
+        <button type="button" class="action-menu-btn" id="action-van-speed-btn" disabled>Buy</button>
+      </div>
+      <div class="action-menu-hint">Press E again or click X to close</div>
+    </div>
+    <button type="button" id="ground-btn" class="ground-btn hidden">Ground Here</button>
+    <button type="button" id="port-btn" class="port-btn hidden">Port (0)</button>
+    <button type="button" id="center-van-btn" class="center-van-btn hidden">📍 Van</button>
+    <button type="button" id="center-shelter-btn" class="center-shelter-btn hidden">🏠 Shelter</button>
     <div id="how-to-play" class="hidden">
-      <strong>You are a shelter.</strong> WASD or tap to move. Collect <strong>strays</strong> (brown) — you can hold as many as your size. Bring them to the <strong>Adoption Center</strong> (green circle) to adopt out and <strong>grow</strong>. Green orbs = +size, blue = speed boost.
+      <div class="htp-header">How To Play <button class="htp-close" id="htp-close">&times;</button></div>
+      <div class="htp-content">
+        <p>Drive your <strong>van</strong> to rescue strays. Bring them to the central <strong>Adoption Center</strong> or build your own shelter!</p>
+        <p>Press <strong>E</strong> for Build Menu: shelter (250 RT), adoption center (250 RT), gravity (300 RT), and more!</p>
+        <p>Deliver pets to your shelter, and if it has an adoption center, it will adopt them automatically.</p>
+        <p>First shelter to reach <strong>51% domination</strong> wins!</p>
+        <div class="htp-controls">
+          <h4>Controls</h4>
+          <p>
+            Movement: <span class="htp-key">W</span> <span class="htp-key">A</span> <span class="htp-key">S</span> <span class="htp-key">D</span> or tap/click
+          </p>
+          <p>Build Menu: <span class="htp-key">E</span></p>
+          <p>
+            <strong>Green orbs</strong> = +size &nbsp; <strong>Blue orbs</strong> = speed boost &nbsp; <strong>Purple orbs</strong> = port charge
+          </p>
+        </div>
+      </div>
     </div>
   </div>
+  </div>
+  <!-- Color Picker Modal -->
+  <div id="color-picker-modal" class="color-picker-modal hidden">
+    <div class="color-picker-content">
+      <h3 id="color-picker-title">Pick a Color</h3>
+      <input type="color" id="color-picker-input" value="#ff5500" />
+      <input type="color" id="color-picker-input2" value="#00aaff" style="display:none" />
+      <div class="color-picker-btns">
+        <button type="button" class="color-picker-cancel" id="color-picker-cancel">Cancel</button>
+        <button type="button" class="color-picker-confirm" id="color-picker-confirm">Confirm</button>
+      </div>
+    </div>
   </div>
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
