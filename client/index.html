@@ -47,6 +47,9 @@
     .lobby-message { font: 700 16px Rubik, sans-serif; color: #7bed9f; margin-bottom: 12px; }
     .lobby-countdown { font: 600 14px Rubik, sans-serif; color: rgba(255,255,255,0.9); margin-bottom: 14px; }
     .lobby-countdown.hidden { display: none; }
+    .lobby-player-list { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 12px 0; max-width: 300px; }
+    .lobby-player { background: rgba(123,237,159,0.2); border: 1px solid #7bed9f; border-radius: 6px; padding: 6px 12px; font: 600 12px Rubik, sans-serif; color: #fff; }
+    .lobby-player-list:empty { display: none; }
     .lobby-ready-btn.hidden { display: none; }
     .lobby-gift-btn { position: absolute; top: 10px; right: 10px; font-size: 24px; background: transparent; border: none; cursor: pointer; padding: 4px; border-radius: 6px; transition: transform 0.15s; }
     .lobby-gift-btn:hover { transform: scale(1.2); }
@@ -273,6 +276,49 @@
     .daily-gift-signin-btn.facebook:hover { background: #166fe5; box-shadow: 0 2px 8px rgba(24,119,242,0.4); }
     .daily-gift-grid-greyed { opacity: 0.4; pointer-events: none; filter: grayscale(0.8); display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
     
+    /* Leaderboard Modal */
+    #leaderboard-modal {
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      background: linear-gradient(145deg, rgba(35,90,80,0.98), rgba(25,60,55,0.98));
+      border: 3px solid #7bed9f; border-radius: 16px; padding: 20px 24px;
+      min-width: 340px; max-width: 420px;
+      font: 600 14px Rubik, sans-serif; color: #fff;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+      z-index: 95; display: none;
+    }
+    #leaderboard-modal.show { display: block; }
+    .leaderboard-header { text-align: center; margin-bottom: 16px; }
+    .leaderboard-title { font: 700 22px Rubik, sans-serif; color: #7bed9f; margin-bottom: 12px; }
+    .leaderboard-tabs { display: flex; gap: 8px; justify-content: center; }
+    .leaderboard-tab {
+      padding: 8px 18px; font: 600 13px Rubik, sans-serif; border-radius: 6px;
+      border: 2px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.2);
+      color: rgba(255,255,255,0.8); cursor: pointer; transition: all 0.15s;
+    }
+    .leaderboard-tab:hover { border-color: rgba(255,255,255,0.4); }
+    .leaderboard-tab.active { border-color: #7bed9f; background: rgba(123,237,159,0.2); color: #7bed9f; }
+    .leaderboard-content { max-height: 300px; overflow-y: auto; margin-bottom: 12px; }
+    .leaderboard-entry {
+      display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+      background: rgba(255,255,255,0.05); border-radius: 8px; margin-bottom: 6px;
+    }
+    .leaderboard-entry.highlight { background: rgba(123,237,159,0.2); border: 1px solid #7bed9f; }
+    .leaderboard-rank { font: 700 16px Rubik, sans-serif; color: #ffd93d; min-width: 28px; text-align: center; }
+    .leaderboard-rank.gold { color: #ffd700; }
+    .leaderboard-rank.silver { color: #c0c0c0; }
+    .leaderboard-rank.bronze { color: #cd7f32; }
+    .leaderboard-name { flex: 1; font: 600 14px Rubik, sans-serif; color: #fff; overflow: hidden; text-overflow: ellipsis; }
+    .leaderboard-color { width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.3); flex-shrink: 0; }
+    .leaderboard-stats { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.7); text-align: right; }
+    .leaderboard-stats .wins { color: #7bed9f; font-weight: 700; }
+    .leaderboard-my-rank { padding: 12px; background: rgba(0,0,0,0.2); border-radius: 8px; text-align: center; font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.8); }
+    .leaderboard-close {
+      position: absolute; top: 10px; right: 14px; font-size: 20px; cursor: pointer;
+      color: rgba(255,255,255,0.6); transition: color 0.15s;
+    }
+    .leaderboard-close:hover { color: #fff; }
+    .leaderboard-empty { text-align: center; padding: 30px 20px; color: rgba(255,255,255,0.6); }
+    
     #connection-overlay {
       position: fixed; inset: 0; background: rgba(26,26,46,0.95); display: flex; flex-direction: column;
       align-items: center; justify-content: center; padding: 24px; text-align: center; z-index: 100;
@@ -321,6 +367,7 @@
     #landing {
       position: fixed; inset: 0; background: #1a1a2e; z-index: 90;
       display: flex; flex-direction: column; overflow: auto;
+      touch-action: auto; -webkit-overflow-scrolling: touch;
     }
     #landing.hidden { display: none; }
     .landing-top {
@@ -382,7 +429,13 @@
     .landing-center .title { font: 700 28px/1 Rubik, sans-serif; color: #7bed9f; margin-bottom: 16px; letter-spacing: 0.05em; }
     .landing-center .nick-row { margin-bottom: 16px; }
     .landing-center .nick-row label { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.8); display: block; margin-bottom: 4px; }
-    .landing-center .nick-row input { padding: 8px 12px; border-radius: 8px; border: 2px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.3); color: #fff; font: 600 14px Rubik, sans-serif; width: 180px; }
+    .landing-center .nick-row .nick-input-wrap { display: flex; gap: 6px; align-items: center; }
+    .landing-center .nick-row input { padding: 8px 12px; border-radius: 8px; border: 2px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.3); color: #fff; font: 600 14px Rubik, sans-serif; width: 160px; transition: border-color 0.2s; touch-action: auto; -webkit-user-select: text; user-select: text; }
+    .landing-center .nick-row input:focus { border-color: #7bed9f; outline: none; }
+    .landing-center .nick-row .nick-save-btn { padding: 8px 12px; background: #7bed9f; color: #1a1a2e; border: none; border-radius: 8px; font: 600 12px Rubik, sans-serif; cursor: pointer; transition: background 0.2s; }
+    .landing-center .nick-row .nick-save-btn:hover { background: #9bffbf; }
+    .landing-center .nick-row .nick-save-btn.saved { background: #5cb85c; }
+    .landing-center .nick-row .nick-hint { font: 400 10px Rubik, sans-serif; color: rgba(255,255,255,0.5); margin-top: 4px; }
     .landing-center .landing-music-row { margin-bottom: 12px; }
     .landing-center .landing-music-row label { font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
     .landing-center .landing-music-row input[type="checkbox"] { margin: 0; }
@@ -416,7 +469,7 @@
     .color-picker-btns button { padding: 8px 16px; font: 600 13px Rubik, sans-serif; border-radius: 8px; cursor: pointer; border: none; }
     .color-picker-cancel { background: rgba(255,255,255,0.2); color: #fff; }
     .color-picker-confirm { background: #7bed9f; color: #1a1a2e; }
-    .preset-colors { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    .preset-colors { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; margin-top: 8px; }
     .preset-color { width: 36px; height: 36px; border-radius: 6px; border: 2px solid rgba(255,255,255,0.3); cursor: pointer; }
     .preset-color:hover { transform: scale(1.1); }
     .preset-color.selected { border-color: #fff; }
@@ -428,6 +481,14 @@
     .referral-hidden { display: none; }
     .landing-shop { margin-top: 16px; }
     .landing-tokens { font: 600 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 8px; }
+    .equipment-panel { background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.15); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+    .equipment-header { font: 700 13px Rubik, sans-serif; color: #ffd93d; margin-bottom: 10px; text-align: center; }
+    .equipment-items { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .equipment-item { display: flex; align-items: center; gap: 6px; font: 600 11px Rubik, sans-serif; color: rgba(255,255,255,0.85); }
+    .equipment-icon { font-size: 14px; }
+    .equipment-value { color: #7bed9f; font-weight: 700; margin-left: auto; }
+    .equipment-note { font: 400 10px Rubik, sans-serif; color: rgba(255,255,255,0.5); text-align: center; margin-top: 8px; }
+    .equipment-note.signed-in { color: #7bed9f; }
     .landing-buy { display: block; width: 100%; margin-bottom: 6px; padding: 8px 10px; font: 600 12px Rubik, sans-serif; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.3); border-radius: 6px; color: #fff; cursor: pointer; }
     .landing-buy:hover { border-color: #7bed9f; color: #7bed9f; }
     .landing-buy:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -436,6 +497,8 @@
     .daily-gift-btn.hidden { display: none; }
     .daily-gift-btn.has-gift { animation: pulse-gift 1.5s infinite; }
     @keyframes pulse-gift { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,215,61,0.5); } 50% { box-shadow: 0 0 0 8px rgba(255,215,61,0); } }
+    .leaderboard-btn { flex: 1; padding: 10px 12px; font: 700 13px Rubik, sans-serif; background: linear-gradient(135deg, #3498db, #2980b9); border: 2px solid #7bed9f; border-radius: 8px; color: #fff; cursor: pointer; transition: all 0.15s; }
+    .leaderboard-btn:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(52,152,219,0.4); }
     #cookie-banner {
       position: fixed; bottom: 0; left: 0; right: 0; z-index: 200;
       background: rgba(30,35,50,0.98); border-top: 2px solid rgba(255,255,255,0.15);
@@ -470,6 +533,22 @@
     <button type="button" class="daily-gift-claim-btn" id="daily-gift-claim-btn">Claim Today's Gift</button>
   </div>
   
+  <!-- Leaderboard Modal -->
+  <div id="leaderboard-modal">
+    <span class="leaderboard-close" id="leaderboard-close">&times;</span>
+    <div class="leaderboard-header">
+      <div class="leaderboard-title">Leaderboard</div>
+      <div class="leaderboard-tabs">
+        <button type="button" class="leaderboard-tab active" data-type="alltime">All-Time</button>
+        <button type="button" class="leaderboard-tab" data-type="daily">Today</button>
+      </div>
+    </div>
+    <div class="leaderboard-content" id="leaderboard-content">
+      <!-- Leaderboard entries will be populated by JavaScript -->
+    </div>
+    <div class="leaderboard-my-rank" id="leaderboard-my-rank"></div>
+  </div>
+  
   <div id="landing">
     <header class="landing-top">
       <span class="logo">Adoptar.io</span>
@@ -490,7 +569,39 @@
         <div id="landing-profile-actions"></div>
         <div class="landing-shop">
           <div id="landing-tokens" class="landing-tokens">Tokens: 0 RT</div>
-          <button type="button" class="daily-gift-btn hidden" id="daily-gift-btn">🎁 Daily Gift</button>
+          
+          <!-- Equipment Panel -->
+          <div class="equipment-panel">
+            <div class="equipment-header">Equipment Chest</div>
+            <div class="equipment-items">
+              <div class="equipment-item">
+                <span class="equipment-icon">💰</span>
+                <span>RT:</span>
+                <span class="equipment-value" id="equip-rt">0</span>
+              </div>
+              <div class="equipment-item">
+                <span class="equipment-icon">🌀</span>
+                <span>Ports:</span>
+                <span class="equipment-value" id="equip-ports">0</span>
+              </div>
+              <div class="equipment-item">
+                <span class="equipment-icon">⚡</span>
+                <span>Speed:</span>
+                <span class="equipment-value" id="equip-speed">0</span>
+              </div>
+              <div class="equipment-item">
+                <span class="equipment-icon">📦</span>
+                <span>Size:</span>
+                <span class="equipment-value" id="equip-size">0</span>
+              </div>
+            </div>
+            <div class="equipment-note" id="equip-note">Sign in to save equipment</div>
+          </div>
+          
+          <div style="display:flex;gap:8px;margin-bottom:8px;">
+            <button type="button" class="daily-gift-btn hidden" id="daily-gift-btn">🎁 Daily Gift</button>
+            <button type="button" class="leaderboard-btn" id="leaderboard-btn">🏆 Leaderboard</button>
+          </div>
           <button type="button" class="landing-buy" data-boost="size">Buy +1 size (50)</button>
           <button type="button" class="landing-buy" data-boost="speed">Buy speed (30)</button>
           <button type="button" class="landing-buy" data-boost="adoptSpeed">Buy adopt speed (40)</button>
@@ -520,8 +631,12 @@
       <section class="landing-center">
         <h1 class="title">Adoptar.io</h1>
         <div class="nick-row">
-          <label for="landing-nick">Nick</label>
-          <input type="text" id="landing-nick" placeholder="Nickname" maxlength="24" autocomplete="off" />
+          <label for="landing-nick">Your Nickname (change anytime!)</label>
+          <div class="nick-input-wrap">
+            <input type="text" id="landing-nick" placeholder="Enter nickname..." maxlength="20" autocomplete="off" />
+            <button type="button" id="nick-save-btn" class="nick-save-btn">Save</button>
+          </div>
+          <div id="nick-hint" class="nick-hint"></div>
         </div>
         <div class="landing-music-row">
           <label><input type="checkbox" id="landing-music-toggle" checked /> Music</label>
@@ -529,7 +644,7 @@
         <button type="button" id="landing-play" class="play-btn">Play</button>
         <div class="auth-buttons" id="landing-auth-buttons">
           <a href="/auth/google">Sign in with Google</a>
-          <a href="#" id="landing-facebook" style="opacity:0.7">Sign in with Facebook</a>
+          <!-- <a href="#" id="landing-facebook" style="opacity:0.7">Sign in with Facebook</a> --> 
         </div>
         <div class="game-mode-center">
           <h3>Game Mode</h3>
@@ -549,8 +664,9 @@
       <aside class="landing-right">
         <h3>How To Play</h3>
         <p class="howto-text">Drive your <strong>van</strong> to rescue strays. Bring them to the <strong>Adoption Center</strong> (green zone) to adopt out, earn <strong>5 RT each</strong>.</p>
-        <p class="howto-text">Build a <strong>shelter</strong> (250 RT), then buy an <strong>Adoption Center</strong> (250 RT) to adopt at your shelter. Add <strong>Gravity</strong> (300 RT) to pull strays!</p>
-        <p class="howto-text">Press <span class="key">E</span> for build menu. First to <strong>150 adoptions</strong> wins!</p>
+        <p class="howto-text">Drive out <strong>Breeders</strong> by better feeding their pets! <strong>Don't let the breeders setup their own Store</strong>!</p>
+        <p class="howto-text">Build a <strong>shelter</strong> (250 RT), then buy an <strong>Adoption Center</strong> (250 RT) to adopt at your shelter for only 2RT each! Add <strong>Advertising and Gravity</strong> (200 and 300 RT) to pull strays!</p>
+        <p class="howto-text">Press <span class="key">E</span> for build menu. First to <strong>51%</strong> wins!</p>
         <h4 class="howto-subtitle">Controls</h4>
         <p class="howto-text howto-keys"><span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> Move &nbsp; <span class="key">E</span> Build</p>
         <h4 class="howto-subtitle">Power-ups</h4>
@@ -655,6 +771,7 @@
     
     <div id="lobby-overlay" class="lobby-overlay hidden">
       <p id="lobby-message" class="lobby-message">Waiting for another player…</p>
+      <div id="lobby-player-list" class="lobby-player-list"></div>
       <p id="lobby-countdown" class="lobby-countdown hidden"></p>
       <button type="button" id="lobby-ready-btn" class="fight-ally-btn ally-btn hidden">Ready</button>
       <button type="button" id="lobby-gift-btn" class="lobby-gift-btn hidden" title="Daily Gift">🎁</button>

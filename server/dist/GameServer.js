@@ -10,6 +10,14 @@ const World_js_1 = require("./game/World.js");
 const shared_1 = require("shared");
 const shared_2 = require("shared");
 const registry_js_1 = require("./registry.js");
+const inventory_js_1 = require("./inventory.js");
+const leaderboard_js_1 = require("./leaderboard.js");
+/** Timestamped log function for server output */
+function log(message) {
+    const now = new Date();
+    const timestamp = now.toISOString().replace('T', ' ').slice(0, 19);
+    console.log(`[${timestamp}] [rescue] ${message}`);
+}
 const GAME_WS_PORT = Number(process.env.GAME_WS_PORT) || 4001;
 const GAME_WS_URL = process.env.GAME_WS_URL || `ws://localhost:${GAME_WS_PORT}`;
 const SERVER_ID = process.env.SERVER_ID || `game-${GAME_WS_PORT}`;
@@ -42,9 +50,11 @@ function createMatch(mode) {
         fightAllyChoices: new Map(),
         allyRequests: new Map(),
         lastReplayTick: 0,
+        playerUserIds: new Map(),
+        playerStartingInventory: new Map(),
     };
     matches.set(match.id, match);
-    console.log(`[rescue] match created id=${match.id} mode=${mode}`);
+    log(`match created id=${match.id} mode=${mode}`);
     return match;
 }
 function destroyMatch(matchId) {
@@ -58,7 +68,7 @@ function destroyMatch(matchId) {
     matches.delete(matchId);
     if (ffaLobbyMatchId === matchId)
         ffaLobbyMatchId = null;
-    console.log(`[rescue] match destroyed id=${matchId}`);
+    log(`match destroyed id=${matchId}`);
 }
 function ensureCpusForMatch(match) {
     if (match.mode === 'solo') {
@@ -87,24 +97,45 @@ function getMatchState(match) {
     if (match.phase === 'countdown' && match.countdownEndAt > 0) {
         countdownRemainingSec = Math.max(0, Math.ceil((match.countdownEndAt - Date.now()) / 1000));
     }
+    // Get human player list (exclude CPUs) for lobby display
+    const snapshot = match.world.getSnapshot();
+    const humanPlayers = Array.from(match.players.keys())
+        .filter(id => !id.startsWith('cpu-'))
+        .map(id => {
+        const p = snapshot.players.find(pl => pl.id === id);
+        return { id, displayName: p?.displayName ?? 'Unknown' };
+    });
     return {
         type: 'matchState',
         phase: match.phase,
         ...(countdownRemainingSec !== undefined && { countdownRemainingSec }),
         readyCount: match.readySet.size,
+        players: humanPlayers.length > 0 ? humanPlayers : undefined,
     };
 }
 function transitionToPlaying(match) {
     if (match.phase !== 'playing') {
         match.phase = 'playing';
         match.world.startMatch();
-        console.log(`[rescue] match started id=${match.id} players=${match.players.size}`);
+        log(`match started id=${match.id} players=${match.players.size}`);
     }
 }
 function removePlayerFromMatch(playerId, matchId) {
     const match = matches.get(matchId);
     if (!match)
         return;
+    // Save inventory for registered users who disconnect mid-match
+    const userId = match.playerUserIds.get(playerId);
+    if (userId && match.phase === 'playing') {
+        const playerMoney = match.world.getPlayerMoney(playerId);
+        const portCharges = match.world.getPortCharges(playerId);
+        if (playerMoney > 0 || portCharges > 0) {
+            (0, inventory_js_1.depositAfterMatch)(userId, playerMoney, portCharges, 0, 0);
+            log(`Player ${playerId} disconnected - deposited ${playerMoney} RT, ${portCharges} ports for ${userId}`);
+        }
+    }
+    match.playerUserIds.delete(playerId);
+    match.playerStartingInventory.delete(playerId);
     match.world.removePlayer(playerId);
     match.players.delete(playerId);
     match.readySet.delete(playerId);
@@ -119,17 +150,28 @@ wss.on('connection', async (ws) => {
     let displayName = null;
     let playerAdded = false;
     let currentMatchId = null;
+    let playerUserId = null; // Auth user ID for inventory
+    let startingRT = 0;
+    let startingPorts = 0;
+    let startingInventory = null;
     const addPlayerToMatch = (match, name) => {
         if (playerAdded)
             return;
         displayName = name;
         playerAdded = true;
-        console.log(`[rescue] player joined match id=${match.id} playerId=${playerId} displayName=${name}`);
-        match.world.addPlayer(playerId, name);
+        // If we have a userId, track it for match-end deposit
+        if (playerUserId) {
+            match.playerUserIds.set(playerId, playerUserId);
+            if (startingInventory) {
+                match.playerStartingInventory.set(playerId, startingInventory);
+            }
+        }
+        log(`player joined match id=${match.id} playerId=${playerId} displayName=${name} startingRT=${startingRT}`);
+        match.world.addPlayer(playerId, name, startingRT, startingPorts);
         match.players.set(playerId, ws);
         playerToMatch.set(playerId, match.id);
         currentMatchId = match.id;
-        ws.send(JSON.stringify({ type: 'welcome', playerId, displayName, matchId: match.id }));
+        ws.send(JSON.stringify({ type: 'welcome', playerId, displayName, matchId: match.id, startingRT, startingPorts }));
     };
     // Timeout: if client doesn't send mode in 5s, use FFA
     const timeout = setTimeout(async () => {
@@ -162,6 +204,25 @@ wss.on('connection', async (ws) => {
                     clearTimeout(timeout);
                     const mode = msg.mode;
                     const name = typeof msg.displayName === 'string' && msg.displayName ? msg.displayName : null;
+                    // Check if client sent userId for registered user
+                    if (typeof msg.userId === 'string' && msg.userId.startsWith('u-')) {
+                        const userId = msg.userId;
+                        playerUserId = userId;
+                        // Withdraw inventory from database
+                        startingInventory = (0, inventory_js_1.withdrawForMatch)(userId);
+                        startingRT = startingInventory.storedRt;
+                        startingPorts = startingInventory.portCharges;
+                        log(`Registered user ${userId} withdrawing: ${startingRT} RT, ${startingPorts} ports`);
+                    }
+                    else {
+                        // Fallback: accept from client for backwards compatibility (guests)
+                        if (typeof msg.startingRT === 'number' && msg.startingRT > 0) {
+                            startingRT = Math.floor(msg.startingRT);
+                        }
+                        if (typeof msg.startingPorts === 'number' && msg.startingPorts > 0) {
+                            startingPorts = Math.floor(msg.startingPorts);
+                        }
+                    }
                     (async () => {
                         const displayNameToUse = name || await (0, registry_js_1.getNextGuestName)();
                         if (mode === 'solo') {
@@ -292,20 +353,15 @@ wss.on('connection', async (ws) => {
                     return;
                 }
                 // Breeder mini-game messages
+                // NOTE: Food costs are NOT deducted when used - the only penalty for wrong meals is wasted time
+                // Tokens are only deducted for successful rescues (via breederComplete)
                 if (msg.type === 'breederUseFood' && typeof msg.food === 'string') {
-                    // Deduct tokens for food used
-                    const foodCosts = {
-                        apple: 5, carrot: 8, chicken: 15, seeds: 5, water: 20, bowl: 20
-                    };
-                    const cost = foodCosts[msg.food] ?? 0;
-                    if (cost > 0) {
-                        // Deduct tokens via world method (need to add this)
-                        match.world.deductTokens(playerId, cost);
-                    }
+                    // No token deduction - wrong meals only waste time
                     return;
                 }
                 if (msg.type === 'breederComplete' && typeof msg.rescuedCount === 'number' && typeof msg.totalPets === 'number') {
-                    const result = match.world.completeBreederMiniGame(playerId, msg.rescuedCount, msg.totalPets);
+                    const level = typeof msg.level === 'number' ? msg.level : 1;
+                    const result = match.world.completeBreederMiniGame(playerId, msg.rescuedCount, msg.totalPets, level);
                     ws.send(JSON.stringify({
                         type: 'breederRewards',
                         tokenBonus: result.tokenBonus,
@@ -334,14 +390,14 @@ wss.on('connection', async (ws) => {
     });
     ws.on('close', () => {
         clearTimeout(timeout);
-        console.log(`[rescue] player disconnected playerId=${playerId} displayName=${displayName}`);
+        log(`player disconnected playerId=${playerId} displayName=${displayName}`);
         if (currentMatchId) {
             removePlayerFromMatch(playerId, currentMatchId);
         }
     });
     ws.on('error', () => {
         clearTimeout(timeout);
-        console.log(`[rescue] player error playerId=${playerId} displayName=${displayName}`);
+        log(`player error playerId=${playerId} displayName=${displayName}`);
         if (currentMatchId) {
             removePlayerFromMatch(playerId, currentMatchId);
         }
@@ -403,6 +459,43 @@ setInterval(() => {
                     if (ws.readyState === 1)
                         ws.send(buf);
                 }
+                // Check for match end and process inventory/leaderboard
+                if (snapshot.winnerId && !match.world.isMatchProcessed()) {
+                    match.world.markMatchProcessed();
+                    log(`Match ${matchId} ended - winner: ${snapshot.winnerId}`);
+                    // Process all registered players
+                    for (const [pid, userId] of match.playerUserIds.entries()) {
+                        const playerState = snapshot.players.find(p => p.id === pid);
+                        if (!playerState)
+                            continue;
+                        // Get player's final RT
+                        const finalRT = playerState.money ?? 0;
+                        const portCharges = match.world.getPortCharges(pid);
+                        // Deposit to inventory
+                        if (finalRT > 0 || portCharges > 0) {
+                            (0, inventory_js_1.depositAfterMatch)(userId, finalRT, portCharges, 0, 0);
+                            log(`Deposited for ${userId}: ${finalRT} RT, ${portCharges} ports`);
+                        }
+                        // Record win/stats for leaderboard
+                        const isWinner = snapshot.winnerId === pid;
+                        if (isWinner) {
+                            (0, leaderboard_js_1.recordMatchWin)(userId, finalRT);
+                            log(`Recorded win for ${userId}`);
+                        }
+                        else {
+                            (0, leaderboard_js_1.recordRtEarned)(userId, finalRT);
+                        }
+                        // Send deposit confirmation to player
+                        const ws = match.players.get(pid);
+                        if (ws?.readyState === 1) {
+                            ws.send(JSON.stringify({
+                                type: 'matchEndInventory',
+                                deposited: { rt: finalRT, portCharges },
+                                isWinner,
+                            }));
+                        }
+                    }
+                }
             }
         }
     }
@@ -410,4 +503,4 @@ setInterval(() => {
         console.error('Tick error:', err);
     }
 }, shared_1.TICK_MS);
-console.log(`Game server (WebSocket) on ws://localhost:${GAME_WS_PORT}`);
+log(`Game server (WebSocket) on ws://localhost:${GAME_WS_PORT}`);

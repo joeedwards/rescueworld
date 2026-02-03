@@ -11,6 +11,15 @@ const cookie_parser_1 = __importDefault(require("cookie-parser"));
 const registry_js_1 = require("./registry.js");
 const referrals_js_1 = require("./referrals.js");
 const dailyGifts_js_1 = require("./dailyGifts.js");
+const leaderboard_js_1 = require("./leaderboard.js");
+const inventory_js_1 = require("./inventory.js");
+const leaderboard_js_2 = require("./leaderboard.js");
+/** Timestamped log function for server output */
+function log(message) {
+    const now = new Date();
+    const timestamp = now.toISOString().replace('T', ' ').slice(0, 19);
+    console.log(`[${timestamp}] [rescue] ${message}`);
+}
 const API_PORT = Number(process.env.API_PORT) || 4002;
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-in-production';
 const API_ORIGIN = process.env.API_ORIGIN || 'http://localhost:3000';
@@ -44,29 +53,64 @@ app.get('/auth/me', (req, res) => {
     if (userId) {
         const user = (0, referrals_js_1.getUserById)(userId);
         if (user) {
-            console.log(`[rescue] auth/me signed-in displayName=${user.display_name}`);
-            res.json({ displayName: user.display_name, signedIn: true });
+            log(`auth/me signed-in displayName=${user.display_name}`);
+            res.json({
+                displayName: user.display_name,
+                signedIn: true,
+                userId: user.id,
+                shelterColor: user.shelter_color ?? null,
+            });
             return;
         }
     }
     const guestName = req.signedCookies?.guest_name ?? req.cookies?.guest_name;
     if (guestName) {
-        console.log(`[rescue] auth/me guest cookie displayName=${guestName}`);
-        res.json({ displayName: guestName, signedIn: false });
+        log(`auth/me guest cookie displayName=${guestName}`);
+        res.json({ displayName: guestName, signedIn: false, userId: null, shelterColor: null });
         return;
     }
-    console.log('[rescue] auth/me no session');
-    res.json({ displayName: null, signedIn: false });
+    log('auth/me no session');
+    res.json({ displayName: null, signedIn: false, userId: null, shelterColor: null });
+});
+// Update user profile (nickname and/or shelter color)
+app.post('/auth/profile', (req, res) => {
+    const userId = req.signedCookies?.session;
+    if (!userId) {
+        res.status(401).json({ error: 'not_signed_in' });
+        return;
+    }
+    const { nickname, shelterColor } = req.body;
+    let nicknameUpdated = false;
+    let colorUpdated = false;
+    if (typeof nickname === 'string' && nickname.trim().length > 0) {
+        nicknameUpdated = (0, referrals_js_1.updateUserNickname)(userId, nickname);
+        if (nicknameUpdated) {
+            log(`User ${userId} updated nickname to: ${nickname.trim().slice(0, 20)}`);
+        }
+    }
+    if (typeof shelterColor === 'string' && shelterColor.length > 0) {
+        colorUpdated = (0, referrals_js_1.updateUserShelterColor)(userId, shelterColor);
+        if (colorUpdated) {
+            log(`User ${userId} updated shelter color to: ${shelterColor}`);
+        }
+    }
+    const user = (0, referrals_js_1.getUserById)(userId);
+    res.json({
+        success: nicknameUpdated || colorUpdated,
+        displayName: user?.display_name ?? null,
+        shelterColor: user?.shelter_color ?? null,
+    });
 });
 app.get('/auth/signout', (req, res) => {
     res.clearCookie('session');
     res.clearCookie('guest_name');
-    const gamePath = API_ORIGIN.includes('localhost') ? '/' : '/rescueworld/';
+    //const gamePath = API_ORIGIN.includes('localhost') ? '/' : '/rescueworld/';
+    const gamePath = '/';
     res.redirect(`${API_ORIGIN.replace(/\/$/, '')}${gamePath}`);
 });
 app.post('/auth/guest', async (req, res) => {
     const displayName = await (0, registry_js_1.getNextGuestName)();
-    console.log(`[rescue] auth guest assigned displayName=${displayName}`);
+    log(`auth guest assigned displayName=${displayName}`);
     res.cookie('guest_name', displayName, {
         httpOnly: true,
         maxAge: 365 * 24 * 60 * 60 * 1000,
@@ -120,7 +164,7 @@ app.get('/auth/google/callback', async (req, res) => {
         const profile = (await profileRes.json());
         const displayName = profile.name ?? profile.email ?? (await (0, registry_js_1.getNextGuestName)());
         const { user, created } = (0, referrals_js_1.getOrCreateUser)('google', profile.id, profile.email ?? '', displayName);
-        // If new user and referral code present, record referral
+        // If new user, grant registration gift and check for referral
         if (created) {
             const refCode = req.signedCookies?.ref_code ?? req.cookies?.ref_code;
             if (refCode) {
@@ -128,6 +172,9 @@ app.get('/auth/google/callback', async (req, res) => {
                 if (referrer)
                     await (0, referrals_js_1.recordReferral)(referrer.id, user.id);
             }
+            // Grant registration gift (includes Day 1)
+            (0, dailyGifts_js_1.grantRegistrationGift)(user.id);
+            log(`New user ${displayName} registered via Google, granted registration gift`);
         }
         clearRefCookie(res);
         res.cookie('session', user.id, {
@@ -136,8 +183,8 @@ app.get('/auth/google/callback', async (req, res) => {
             signed: true,
             sameSite: 'lax',
         });
-        const gamePath = API_ORIGIN.includes('localhost') ? '/' : '/rescueworld/';
-        res.redirect(`${API_ORIGIN.replace(/\/$/, '')}${gamePath}`);
+        const gamePath = '/';
+        res.redirect(`${API_ORIGIN.replace(/\/$/, '')}${gamePath}?registered=${created ? '1' : '0'}`);
     }
     catch {
         res.redirect(API_ORIGIN);
@@ -184,6 +231,7 @@ app.get('/auth/facebook/callback', async (req, res) => {
         const profile = (await profileRes.json());
         const displayName = profile.name ?? profile.email ?? (await (0, registry_js_1.getNextGuestName)());
         const { user, created } = (0, referrals_js_1.getOrCreateUser)('facebook', profile.id, profile.email ?? '', displayName);
+        // If new user, grant registration gift and check for referral
         if (created) {
             const refCode = req.signedCookies?.ref_code ?? req.cookies?.ref_code;
             if (refCode) {
@@ -191,6 +239,9 @@ app.get('/auth/facebook/callback', async (req, res) => {
                 if (referrer)
                     await (0, referrals_js_1.recordReferral)(referrer.id, user.id);
             }
+            // Grant registration gift (includes Day 1)
+            (0, dailyGifts_js_1.grantRegistrationGift)(user.id);
+            log(`New user ${displayName} registered via Facebook, granted registration gift`);
         }
         clearRefCookie(res);
         res.clearCookie('fb_state');
@@ -200,8 +251,8 @@ app.get('/auth/facebook/callback', async (req, res) => {
             signed: true,
             sameSite: 'lax',
         });
-        const gamePath = API_ORIGIN.includes('localhost') ? '/' : '/rescueworld/';
-        res.redirect(`${API_ORIGIN.replace(/\/$/, '')}${gamePath}`);
+        const gamePath = '/';
+        res.redirect(`${API_ORIGIN.replace(/\/$/, '')}${gamePath}?registered=${created ? '1' : '0'}`);
     }
     catch {
         res.redirect(API_ORIGIN);
@@ -252,6 +303,67 @@ app.post('/api/daily-gift/claim', (req, res) => {
         nextDay: result.nextDay,
     });
 });
+// Leaderboard endpoints
+app.get('/api/leaderboard', (req, res) => {
+    const type = req.query.type === 'daily' ? 'daily' : 'alltime';
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 10, 1), 100);
+    const entries = (0, leaderboard_js_1.getLeaderboard)(type, limit);
+    res.json({ type, entries });
+});
+app.get('/api/leaderboard/my-rank', (req, res) => {
+    const userId = req.signedCookies?.session;
+    if (!userId) {
+        res.json({ alltime: { rank: 0, stats: null }, daily: { rank: 0, stats: null } });
+        return;
+    }
+    const alltime = (0, leaderboard_js_1.getUserRank)(userId, 'alltime');
+    const daily = (0, leaderboard_js_1.getUserRank)(userId, 'daily');
+    res.json({ alltime, daily });
+});
+// Inventory endpoints
+app.get('/api/inventory', (req, res) => {
+    const userId = req.signedCookies?.session;
+    if (!userId) {
+        res.json({ storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, signedIn: false });
+        return;
+    }
+    const inventory = (0, inventory_js_1.getInventory)(userId);
+    res.json({ ...inventory, signedIn: true });
+});
+// Withdraw inventory for match start (clears stored items)
+app.post('/api/inventory/withdraw', (req, res) => {
+    const userId = req.signedCookies?.session;
+    if (!userId) {
+        res.json({ storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, signedIn: false });
+        return;
+    }
+    const inventory = (0, inventory_js_1.withdrawForMatch)(userId);
+    log(`Inventory withdrawn for ${userId}: ${inventory.storedRt} RT`);
+    res.json({ ...inventory, signedIn: true });
+});
+// Deposit after match end (auto-save all RT and items)
+app.post('/api/inventory/deposit', (req, res) => {
+    const userId = req.signedCookies?.session;
+    if (!userId) {
+        res.status(401).json({ error: 'not_signed_in' });
+        return;
+    }
+    const { rt, portCharges, speedBoosts, sizeBoosts, isWinner } = req.body;
+    const rtAmount = typeof rt === 'number' && rt > 0 ? Math.floor(rt) : 0;
+    const ports = typeof portCharges === 'number' && portCharges > 0 ? Math.floor(portCharges) : 0;
+    const speeds = typeof speedBoosts === 'number' && speedBoosts > 0 ? Math.floor(speedBoosts) : 0;
+    const sizes = typeof sizeBoosts === 'number' && sizeBoosts > 0 ? Math.floor(sizeBoosts) : 0;
+    const inventory = (0, inventory_js_1.depositAfterMatch)(userId, rtAmount, ports, speeds, sizes);
+    // Record to leaderboard
+    if (isWinner) {
+        (0, leaderboard_js_2.recordMatchWin)(userId, rtAmount);
+    }
+    else if (rtAmount > 0) {
+        (0, leaderboard_js_2.recordRtEarned)(userId, rtAmount);
+    }
+    log(`Inventory deposited for ${userId}: ${rtAmount} RT, winner=${isWinner}`);
+    res.json({ success: true, inventory });
+});
 app.listen(API_PORT, () => {
-    console.log(`Auth API on http://localhost:${API_PORT}`);
+    log(`Auth API on http://localhost:${API_PORT}`);
 });

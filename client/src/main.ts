@@ -28,6 +28,12 @@ import {
   decodeSnapshot,
   MSG_SNAPSHOT,
 } from 'shared';
+
+// Preload images
+const breederMillImage = new Image();
+breederMillImage.src = '/breeder-mill.png';
+let breederMillImageLoaded = false;
+breederMillImage.onload = () => { breederMillImageLoaded = true; };
 import type { GameSnapshot, PlayerState, PetState, AdoptionZoneState, PickupState, ShelterState, BreederShelterState } from 'shared';
 import {
   playMusic,
@@ -116,6 +122,8 @@ const landingEl = document.getElementById('landing')!;
 const gameWrapEl = document.getElementById('game-wrap')!;
 const landingPlayBtn = document.getElementById('landing-play')!;
 const landingNickInput = document.getElementById('landing-nick') as HTMLInputElement;
+const nickSaveBtn = document.getElementById('nick-save-btn') as HTMLButtonElement;
+const nickHintEl = document.getElementById('nick-hint') as HTMLElement;
 const landingMusicToggleEl = document.getElementById('landing-music-toggle') as HTMLInputElement | null;
 const landingProfileName = document.getElementById('landing-profile-name')!;
 const landingProfileAvatar = document.getElementById('landing-profile-avatar')!;
@@ -158,6 +166,7 @@ const centerShelterBtnEl = document.getElementById('center-shelter-btn')!;
 const gameTokensEl = document.getElementById('game-tokens')!;
 const lobbyOverlayEl = document.getElementById('lobby-overlay')!;
 const lobbyMessageEl = document.getElementById('lobby-message')!;
+const lobbyPlayerListEl = document.getElementById('lobby-player-list')!;
 const lobbyCountdownEl = document.getElementById('lobby-countdown')!;
 const lobbyReadyBtnEl = document.getElementById('lobby-ready-btn')!;
 const lobbyBackBtnEl = document.getElementById('lobby-back-btn')!;
@@ -181,6 +190,30 @@ const dailyGiftSubtitleEl = document.getElementById('daily-gift-subtitle')!;
 const dailyGiftGridEl = document.getElementById('daily-gift-grid')!;
 const dailyGiftClaimBtnEl = document.getElementById('daily-gift-claim-btn') as HTMLButtonElement;
 const dailyGiftBtnEl = document.getElementById('daily-gift-btn')!;
+
+// Leaderboard Elements
+const leaderboardModalEl = document.getElementById('leaderboard-modal')!;
+const leaderboardCloseEl = document.getElementById('leaderboard-close')!;
+const leaderboardContentEl = document.getElementById('leaderboard-content')!;
+const leaderboardMyRankEl = document.getElementById('leaderboard-my-rank')!;
+const leaderboardBtnEl = document.getElementById('leaderboard-btn')!;
+
+// Equipment Panel Elements
+const equipRtEl = document.getElementById('equip-rt')!;
+const equipPortsEl = document.getElementById('equip-ports')!;
+const equipSpeedEl = document.getElementById('equip-speed')!;
+const equipSizeEl = document.getElementById('equip-size')!;
+const equipNoteEl = document.getElementById('equip-note')!;
+
+// Inventory state (from server)
+interface Inventory {
+  storedRt: number;
+  portCharges: number;
+  speedBoosts: number;
+  sizeBoosts: number;
+  signedIn: boolean;
+}
+let currentInventory: Inventory = { storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, signedIn: false };
 
 // Breeder Mini-Game State
 type PetType = 'dog' | 'cat' | 'horse' | 'bird';
@@ -354,7 +387,7 @@ const COLOR_PRICES = { preset: 50, custom: 200, gradient: 500 } as const;
 const FREE_COLORS = ['#7bed9f', '#70a3ff', '#ff9f43'];
 const PRESET_COLORS = ['#e74c3c', '#9b59b6', '#f1c40f', '#1abc9c', '#e91e63', '#00bcd4'];
 
-type AuthMe = { displayName: string | null; signedIn: boolean };
+type AuthMe = { displayName: string | null; signedIn: boolean; userId: string | null; shelterColor: string | null };
 type ReferralInfo = {
   referralCode: string;
   referralCount: number;
@@ -368,6 +401,8 @@ let selectedMode: 'ffa' | 'teams' | 'solo' = 'ffa';
 const pendingBoosts = { sizeBonus: 0, speedBoost: false, adoptSpeed: false };
 let currentDisplayName: string | null = null;
 let isSignedIn = false;
+let currentUserId: string | null = null;
+let currentShelterColor: string | null = null;
 
 function getTokens(): number {
   return parseInt(localStorage.getItem(TOKENS_KEY) || '0', 10);
@@ -393,6 +428,15 @@ function getSelectedColor(): string {
 }
 function setSelectedColor(color: string): void {
   localStorage.setItem(COLOR_KEY, color);
+  // Save to profile if signed in
+  if (isSignedIn) {
+    fetch('/auth/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ shelterColor: color }),
+    }).catch(() => {}); // Ignore errors
+  }
 }
 function getUnlockedColors(): { preset: boolean; custom: string | null; gradient: string | null } {
   try {
@@ -443,7 +487,7 @@ function updateColorUI(): void {
 }
 
 let toastTimeout: ReturnType<typeof setTimeout> | null = null;
-function showToast(message: string): void {
+function showToast(message: string, type: 'success' | 'error' | 'info' = 'info'): void {
   let toastEl = document.getElementById('toast');
   if (!toastEl) {
     toastEl = document.createElement('div');
@@ -452,6 +496,16 @@ function showToast(message: string): void {
     document.body.appendChild(toastEl);
   }
   toastEl.textContent = message;
+  // Set color based on type
+  toastEl.classList.remove('toast-success', 'toast-error', 'toast-info');
+  toastEl.classList.add(`toast-${type}`);
+  if (type === 'success') {
+    toastEl.style.background = 'linear-gradient(135deg, #2ecc71 0%, #27ae60 100%)';
+  } else if (type === 'error') {
+    toastEl.style.background = 'linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)';
+  } else {
+    toastEl.style.background = 'linear-gradient(135deg, #3498db 0%, #2980b9 100%)';
+  }
   toastEl.classList.add('show');
   if (toastTimeout) clearTimeout(toastTimeout);
   toastTimeout = setTimeout(() => {
@@ -475,26 +529,46 @@ function processAnnouncementQueue(): void {
   const message = announcementQueue.shift()!;
   announcementAnimating = true;
   
+  // Determine if this is a positive (green) or negative (red) announcement
+  // GREEN: rescuing pets, shutting down camps, destroying shelters - GOOD things
+  // RED: breeders arriving, camps appearing, failed attempts, shelters forming - BAD things
+  const positiveKeywords = ['rescued', 'shut down', 'destroyed', 'saved', 'stopped', 'is shutting down'];
+  const negativeKeywords = ['arrived', 'appeared', 'failed', 'formed', 'expanding', 'breeding'];
+  
+  const msgLower = message.toLowerCase();
+  const isPositive = positiveKeywords.some(kw => msgLower.includes(kw));
+  const isNegative = negativeKeywords.some(kw => msgLower.includes(kw));
+  
+  // If explicitly positive, use green; otherwise use red (default for warnings/bad news)
+  const useGreen = isPositive && !isNegative;
+  
+  // Colors based on message type
+  const bgColor = useGreen ? 'rgba(46,204,113,' : 'rgba(255,107,107,'; // green or red
+  const glowColor = useGreen ? 'rgba(46,204,113,0.8)' : 'rgba(255,107,107,0.8)';
+  const icon = useGreen ? '✅' : '⚠️';
+  
   // Create or get announcement container
   if (!announcementEl) {
     announcementEl = document.createElement('div');
     announcementEl.id = 'announcement-bar';
-    announcementEl.style.cssText = `
-      position: fixed;
-      top: 60px;
-      left: 0;
-      width: 100%;
-      height: 40px;
-      background: linear-gradient(90deg, rgba(255,107,107,0) 0%, rgba(255,107,107,0.9) 15%, rgba(255,107,107,0.9) 85%, rgba(255,107,107,0) 100%);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      overflow: hidden;
-      z-index: 150;
-      pointer-events: none;
-    `;
     document.body.appendChild(announcementEl);
   }
+  
+  // Update background color based on message type
+  announcementEl.style.cssText = `
+    position: fixed;
+    top: 60px;
+    left: 0;
+    width: 100%;
+    height: 40px;
+    background: linear-gradient(90deg, ${bgColor}0) 0%, ${bgColor}0.9) 15%, ${bgColor}0.9) 85%, ${bgColor}0) 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    z-index: 150;
+    pointer-events: none;
+  `;
   
   // Create scrolling text
   const textEl = document.createElement('div');
@@ -502,10 +576,10 @@ function processAnnouncementQueue(): void {
     white-space: nowrap;
     font: bold 18px 'Rubik', sans-serif;
     color: #fff;
-    text-shadow: 2px 2px 4px rgba(0,0,0,0.8), 0 0 10px rgba(255,107,107,0.8);
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.8), 0 0 10px ${glowColor};
     animation: announcementScroll 9s linear forwards;
   `;
-  textEl.textContent = `⚠️ ${message} ⚠️`;
+  textEl.textContent = `${icon} ${message} ${icon}`;
   
   // Add animation keyframes if not already added
   if (!document.getElementById('announcement-keyframes')) {
@@ -620,10 +694,16 @@ async function fetchAndRenderAuth(): Promise<void> {
   try {
     const res = await fetch('/auth/me', { credentials: 'include' });
     const data: AuthMe = await res.json();
-    const { displayName, signedIn } = data;
+    const { displayName, signedIn, userId, shelterColor } = data;
     const name = displayName ?? '';
     currentDisplayName = name || null;
     isSignedIn = signedIn;
+    currentUserId = userId;
+    currentShelterColor = shelterColor;
+    // Apply shelter color from profile if signed in and color is set
+    if (signedIn && shelterColor) {
+      localStorage.setItem(COLOR_KEY, shelterColor);
+    }
     if (signedIn && name) {
       authAreaEl.innerHTML = `
         <span class="auth-profile">${escapeHtml(name)}</span>
@@ -632,13 +712,12 @@ async function fetchAndRenderAuth(): Promise<void> {
       landingProfileName.textContent = name;
       landingProfileAvatar.textContent = name.charAt(0).toUpperCase();
       landingProfileActions.innerHTML = `<a href="/auth/signout" class="auth-link" style="font-size:12px">Sign out</a>`;
-      landingAuthButtons.innerHTML = `<a href="${buildAuthUrl('/auth/google')}" class="auth-link" style="display:inline-block">Sign in with Google</a> <a href="${buildAuthUrl('/auth/facebook')}" class="auth-link" style="display:inline-block">Sign in with Facebook</a>`;
+      landingAuthButtons.innerHTML = `<a href="${buildAuthUrl('/auth/google')}" class="auth-link" style="display:inline-block">Sign in with Google</a>`;
       if (landingNickInput) landingNickInput.placeholder = name;
     } else {
       const guestLabel = name ? `${escapeHtml(name)}` : 'Guest';
       authAreaEl.innerHTML = `
         <a href="${buildAuthUrl('/auth/google')}" class="auth-link">Sign in with Google</a>
-        <a href="${buildAuthUrl('/auth/facebook')}" class="auth-link">Sign in with Facebook</a>
         <span class="auth-guest">${guestLabel}</span>
       `;
       landingProfileName.textContent = name || 'Guest';
@@ -646,7 +725,6 @@ async function fetchAndRenderAuth(): Promise<void> {
       landingProfileActions.innerHTML = '';
       landingAuthButtons.innerHTML = `
         <a href="${buildAuthUrl('/auth/google')}">Sign in with Google</a>
-        <a href="${buildAuthUrl('/auth/facebook')}">Sign in with Facebook</a>
       `;
       if (landingNickInput) landingNickInput.placeholder = name || 'Nickname';
     }
@@ -656,24 +734,113 @@ async function fetchAndRenderAuth(): Promise<void> {
     isSignedIn = false;
     authAreaEl.innerHTML = `
       <a href="${buildAuthUrl('/auth/google')}" class="auth-link">Sign in with Google</a>
-      <a href="${buildAuthUrl('/auth/facebook')}" class="auth-link">Sign in with Facebook</a>
       <span class="auth-guest">Guest</span>
     `;
     landingProfileName.textContent = 'Guest';
     landingProfileAvatar.textContent = '?';
     landingProfileActions.innerHTML = '';
-    landingAuthButtons.innerHTML = `<a href="${buildAuthUrl('/auth/google')}">Sign in with Google</a> <a href="${buildAuthUrl('/auth/facebook')}">Sign in with Facebook</a>`;
+    landingAuthButtons.innerHTML = `<a href="${buildAuthUrl('/auth/google')}">Sign in with Google</a>`;
     if (landingNickInput) landingNickInput.placeholder = 'Nickname';
   }
   await fetchReferralInfo();
   updateReferralUI();
   await fetchDailyGiftStatus();
+  
+  // Check for new registration (from OAuth redirect)
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.get('registered') === '1' && isSignedIn) {
+    // Show registration gift welcome message
+    setTimeout(() => {
+      showToast('Welcome! Registration gift: 50 RT + Day 1 gift claimed!', 'success');
+      // Clean up the URL
+      window.history.replaceState({}, '', window.location.pathname);
+    }, 500);
+  }
+}
+
+// Save nickname to profile
+async function saveNickname(): Promise<void> {
+  const nickname = landingNickInput?.value?.trim();
+  if (!nickname || nickname.length < 1) {
+    if (nickHintEl) nickHintEl.textContent = 'Enter a nickname first!';
+    return;
+  }
+  
+  if (isSignedIn) {
+    try {
+      const res = await fetch('/auth/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ nickname }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        currentDisplayName = data.displayName;
+        landingProfileName.textContent = data.displayName;
+        landingProfileAvatar.textContent = data.displayName.charAt(0).toUpperCase();
+        if (nickSaveBtn) {
+          nickSaveBtn.textContent = 'Saved!';
+          nickSaveBtn.classList.add('saved');
+          setTimeout(() => {
+            nickSaveBtn.textContent = 'Save';
+            nickSaveBtn.classList.remove('saved');
+          }, 2000);
+        }
+        if (nickHintEl) nickHintEl.textContent = '';
+      }
+    } catch {
+      if (nickHintEl) nickHintEl.textContent = 'Failed to save';
+    }
+  } else {
+    // Guest - just update locally
+    currentDisplayName = nickname;
+    landingProfileName.textContent = nickname;
+    landingProfileAvatar.textContent = nickname.charAt(0).toUpperCase();
+    if (nickSaveBtn) {
+      nickSaveBtn.textContent = 'Saved!';
+      nickSaveBtn.classList.add('saved');
+      setTimeout(() => {
+        nickSaveBtn.textContent = 'Save';
+        nickSaveBtn.classList.remove('saved');
+      }, 2000);
+    }
+    if (nickHintEl) nickHintEl.textContent = 'Sign in to save permanently';
+  }
+}
+
+// Save button click
+if (nickSaveBtn) {
+  nickSaveBtn.addEventListener('click', saveNickname);
+}
+
+// Save on Enter key
+if (landingNickInput) {
+  landingNickInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      saveNickname();
+    }
+  });
 }
 
 async function getOrCreateDisplayName(): Promise<string> {
   // If user typed a nickname, use that
   const nickInput = landingNickInput?.value?.trim();
   if (nickInput) {
+    // If signed in and nickname changed, save to profile
+    if (isSignedIn && nickInput !== currentDisplayName) {
+      try {
+        await fetch('/auth/profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ nickname: nickInput }),
+        });
+      } catch {
+        // Ignore errors
+      }
+    }
     currentDisplayName = nickInput;
     return nickInput;
   }
@@ -739,6 +906,12 @@ function checkObserverModeStart(): void {
 }
 
 function onKeyDown(e: KeyboardEvent): void {
+  // Don't intercept keyboard events when typing in input fields
+  const target = e.target as HTMLElement;
+  if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+    return; // Let the input handle the key normally
+  }
+  
   keys[e.code] = true;
   
   // Block movement during breeder mini-game
@@ -1201,7 +1374,21 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
   gameWsLocal.onopen = async () => {
     gameWs = gameWsLocal;
     const displayName = await getOrCreateDisplayName();
-    gameWs.send(JSON.stringify({ type: 'mode', mode: options?.mode ?? 'ffa', displayName }));
+    // Withdraw inventory for this match (registered users only)
+    const inventory = await withdrawInventory();
+    const startingRT = inventory.rt;
+    const startingPorts = inventory.ports;
+    if (startingRT > 0) {
+      showToast(`Starting with ${startingRT} RT from chest!`, 'success');
+    }
+    gameWs.send(JSON.stringify({ 
+      type: 'mode', 
+      mode: options?.mode ?? 'ffa', 
+      displayName,
+      startingRT,
+      startingPorts,
+      userId: currentUserId, // For inventory tracking
+    }));
     if (pendingBoosts.sizeBonus > 0 || pendingBoosts.speedBoost || pendingBoosts.adoptSpeed) {
       gameWs.send(JSON.stringify({
         type: 'startingBoosts',
@@ -1238,6 +1425,16 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           matchPhase = msg.phase as MatchPhase;
           countdownRemainingSec = typeof msg.countdownRemainingSec === 'number' ? msg.countdownRemainingSec : 0;
           readyCount = typeof msg.readyCount === 'number' ? msg.readyCount : 0;
+          
+          // Update player list (only show human players in FFA lobby)
+          if (Array.isArray(msg.players) && msg.players.length > 0) {
+            lobbyPlayerListEl.innerHTML = msg.players
+              .map((p: { displayName: string }) => `<div class="lobby-player">${escapeHtml(p.displayName)}</div>`)
+              .join('');
+          } else {
+            lobbyPlayerListEl.innerHTML = '';
+          }
+          
           if (matchPhase === 'lobby') {
             if (selectedMode === 'solo') {
               lobbyOverlayEl.classList.add('hidden');
@@ -1257,6 +1454,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
             else lobbyReadyBtnEl.textContent = 'Ready';
           } else {
             lobbyOverlayEl.classList.add('hidden');
+            lobbyPlayerListEl.innerHTML = ''; // Clear when match starts
           }
         }
         if (msg.type === 'pong' && typeof msg.ts === 'number') {
@@ -2056,56 +2254,51 @@ function drawShelter(shelter: ShelterState, isOwner: boolean, ownerColor?: strin
   ctx.restore();
 }
 
-/** Draw a breeder shelter - enemy structure that spawns wild strays */
+/** Draw a breeder mill - enemy structure that spawns wild strays */
 function drawBreederShelter(shelter: BreederShelterState): void {
   const cx = shelter.x;
   const cy = shelter.y;
-  const half = 40 + shelter.size * 0.5;
+  const baseSize = 80 + shelter.size * 0.8; // Size scales with level
   
   ctx.save();
-  ctx.shadowColor = 'rgba(255, 0, 0, 0.4)';
-  ctx.shadowBlur = 15;
   
-  // Main building body - dark red/brown
-  ctx.fillStyle = '#4a1a1a';
-  const buildingW = half * 2;
-  const buildingH = half * 1.4;
-  const buildingL = cx - half;
-  const buildingT = cy - buildingH * 0.4;
-  ctx.beginPath();
-  ctx.roundRect(buildingL, buildingT, buildingW, buildingH, 6);
-  ctx.fill();
-  
-  // Glowing red border (pulsing)
+  // Pulsing red glow effect
   const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
-  ctx.strokeStyle = `rgba(255, 68, 68, ${0.6 + pulse * 0.4})`;
-  ctx.lineWidth = 3;
-  ctx.stroke();
+  ctx.shadowColor = `rgba(255, 0, 0, ${0.4 + pulse * 0.3})`;
+  ctx.shadowBlur = 20 + pulse * 10;
   
-  // Roof (dark, ominous)
-  ctx.fillStyle = '#2a0a0a';
-  ctx.beginPath();
-  ctx.moveTo(buildingL - 10, buildingT);
-  ctx.lineTo(cx, buildingT - half * 0.5);
-  ctx.lineTo(buildingL + buildingW + 10, buildingT);
-  ctx.closePath();
-  ctx.fill();
+  // Draw the breeder mill image if loaded, otherwise fallback to shape
+  if (breederMillImageLoaded) {
+    const imgW = baseSize * 1.5;
+    const imgH = baseSize * 1.2;
+    ctx.drawImage(breederMillImage, cx - imgW / 2, cy - imgH / 2, imgW, imgH);
+  } else {
+    // Fallback: draw a simple building shape
+    ctx.fillStyle = '#4a1a1a';
+    ctx.beginPath();
+    ctx.roundRect(cx - baseSize / 2, cy - baseSize / 2.5, baseSize, baseSize * 0.8, 6);
+    ctx.fill();
+    
+    ctx.strokeStyle = `rgba(255, 68, 68, ${0.6 + pulse * 0.4})`;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  }
   
-  // Warning skull/danger symbol
-  ctx.font = 'bold 24px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('☠️', cx, cy);
+  // Reset shadow for text
+  ctx.shadowBlur = 0;
   
-  // Label
+  // Label above
   ctx.fillStyle = '#ff4444';
   ctx.font = 'bold 12px Rubik, sans-serif';
-  ctx.fillText(`Breeder Shelter Lv${shelter.level}`, cx, buildingT - half * 0.5 - 12);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(`Breeder Mill Lv${shelter.level}`, cx, cy - baseSize / 2 - 5);
   
-  // Warning text
+  // Warning text below
   ctx.fillStyle = '#ffaa00';
   ctx.font = '10px Rubik, sans-serif';
-  ctx.fillText('Spawning wild strays!', cx, buildingT + buildingH + 14);
+  ctx.textBaseline = 'top';
+  ctx.fillText('Spawning wild strays!', cx, cy + baseSize / 2.5 + 5);
   
   ctx.restore();
 }
@@ -2241,12 +2434,29 @@ function drawBreederCamp(x: number, y: number, level: number = 1): void {
   ctx.textBaseline = 'middle';
   ctx.fillText(`${level}`, badgeX, badgeY);
   
-  // Label below camp
+  // Calculate estimated RT cost to beat this camp
+  // Based on: # of pets (3-5 base + 1 per 2 levels, max 8) × ingredients per level × avg food cost
+  const basePets = 3 + Math.min(2, Math.floor(level / 2));
+  const petCount = Math.min(basePets + Math.floor(level / 2), 8);
+  let ingredientCount = 1;
+  let avgIngredientCost = 8; // Average of apple(5), carrot(8), chicken(15), seeds(5)
+  if (level >= 10) {
+    ingredientCount = 4;
+    avgIngredientCost = 13; // (5+8+15+5+20+20)/6 = ~12.2, round to 13
+  } else if (level >= 6) {
+    ingredientCount = 3;
+    avgIngredientCost = 11; // Includes water(20)
+  } else if (level >= 3) {
+    ingredientCount = 2;
+  }
+  const estimatedRtCost = petCount * ingredientCount * avgIngredientCost;
+  
+  // Label below camp with level and RT cost
   ctx.font = 'bold 10px Rubik, sans-serif';
   ctx.fillStyle = '#ff6b6b';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
-  ctx.fillText(`Breeder Camp Lv${level}`, x, y + campRadius + 12);
+  ctx.fillText(`Lv${level} ~${estimatedRtCost}RT`, x, y + campRadius + 12);
 }
 
 function drawPickup(u: PickupState): void {
@@ -2727,6 +2937,9 @@ function render(dt: number): void {
     if (!matchEndTokensAwarded) {
       setTokens(newTokens);
       matchEndTokensAwarded = true;
+      // Deposit RT to inventory for registered users
+      const isWinner = myRank === 1;
+      depositInventory(earned, 0, isWinner);
     }
     const bonusLabel = myRank === 1 ? 'Win bonus' : myRank === 2 ? '2nd place' : myRank === 3 ? '3rd place' : myRank > 0 ? `${myRank}th place` : '';
     const tokenLines = earned > 0
@@ -2893,6 +3106,7 @@ groundBtnEl.addEventListener('click', () => {
 
 // --- Port button ---
 portBtnEl.addEventListener('click', () => {
+  if (breederGame.active) return; // Don't allow porting during mini-game
   if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
   gameWs.send(JSON.stringify({ type: 'usePort' }));
 });
@@ -3029,7 +3243,8 @@ document.addEventListener('keydown', (e) => {
     toggleActionMenu();
   }
   if (e.key === 'p' || e.key === 'P') {
-    // Use port charge
+    // Use port charge (not during breeder mini-game)
+    if (breederGame.active) return; // Don't allow porting during mini-game
     if (gameWs && gameWs.readyState === WebSocket.OPEN) {
       const me = latestSnapshot?.players.find((pl) => pl.id === myPlayerId);
       if (me && (me.portCharges ?? 0) > 0 && !me.eliminated && matchPhase === 'playing') {
@@ -3645,7 +3860,7 @@ function useFood(food: FoodType): void {
       breederGame.selectedPetIndex = null;
       breederGame.selectedIngredients = [];
       playPickupGrowth();
-      showToast('Meal complete! Pet rescued!');
+      showToast('Meal complete! Pet rescued!', 'success');
       
       if (breederGame.rescuedCount >= breederGame.totalPets) {
         endBreederMiniGame(true);
@@ -3654,10 +3869,10 @@ function useFood(food: FoodType): void {
         renderSelectedIngredients();
       }
     } else {
-      // Wrong meal - lose the ingredients
+      // Wrong meal - only lose time, not tokens
       breederGame.selectedIngredients = [];
       playAttackWarning();
-      showToast('Wrong meal! Ingredients wasted.');
+      showToast('Wrong meal! Try again.', 'error');
       renderSelectedIngredients();
     }
     
@@ -3677,6 +3892,7 @@ function endBreederMiniGame(completed: boolean): void {
       type: 'breederComplete',
       rescuedCount: breederGame.rescuedCount,
       totalPets: breederGame.totalPets,
+      level: breederGame.level,
     }));
   }
   
@@ -3795,8 +4011,8 @@ function renderDailyGiftGrid(): void {
     
     if (!showAsLocked) {
       isCurrent = day === currentDay && canClaimToday;
-      isClaimed = day < currentDay || (day === currentDay && !canClaimToday);
-      isLocked = day > currentDay;
+      isClaimed = day < currentDay; // Only days BEFORE currentDay are claimed
+      isLocked = day > currentDay || (day === currentDay && !canClaimToday); // Future days OR current when can't claim
     }
     
     const classes = [
@@ -3807,7 +4023,8 @@ function renderDailyGiftGrid(): void {
       day === 7 ? 'daily-gift-day7' : '',
     ].filter(Boolean).join(' ');
     
-    const icon = isClaimed ? '✓' : '🔒';
+    // Use different icons: ✓ for claimed, 🔓 for claimable, 🔒 for locked
+    const icon = isClaimed ? '✓' : (isCurrent ? '🔓' : '🔒');
     
     html += `
       <div class="${classes}">
@@ -3825,7 +4042,6 @@ function renderDailyGiftGrid(): void {
         <div class="daily-gift-signin-message">Sign in for daily gifts!</div>
         <div class="daily-gift-signin-buttons">
           <a href="${buildAuthUrl('/auth/google')}" class="daily-gift-signin-btn google">Sign in with Google</a>
-          <a href="${buildAuthUrl('/auth/facebook')}" class="daily-gift-signin-btn facebook">Sign in with Facebook</a>
         </div>
       </div>
       <div class="daily-gift-grid-greyed">${html}</div>
@@ -3877,8 +4093,23 @@ async function fetchDailyGiftStatus(): Promise<void> {
   try {
     const res = await fetch('/api/daily-gift', { credentials: 'include' });
     if (!res.ok) {
-      // Default status for errors
-      dailyGiftStatus = null;
+      // Default fallback status for signed-in users when API fails
+      dailyGiftStatus = {
+        currentDay: 1,
+        canClaimToday: true,
+        lastClaimDate: null,
+        totalClaims: 0,
+        rewards: [
+          { tokens: 15 },
+          { tokens: 25, speedBoost: true },
+          { tokens: 40 },
+          { tokens: 50, sizeBonus: 3 },
+          { tokens: 75, speedBoost: true },
+          { tokens: 100, portCharge: true },
+          { tokens: 150, sizeBonus: 5, speedBoost: true },
+        ],
+      };
+      dailyGiftBtnEl.classList.add('has-gift');
       return;
     }
     
@@ -3891,7 +4122,23 @@ async function fetchDailyGiftStatus(): Promise<void> {
       dailyGiftBtnEl.classList.remove('has-gift');
     }
   } catch {
-    dailyGiftStatus = null;
+    // Default fallback status for signed-in users when API fails
+    dailyGiftStatus = {
+      currentDay: 1,
+      canClaimToday: true,
+      lastClaimDate: null,
+      totalClaims: 0,
+      rewards: [
+        { tokens: 15 },
+        { tokens: 25, speedBoost: true },
+        { tokens: 40 },
+        { tokens: 50, sizeBonus: 3 },
+        { tokens: 75, speedBoost: true },
+        { tokens: 100, portCharge: true },
+        { tokens: 150, sizeBonus: 5, speedBoost: true },
+      ],
+    };
+    dailyGiftBtnEl.classList.add('has-gift');
   }
   
   // Update lobby gift button too
@@ -3944,7 +4191,7 @@ async function claimDailyGiftAction(): Promise<void> {
     
     // Show success message
     const rewardText = formatGiftReward(data.reward);
-    showToast(`Gift claimed: ${rewardText}`);
+    showToast(`Gift claimed: ${rewardText}`, 'success');
     
   } catch {
     showToast('Failed to claim gift');
@@ -3956,6 +4203,175 @@ dailyGiftBtnEl.addEventListener('click', openDailyGiftModal);
 dailyGiftCloseEl.addEventListener('click', closeDailyGiftModal);
 dailyGiftClaimBtnEl.addEventListener('click', claimDailyGiftAction);
 lobbyGiftBtnEl.addEventListener('click', openDailyGiftModal);
+
+// ========== Leaderboard System ==========
+
+type LeaderboardEntry = {
+  rank: number;
+  userId: string;
+  displayName: string;
+  wins: number;
+  rtEarned: number;
+  shelterColor: string | null;
+};
+
+type LeaderboardType = 'alltime' | 'daily';
+let currentLeaderboardType: LeaderboardType = 'alltime';
+
+async function fetchLeaderboard(type: LeaderboardType): Promise<LeaderboardEntry[]> {
+  try {
+    const res = await fetch(`/api/leaderboard?type=${type}`, { credentials: 'include' });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.entries ?? [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchMyRank(): Promise<{ alltime: { rank: number }; daily: { rank: number } }> {
+  try {
+    const res = await fetch('/api/leaderboard/my-rank', { credentials: 'include' });
+    if (!res.ok) return { alltime: { rank: 0 }, daily: { rank: 0 } };
+    return await res.json();
+  } catch {
+    return { alltime: { rank: 0 }, daily: { rank: 0 } };
+  }
+}
+
+function renderLeaderboard(entries: LeaderboardEntry[], myRank: number): void {
+  if (entries.length === 0) {
+    leaderboardContentEl.innerHTML = '<div class="leaderboard-empty">No rankings yet. Play to be the first!</div>';
+    leaderboardMyRankEl.innerHTML = '';
+    return;
+  }
+  
+  leaderboardContentEl.innerHTML = entries.map(entry => {
+    const rankClass = entry.rank === 1 ? 'gold' : entry.rank === 2 ? 'silver' : entry.rank === 3 ? 'bronze' : '';
+    const highlight = entry.displayName === currentDisplayName ? 'highlight' : '';
+    const colorBadge = entry.shelterColor 
+      ? `<span class="leaderboard-color" style="background:${entry.shelterColor}"></span>` 
+      : '';
+    return `
+      <div class="leaderboard-entry ${highlight}">
+        <div class="leaderboard-rank ${rankClass}">#${entry.rank}</div>
+        ${colorBadge}
+        <div class="leaderboard-name">${escapeHtml(entry.displayName)}</div>
+        <div class="leaderboard-stats">
+          <span class="wins">${entry.wins} wins</span><br>
+          ${entry.rtEarned} RT
+        </div>
+      </div>
+    `;
+  }).join('');
+  
+  if (myRank > 0 && myRank <= 10) {
+    leaderboardMyRankEl.innerHTML = `Your rank: <strong>#${myRank}</strong> (Top 10 gets daily rewards!)`;
+  } else if (myRank > 10) {
+    leaderboardMyRankEl.innerHTML = `Your rank: <strong>#${myRank}</strong> - Get into top 10 for daily rewards!`;
+  } else {
+    leaderboardMyRankEl.innerHTML = 'Win matches to appear on the leaderboard!';
+  }
+}
+
+async function openLeaderboardModal(): Promise<void> {
+  leaderboardModalEl.classList.add('show');
+  await refreshLeaderboard();
+}
+
+function closeLeaderboardModal(): void {
+  leaderboardModalEl.classList.remove('show');
+}
+
+async function refreshLeaderboard(): Promise<void> {
+  const entries = await fetchLeaderboard(currentLeaderboardType);
+  const myRanks = await fetchMyRank();
+  const myRank = currentLeaderboardType === 'alltime' ? myRanks.alltime.rank : myRanks.daily.rank;
+  renderLeaderboard(entries, myRank);
+}
+
+// Leaderboard tab switching
+document.querySelectorAll('.leaderboard-tab').forEach(tab => {
+  tab.addEventListener('click', async () => {
+    document.querySelectorAll('.leaderboard-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    currentLeaderboardType = (tab as HTMLElement).dataset.type as LeaderboardType;
+    await refreshLeaderboard();
+  });
+});
+
+// Leaderboard Event Listeners
+leaderboardBtnEl.addEventListener('click', openLeaderboardModal);
+leaderboardCloseEl.addEventListener('click', closeLeaderboardModal);
+
+// ========== Equipment/Inventory System ==========
+
+async function fetchInventory(): Promise<void> {
+  try {
+    const res = await fetch('/api/inventory', { credentials: 'include' });
+    if (!res.ok) return;
+    currentInventory = await res.json();
+    updateEquipmentPanel();
+  } catch {
+    // Ignore errors
+  }
+}
+
+function updateEquipmentPanel(): void {
+  equipRtEl.textContent = String(currentInventory.storedRt);
+  equipPortsEl.textContent = String(currentInventory.portCharges);
+  equipSpeedEl.textContent = String(currentInventory.speedBoosts);
+  equipSizeEl.textContent = String(currentInventory.sizeBoosts);
+  
+  if (currentInventory.signedIn) {
+    if (currentInventory.storedRt > 0 || currentInventory.portCharges > 0) {
+      equipNoteEl.textContent = 'Items will be used next match';
+    } else {
+      equipNoteEl.textContent = 'Earn items by winning matches!';
+    }
+    equipNoteEl.classList.add('signed-in');
+  } else {
+    equipNoteEl.textContent = 'Sign in to save equipment';
+    equipNoteEl.classList.remove('signed-in');
+  }
+}
+
+/** Withdraw inventory before match starts, returns starting RT and ports */
+async function withdrawInventory(): Promise<{ rt: number; ports: number }> {
+  if (!isSignedIn) return { rt: 0, ports: 0 };
+  
+  try {
+    const res = await fetch('/api/inventory/withdraw', {
+      method: 'POST',
+      credentials: 'include',
+    });
+    if (!res.ok) return { rt: 0, ports: 0 };
+    const data = await res.json();
+    currentInventory = { storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, signedIn: true };
+    updateEquipmentPanel();
+    return { rt: data.storedRt ?? 0, ports: data.portCharges ?? 0 };
+  } catch {
+    return { rt: 0, ports: 0 };
+  }
+}
+
+/** Deposit RT and items after match ends */
+async function depositInventory(rt: number, portCharges: number = 0, isWinner: boolean = false): Promise<void> {
+  if (!isSignedIn || rt <= 0) return;
+  
+  try {
+    await fetch('/api/inventory/deposit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ rt, portCharges, isWinner }),
+    });
+    // Refresh inventory display
+    await fetchInventory();
+  } catch {
+    // Ignore errors
+  }
+}
 
 /** Update the lobby gift button visibility and animation */
 function updateLobbyGiftButton(): void {
@@ -3973,7 +4389,7 @@ function updateLobbyGiftButton(): void {
 
 // --- Start ---
 storeReferralFromUrl();
-fetchAndRenderAuth();
+fetchAndRenderAuth().then(() => fetchInventory());
 updateLandingTokens();
 window.addEventListener('resize', resize);
 resize();

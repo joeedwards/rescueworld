@@ -6,6 +6,13 @@
 
 import path from 'path';
 
+/** Timestamped log function for server output */
+function log(message: string): void {
+  const now = new Date();
+  const timestamp = now.toISOString().replace('T', ' ').slice(0, 19);
+  console.log(`[${timestamp}] [rescue] ${message}`);
+}
+
 const REDIS_URL = process.env.REDIS_URL || '';
 const SQLITE_DB_PATH = process.env.SQLITE_DB_PATH || path.join(__dirname, '..', 'rescueworld.db');
 const REGISTRY_KEY = 'rescueworld:servers';
@@ -63,14 +70,14 @@ export async function ensureStorage(): Promise<StorageStatus> {
   if (!redisOk) {
     sqliteOk = initSqlite();
     if (sqliteOk) {
-      console.log('Redis unavailable; using SQLite for guest names.');
+      log('Redis unavailable; using SQLite for guest names.');
     } else {
-      console.log('Redis unavailable; SQLite init failed. Guest names will use random fallback.');
+      log('Redis unavailable; SQLite init failed. Guest names will use random fallback.');
     }
   } else {
-    console.log('Redis connected.');
+    log('Redis connected.');
   }
-  console.log(`[rescue] ensureStorage redis=${redisOk} sqlite=${sqliteOk} REDIS_URL=${REDIS_URL ? 'set' : 'unset'}`);
+  log(`ensureStorage redis=${redisOk} sqlite=${sqliteOk} REDIS_URL=${REDIS_URL ? 'set' : 'unset'}`);
   return { redis: redisOk, sqlite: sqliteOk };
 }
 

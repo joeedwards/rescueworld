@@ -7,12 +7,19 @@
  * Missing a day doesn't reset progress, just skips that day's reward.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DAILY_GIFT_REWARDS = void 0;
+exports.REGISTRATION_GIFT = exports.DAILY_GIFT_REWARDS = void 0;
 exports.getDailyGiftStatus = getDailyGiftStatus;
+exports.grantRegistrationGift = grantRegistrationGift;
 exports.claimDailyGift = claimDailyGift;
 exports.handleDailyGiftGet = handleDailyGiftGet;
 exports.handleDailyGiftClaim = handleDailyGiftClaim;
 const referrals_js_1 = require("./referrals.js");
+/** Timestamped log function for server output */
+function log(message) {
+    const now = new Date();
+    const timestamp = now.toISOString().replace('T', ' ').slice(0, 19);
+    console.log(`[${timestamp}] [rescue] ${message}`);
+}
 const SQLITE_DB_PATH = process.env.SQLITE_DB_PATH || './rescueworld.db';
 let sqlite = null;
 function initSqlite() {
@@ -62,6 +69,42 @@ function getDailyGiftStatus(userId) {
         rewards: exports.DAILY_GIFT_REWARDS.slice(1), // Days 1-7
     };
 }
+/** Registration gift for new users */
+exports.REGISTRATION_GIFT = {
+    tokens: 50,
+    sizeBonus: 5,
+    speedBoost: true,
+};
+/**
+ * Grant a registration gift to a new user and auto-claim Day 1.
+ * Call this when a user registers for the first time.
+ */
+function grantRegistrationGift(userId) {
+    (0, referrals_js_1.ensureReferralStorage)();
+    initSqlite();
+    const today = getTodayDate();
+    // Check if user already has daily gifts (not a new registration)
+    const existingRow = db().prepare('SELECT user_id FROM daily_gifts WHERE user_id = ?').get(userId);
+    if (existingRow) {
+        // User already exists, not eligible for registration gift
+        return {
+            success: false,
+            registrationReward: { tokens: 0 },
+            day1Reward: { tokens: 0 }
+        };
+    }
+    // New user - grant registration gift AND Day 1 gift
+    const day1Reward = exports.DAILY_GIFT_REWARDS[1]; // Day 1 reward
+    const nextDay = 2; // Move to day 2
+    // Insert with Day 1 already claimed
+    db().prepare('INSERT INTO daily_gifts (user_id, last_claim_date, current_day, total_claims) VALUES (?, ?, ?, ?)').run(userId, today, nextDay, 1);
+    log(`Registration gift granted to ${userId}: +${exports.REGISTRATION_GIFT.tokens} RT (registration) + +${day1Reward.tokens} RT (Day 1)`);
+    return {
+        success: true,
+        registrationReward: exports.REGISTRATION_GIFT,
+        day1Reward,
+    };
+}
 function claimDailyGift(userId) {
     (0, referrals_js_1.ensureReferralStorage)();
     initSqlite();
@@ -80,7 +123,7 @@ function claimDailyGift(userId) {
     else {
         db().prepare('INSERT INTO daily_gifts (user_id, last_claim_date, current_day, total_claims) VALUES (?, ?, ?, ?)').run(userId, today, nextDay, 1);
     }
-    console.log(`[rescue] Daily gift claimed by ${userId}: Day ${currentDay}, +${reward.tokens} RT`);
+    log(`Daily gift claimed by ${userId}: Day ${currentDay}, +${reward.tokens} RT`);
     return { success: true, reward, nextDay };
 }
 // HTTP handlers for Express-like routing

@@ -9,6 +9,7 @@ type DbUser = {
   display_name: string;
   referral_code: string;
   created_at: number;
+  shelter_color: string | null;
 };
 
 export type ReferralStats = {
@@ -41,7 +42,8 @@ function initSqlite(): void {
       email TEXT,
       display_name TEXT NOT NULL,
       referral_code TEXT NOT NULL UNIQUE,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      shelter_color TEXT
     );
     CREATE UNIQUE INDEX IF NOT EXISTS users_provider_idx ON users(provider, provider_id);
     CREATE TABLE IF NOT EXISTS referrals (
@@ -64,7 +66,38 @@ function initSqlite(): void {
       current_day INTEGER NOT NULL DEFAULT 1,
       total_claims INTEGER NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS player_stats (
+      user_id TEXT PRIMARY KEY,
+      total_wins INTEGER NOT NULL DEFAULT 0,
+      total_rt_earned INTEGER NOT NULL DEFAULT 0,
+      daily_wins INTEGER NOT NULL DEFAULT 0,
+      last_win_date TEXT,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE TABLE IF NOT EXISTS inventory (
+      user_id TEXT PRIMARY KEY,
+      stored_rt INTEGER NOT NULL DEFAULT 0,
+      port_charges INTEGER NOT NULL DEFAULT 0,
+      speed_boosts INTEGER NOT NULL DEFAULT 0,
+      size_boosts INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE TABLE IF NOT EXISTS daily_leaderboard_rewards (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      reward_date TEXT NOT NULL,
+      rank INTEGER NOT NULL,
+      claimed_at INTEGER,
+      UNIQUE(user_id, reward_date)
+    );
   `);
+  
+  // Migration: add shelter_color column if missing
+  try {
+    sqlite.exec(`ALTER TABLE users ADD COLUMN shelter_color TEXT`);
+  } catch {
+    // Column already exists, ignore
+  }
 }
 
 export function ensureReferralStorage(): void {
@@ -117,9 +150,10 @@ export function createUser(provider: string, providerId: string, email: string, 
     display_name: displayName,
     referral_code: generateUniqueCode(),
     created_at: Date.now(),
+    shelter_color: null,
   };
   conn.prepare(
-    'INSERT INTO users (id, provider, provider_id, email, display_name, referral_code, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO users (id, provider, provider_id, email, display_name, referral_code, created_at, shelter_color) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
   ).run(
     user.id,
     user.provider,
@@ -128,6 +162,7 @@ export function createUser(provider: string, providerId: string, email: string, 
     user.display_name,
     user.referral_code,
     user.created_at,
+    user.shelter_color,
   );
   return user;
 }
@@ -141,6 +176,25 @@ export function getOrCreateUser(
   const existing = getUserByProvider(provider, providerId);
   if (existing) return { user: existing, created: false };
   return { user: createUser(provider, providerId, email, displayName), created: true };
+}
+
+/** Update a user's nickname (display name) */
+export function updateUserNickname(userId: string, nickname: string): boolean {
+  const trimmed = nickname.trim().slice(0, 20); // Max 20 chars
+  if (trimmed.length < 1) return false;
+  
+  const result = db().prepare(
+    'UPDATE users SET display_name = ? WHERE id = ?'
+  ).run(trimmed, userId);
+  return result.changes > 0;
+}
+
+/** Update a user's shelter color */
+export function updateUserShelterColor(userId: string, color: string): boolean {
+  const result = db().prepare(
+    'UPDATE users SET shelter_color = ? WHERE id = ?'
+  ).run(color, userId);
+  return result.changes > 0;
 }
 
 export async function recordReferral(referrerId: string, referredId: string): Promise<boolean> {

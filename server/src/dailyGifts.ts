@@ -9,6 +9,13 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { ensureReferralStorage, getUserByProvider } from './referrals.js';
 
+/** Timestamped log function for server output */
+function log(message: string): void {
+  const now = new Date();
+  const timestamp = now.toISOString().replace('T', ' ').slice(0, 19);
+  console.log(`[${timestamp}] [rescue] ${message}`);
+}
+
 const SQLITE_DB_PATH = process.env.SQLITE_DB_PATH || './rescueworld.db';
 
 let sqlite: import('better-sqlite3').Database | null = null;
@@ -49,6 +56,7 @@ export interface DailyGiftStatus {
   lastClaimDate: string | null;
   totalClaims: number;
   rewards: DailyGiftReward[];
+  isNewUser?: boolean; // True if this is a new user with registration gift pending
 }
 
 function getTodayDate(): string {
@@ -87,6 +95,59 @@ export function getDailyGiftStatus(userId: string): DailyGiftStatus {
   };
 }
 
+/** Registration gift for new users */
+export const REGISTRATION_GIFT: DailyGiftReward = {
+  tokens: 50,
+  sizeBonus: 5,
+  speedBoost: true,
+};
+
+/**
+ * Grant a registration gift to a new user and auto-claim Day 1.
+ * Call this when a user registers for the first time.
+ */
+export function grantRegistrationGift(userId: string): { 
+  success: boolean; 
+  registrationReward: DailyGiftReward;
+  day1Reward: DailyGiftReward;
+} {
+  ensureReferralStorage();
+  initSqlite();
+  
+  const today = getTodayDate();
+  
+  // Check if user already has daily gifts (not a new registration)
+  const existingRow = db().prepare(
+    'SELECT user_id FROM daily_gifts WHERE user_id = ?'
+  ).get(userId);
+  
+  if (existingRow) {
+    // User already exists, not eligible for registration gift
+    return { 
+      success: false, 
+      registrationReward: { tokens: 0 }, 
+      day1Reward: { tokens: 0 } 
+    };
+  }
+  
+  // New user - grant registration gift AND Day 1 gift
+  const day1Reward = DAILY_GIFT_REWARDS[1]; // Day 1 reward
+  const nextDay = 2; // Move to day 2
+  
+  // Insert with Day 1 already claimed
+  db().prepare(
+    'INSERT INTO daily_gifts (user_id, last_claim_date, current_day, total_claims) VALUES (?, ?, ?, ?)'
+  ).run(userId, today, nextDay, 1);
+  
+  log(`Registration gift granted to ${userId}: +${REGISTRATION_GIFT.tokens} RT (registration) + +${day1Reward.tokens} RT (Day 1)`);
+  
+  return { 
+    success: true, 
+    registrationReward: REGISTRATION_GIFT,
+    day1Reward,
+  };
+}
+
 export function claimDailyGift(userId: string): { 
   success: boolean; 
   reward?: DailyGiftReward; 
@@ -121,7 +182,7 @@ export function claimDailyGift(userId: string): {
     ).run(userId, today, nextDay, 1);
   }
   
-  console.log(`[rescue] Daily gift claimed by ${userId}: Day ${currentDay}, +${reward.tokens} RT`);
+  log(`Daily gift claimed by ${userId}: Day ${currentDay}, +${reward.tokens} RT`);
   
   return { success: true, reward, nextDay };
 }

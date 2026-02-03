@@ -6,6 +6,12 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const ws_1 = require("ws");
 const registry_js_1 = require("./registry.js");
+/** Timestamped log function for server output */
+function log(message) {
+    const now = new Date();
+    const timestamp = now.toISOString().replace('T', ' ').slice(0, 19);
+    console.log(`[${timestamp}] [rescue] ${message}`);
+}
 const SIGNALING_PORT = Number(process.env.SIGNALING_PORT) || 4000;
 const GAME_WS_URL = process.env.GAME_WS_URL || 'ws://localhost:4001';
 const GAME_WS_URL_ALT = process.env.GAME_WS_URL_ALT || '';
@@ -37,4 +43,4 @@ wss.on('connection', (ws) => {
         }
     });
 });
-console.log(`Signaling server on ws://localhost:${SIGNALING_PORT}`);
+log(`Signaling server on ws://localhost:${SIGNALING_PORT}`);

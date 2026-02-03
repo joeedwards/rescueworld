@@ -9,6 +9,8 @@ exports.getUserByProvider = getUserByProvider;
 exports.getUserByReferralCode = getUserByReferralCode;
 exports.createUser = createUser;
 exports.getOrCreateUser = getOrCreateUser;
+exports.updateUserNickname = updateUserNickname;
+exports.updateUserShelterColor = updateUserShelterColor;
 exports.recordReferral = recordReferral;
 exports.getReferralCount = getReferralCount;
 exports.getReferralStats = getReferralStats;
@@ -34,7 +36,8 @@ function initSqlite() {
       email TEXT,
       display_name TEXT NOT NULL,
       referral_code TEXT NOT NULL UNIQUE,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      shelter_color TEXT
     );
     CREATE UNIQUE INDEX IF NOT EXISTS users_provider_idx ON users(provider, provider_id);
     CREATE TABLE IF NOT EXISTS referrals (
@@ -57,7 +60,38 @@ function initSqlite() {
       current_day INTEGER NOT NULL DEFAULT 1,
       total_claims INTEGER NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS player_stats (
+      user_id TEXT PRIMARY KEY,
+      total_wins INTEGER NOT NULL DEFAULT 0,
+      total_rt_earned INTEGER NOT NULL DEFAULT 0,
+      daily_wins INTEGER NOT NULL DEFAULT 0,
+      last_win_date TEXT,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE TABLE IF NOT EXISTS inventory (
+      user_id TEXT PRIMARY KEY,
+      stored_rt INTEGER NOT NULL DEFAULT 0,
+      port_charges INTEGER NOT NULL DEFAULT 0,
+      speed_boosts INTEGER NOT NULL DEFAULT 0,
+      size_boosts INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE TABLE IF NOT EXISTS daily_leaderboard_rewards (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      reward_date TEXT NOT NULL,
+      rank INTEGER NOT NULL,
+      claimed_at INTEGER,
+      UNIQUE(user_id, reward_date)
+    );
   `);
+    // Migration: add shelter_color column if missing
+    try {
+        sqlite.exec(`ALTER TABLE users ADD COLUMN shelter_color TEXT`);
+    }
+    catch {
+        // Column already exists, ignore
+    }
 }
 function ensureReferralStorage() {
     initSqlite();
@@ -103,8 +137,9 @@ function createUser(provider, providerId, email, displayName) {
         display_name: displayName,
         referral_code: generateUniqueCode(),
         created_at: Date.now(),
+        shelter_color: null,
     };
-    conn.prepare('INSERT INTO users (id, provider, provider_id, email, display_name, referral_code, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(user.id, user.provider, user.provider_id, user.email, user.display_name, user.referral_code, user.created_at);
+    conn.prepare('INSERT INTO users (id, provider, provider_id, email, display_name, referral_code, created_at, shelter_color) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(user.id, user.provider, user.provider_id, user.email, user.display_name, user.referral_code, user.created_at, user.shelter_color);
     return user;
 }
 function getOrCreateUser(provider, providerId, email, displayName) {
@@ -112,6 +147,19 @@ function getOrCreateUser(provider, providerId, email, displayName) {
     if (existing)
         return { user: existing, created: false };
     return { user: createUser(provider, providerId, email, displayName), created: true };
+}
+/** Update a user's nickname (display name) */
+function updateUserNickname(userId, nickname) {
+    const trimmed = nickname.trim().slice(0, 20); // Max 20 chars
+    if (trimmed.length < 1)
+        return false;
+    const result = db().prepare('UPDATE users SET display_name = ? WHERE id = ?').run(trimmed, userId);
+    return result.changes > 0;
+}
+/** Update a user's shelter color */
+function updateUserShelterColor(userId, color) {
+    const result = db().prepare('UPDATE users SET shelter_color = ? WHERE id = ?').run(color, userId);
+    return result.changes > 0;
 }
 async function recordReferral(referrerId, referredId) {
     if (referrerId === referredId)

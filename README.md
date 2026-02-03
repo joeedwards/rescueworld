@@ -114,13 +114,13 @@ To enable "Sign in with Google", create OAuth 2.0 credentials and configure your
    - Add every origin where the game client is loaded (scheme + host, no path, no trailing slash).
    - Examples:
      - Local dev: `http://localhost:3000`
-     - Production: `https://games.vo.ly` (or your game host)
+     - Production: `https://adoptar.io` (or your game host)
 
 3. **Authorized redirect URIs**
    - The auth server uses: `{API_ORIGIN}/auth/google/callback`.
    - Add the exact callback URL for each environment:
      - Local dev (client and API proxy on 3000): `http://localhost:3000/auth/google/callback`
-     - Production (if API is at same host as game): `https://games.vo.ly/auth/google/callback`  
+     - Production (if API is at same host as game): `https://adoptar.io/auth/google/callback`  
    - Use your real `API_ORIGIN` value (see below). No trailing slash.
 
 4. **Copy Client ID and Client secret** into `.env`:

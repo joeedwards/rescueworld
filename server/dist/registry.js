@@ -50,6 +50,12 @@ exports.getGameServers = getGameServers;
 exports.appendReplay = appendReplay;
 exports.getNextGuestName = getNextGuestName;
 const path_1 = __importDefault(require("path"));
+/** Timestamped log function for server output */
+function log(message) {
+    const now = new Date();
+    const timestamp = now.toISOString().replace('T', ' ').slice(0, 19);
+    console.log(`[${timestamp}] [rescue] ${message}`);
+}
 const REDIS_URL = process.env.REDIS_URL || '';
 const SQLITE_DB_PATH = process.env.SQLITE_DB_PATH || path_1.default.join(__dirname, '..', 'rescueworld.db');
 const REGISTRY_KEY = 'rescueworld:servers';
@@ -103,16 +109,16 @@ async function ensureStorage() {
     if (!redisOk) {
         sqliteOk = initSqlite();
         if (sqliteOk) {
-            console.log('Redis unavailable; using SQLite for guest names.');
+            log('Redis unavailable; using SQLite for guest names.');
         }
         else {
-            console.log('Redis unavailable; SQLite init failed. Guest names will use random fallback.');
+            log('Redis unavailable; SQLite init failed. Guest names will use random fallback.');
         }
     }
     else {
-        console.log('Redis connected.');
+        log('Redis connected.');
     }
-    console.log(`[rescue] ensureStorage redis=${redisOk} sqlite=${sqliteOk} REDIS_URL=${REDIS_URL ? 'set' : 'unset'}`);
+    log(`ensureStorage redis=${redisOk} sqlite=${sqliteOk} REDIS_URL=${REDIS_URL ? 'set' : 'unset'}`);
     return { redis: redisOk, sqlite: sqliteOk };
 }
 /** Returns current storage status for health checks. */
