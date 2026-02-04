@@ -15,6 +15,7 @@ const leaderboard_js_1 = require("./leaderboard.js");
 const inventory_js_1 = require("./inventory.js");
 const leaderboard_js_2 = require("./leaderboard.js");
 const gameStats_js_1 = require("./gameStats.js");
+const karmaService_js_1 = require("./karmaService.js");
 const GameServer_js_1 = require("./GameServer.js");
 /** Timestamped log function for server output */
 function log(message) {
@@ -428,6 +429,94 @@ app.post('/api/inventory/deposit', (req, res) => {
     }
     log(`Inventory deposited for ${userId}: ${rtAmount} RT, winner=${isWinner}`);
     res.json({ success: true, inventory });
+});
+// Karma Points API - shared across games (Rescue World / Shelter Sim)
+// Get current user's karma balance
+app.get('/api/karma', (req, res) => {
+    const userId = req.signedCookies?.session;
+    if (!userId) {
+        res.json({ karmaPoints: 0, signedIn: false });
+        return;
+    }
+    const karmaInfo = (0, karmaService_js_1.getKarmaInfo)(userId);
+    if (!karmaInfo) {
+        res.json({ karmaPoints: 0, signedIn: true, userId });
+        return;
+    }
+    res.json({
+        karmaPoints: karmaInfo.karmaPoints,
+        displayName: karmaInfo.displayName,
+        userId: karmaInfo.userId,
+        signedIn: true
+    });
+});
+// Get karma transaction history for current user
+// NOTE: Must be defined before /api/karma/:userId to avoid route conflict
+app.get('/api/karma/history', (req, res) => {
+    const userId = req.signedCookies?.session;
+    if (!userId) {
+        res.status(401).json({ error: 'not_signed_in' });
+        return;
+    }
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 20, 1), 100);
+    const history = (0, karmaService_js_1.getKarmaHistory)(userId, limit);
+    res.json({ history });
+});
+// Get karma for a specific user (server-to-server / Shelter Sim integration)
+app.get('/api/karma/:userId', (req, res) => {
+    const targetUserId = req.params.userId;
+    if (!targetUserId) {
+        res.status(400).json({ error: 'user_id_required' });
+        return;
+    }
+    const karmaInfo = (0, karmaService_js_1.getKarmaInfo)(targetUserId);
+    if (!karmaInfo) {
+        res.status(404).json({ error: 'user_not_found' });
+        return;
+    }
+    res.json(karmaInfo);
+});
+// Award karma points (authenticated, for Shelter Sim server-to-server use)
+// Requires API key in header for server-to-server calls
+app.post('/api/karma/award', (req, res) => {
+    // Check for API key or session
+    const apiKey = req.headers['x-api-key'];
+    const expectedApiKey = process.env.KARMA_API_KEY;
+    const userId = req.signedCookies?.session;
+    // Allow either session auth OR API key auth
+    const { targetUserId, amount, reason, source } = req.body;
+    // Determine which user to award karma to
+    let awardToUserId = null;
+    if (apiKey && expectedApiKey && apiKey === expectedApiKey) {
+        // Server-to-server call with API key - use targetUserId
+        if (!targetUserId) {
+            res.status(400).json({ error: 'target_user_id_required' });
+            return;
+        }
+        awardToUserId = targetUserId;
+    }
+    else if (userId) {
+        // Session auth - can only award to self (for future client-side features)
+        awardToUserId = userId;
+    }
+    else {
+        res.status(401).json({ error: 'unauthorized' });
+        return;
+    }
+    if (typeof amount !== 'number' || amount <= 0) {
+        res.status(400).json({ error: 'amount_must_be_positive' });
+        return;
+    }
+    // TypeScript guard - should never reach here with null userId due to returns above
+    if (!awardToUserId) {
+        res.status(401).json({ error: 'unauthorized' });
+        return;
+    }
+    const karmaReason = typeof reason === 'string' ? reason : 'External award';
+    const karmaSource = typeof source === 'string' ? source : 'sheltersim';
+    const newBalance = (0, karmaService_js_1.awardKarmaPoints)(awardToUserId, Math.floor(amount), karmaReason, karmaSource);
+    log(`Karma awarded: ${amount} KP to ${awardToUserId} (${karmaSource}: ${karmaReason})`);
+    res.json({ success: true, userId: awardToUserId, karmaPoints: newBalance });
 });
 app.listen(API_PORT, () => {
     log(`Auth API on http://localhost:${API_PORT}`);

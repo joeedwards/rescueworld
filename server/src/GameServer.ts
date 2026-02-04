@@ -12,7 +12,8 @@ import { decodeInput, encodeSnapshot, MSG_INPUT } from 'shared';
 import { registerServer, appendReplay, getNextGuestName } from './registry.js';
 import { withdrawForMatch, depositAfterMatch, getInventory, type Inventory } from './inventory.js';
 import { recordMatchWin, recordMatchLoss, updateReputationOnQuit } from './leaderboard.js';
-import { saveSavedMatch, getSavedMatch, deleteSavedMatch, insertMatchHistory } from './referrals.js';
+import { saveSavedMatch, getSavedMatch, deleteSavedMatch, insertMatchHistory, incrementGameCount } from './referrals.js';
+import { awardKarmaPoints } from './karmaService.js';
 
 /** Timestamped log function for server output */
 function log(message: string): void {
@@ -143,13 +144,15 @@ export async function gracefulShutdown(): Promise<void> {
   wss.close();
 
   // 2. Notify all connected players
+  const SITE_URL = process.env.SITE_URL || '/';
+  const message = `<a href="#" style="color:#fff;text-decoration:underline;display:block;width:100%;" onclick="window.location.reload();return false;">Server updating, your match will be saved. Click here to refresh the page.</a>`;
   for (const [, match] of matches) {
     for (const [, ws] of match.players) {
       if (ws.readyState === 1) {
         try {
           ws.send(JSON.stringify({
             type: 'serverShutdown',
-            message: 'Server updating, your match will be saved',
+            message: message,
           }));
         } catch {
           // ignore send errors
@@ -1192,6 +1195,8 @@ setInterval(() => {
         const matchEnded = (snapshot.winnerId != null || snapshot.strayLoss) && !match.world.isMatchProcessed();
         if (matchEnded) {
           match.world.markMatchProcessed();
+          // Track game in stats (includes all games, not just authenticated users)
+          incrementGameCount(match.mode);
           const isStrayLoss = !!snapshot.strayLoss;
           if (isStrayLoss) {
             log(`Match ${matchId} ended - too many strays (loss for all, no RT)`);
@@ -1214,12 +1219,18 @@ setInterval(() => {
               log(`Deposited for ${userId}: ${finalRT} RT, ${portCharges} ports, ${shelterPortCharges} home ports`);
             }
             const isWinner = !isStrayLoss && snapshot.winnerId === pid;
+            let karmaAwarded = 0;
             if (isStrayLoss) {
               recordMatchLoss(userId, 0);
             } else {
               if (isWinner) {
                 recordMatchWin(userId, finalRT);
-                log(`Recorded win for ${userId}`);
+                // Award 1 Karma Point for match win (FFA/Teams only, not solo)
+                if (match.mode !== 'solo') {
+                  awardKarmaPoints(userId, 1, `Match win: ${matchId}`);
+                  karmaAwarded = 1;
+                }
+                log(`Recorded win for ${userId}${karmaAwarded ? ' +1 KP' : ''}`);
               } else {
                 recordMatchLoss(userId, finalRT);
               }
@@ -1240,6 +1251,7 @@ setInterval(() => {
                 deposited: { rt: finalRT, portCharges },
                 isWinner: !isStrayLoss && snapshot.winnerId === pid,
                 strayLoss: isStrayLoss,
+                karmaAwarded,
               }));
             }
           }

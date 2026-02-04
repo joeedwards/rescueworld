@@ -119,6 +119,7 @@
     .settings-panel h3 { margin-bottom: 12px; font: 700 14px Rubik, sans-serif; color: #7bed9f; }
     .settings-panel label { display: block; margin-bottom: 8px; font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); cursor: pointer; }
     .settings-panel input[type="checkbox"] { margin-right: 8px; }
+    .settings-fps-select { display: block; width: 100%; margin: 4px 0 12px 0; padding: 6px 8px; font: 600 13px Rubik, sans-serif; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.3); border-radius: 6px; color: rgba(255,255,255,0.95); cursor: pointer; }
     .settings-exit-lobby { display: block; width: 100%; margin: 12px 0 8px 0; padding: 8px 12px; font: 600 13px Rubik, sans-serif; background: rgba(231,76,60,0.3); border: 1px solid #e74c3c; border-radius: 8px; color: #ff6b6b; cursor: pointer; }
     .settings-exit-lobby:hover { background: rgba(231,76,60,0.5); }
     .settings-close { margin-top: 12px; padding: 6px 12px; font: 600 12px Rubik, sans-serif; background: rgba(123,237,159,0.2); border: 1px solid #7bed9f; color: #7bed9f; border-radius: 6px; cursor: pointer; }
@@ -424,7 +425,8 @@
       box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: transform 0.3s ease;
       pointer-events: none;
     }
-    .toast.show { transform: translateX(-50%) translateY(0); }
+    .toast.show { transform: translateX(-50%) translateY(0); pointer-events: auto; }
+    .toast a { color: #fff; text-decoration: underline; cursor: pointer; }
     #how-to-play {
       position: fixed; bottom: 80px; right: 12px; width: 280px;
       background: rgba(245,245,245,0.97); border: 3px solid #444; border-radius: 6px;
@@ -572,6 +574,12 @@
     .referral-hidden { display: none; }
     .landing-shop { margin-top: 16px; }
     .landing-tokens { font: 600 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 8px; }
+    .karma-display { display: flex; align-items: center; gap: 6px; font: 600 14px Rubik, sans-serif; color: #fbbf24; margin-bottom: 12px; padding: 8px 12px; background: linear-gradient(135deg, rgba(251,191,36,0.15), rgba(245,158,11,0.1)); border: 1px solid rgba(251,191,36,0.3); border-radius: 8px; }
+    .karma-display.hidden { display: none; }
+    .karma-icon { font-size: 16px; }
+    .karma-label { color: rgba(255,255,255,0.8); }
+    .karma-value { font-size: 18px; font-weight: 700; color: #fbbf24; }
+    .karma-suffix { color: rgba(255,255,255,0.6); font-size: 12px; }
     .equipment-panel { background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.15); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
     .server-clock-wrap { margin-bottom: 12px; padding: 8px 10px; background: rgba(0,0,0,0.2); border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); font-size: 12px; }
     .server-clock-label { color: rgba(255,255,255,0.6); margin-bottom: 4px; }
@@ -608,7 +616,7 @@
     #cookie-banner .cookie-accept { background: #7bed9f; color: #1a1a2e; }
     #cookie-banner .cookie-essential { background: rgba(255,255,255,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.4); }
   </style>
-  <script type="module" crossorigin src="/rescueworld/assets/index-CsnIyrUB.js"></script>
+  <script type="module" crossorigin src="/rescueworld/assets/index-B1GtnlgM.js"></script>
 </head>
 <body>
   <div id="cookie-banner" class="hidden">
@@ -678,6 +686,14 @@
         <div id="landing-profile-actions"></div>
         <div class="landing-shop">
           <div id="landing-tokens" class="landing-tokens">Tokens: 0 RT</div>
+          
+          <!-- Karma Points (shared across games) -->
+          <div id="karma-display" class="karma-display hidden">
+            <span class="karma-icon">✨</span>
+            <span class="karma-label">Karma:</span>
+            <span class="karma-value" id="karma-points">0</span>
+            <span class="karma-suffix">KP</span>
+          </div>
           
           <!-- Equipment Panel -->
           <div class="equipment-panel">
@@ -774,17 +790,19 @@
             </label>
           </div>
         </div>
+        <div class="howto-section" style="margin-top:20px; text-align:left; max-width:360px;">
+          <h3 style="font: 700 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 12px;">How To Play</h3>
+          <p class="howto-text">Drive your <strong>van</strong> to rescue strays. Bring them to the <strong>Adoption Center</strong> (green zone) to adopt out, earn <strong>5 RT each</strong>.</p>
+          <p class="howto-text">Drive out <strong>Breeders</strong> by better feeding their pets! <strong>Don't let the breeders setup a Mill</strong>!</p>
+          <p class="howto-text">Build a <strong>shelter</strong> (250 RT), then buy an <strong>Adoption Center</strong> (250 RT) to adopt at your shelter for only 2RT each! Add <strong>Advertising and Gravity</strong> (200 and 300 RT) to pull strays!</p>
+          <p class="howto-text">Press <span class="key">E</span> for build menu.</p>
+          <h4 class="howto-subtitle">Controls</h4>
+          <p class="howto-text howto-keys"><span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> Move &nbsp; <span class="key">E</span> Build</p>
+          <h4 class="howto-subtitle">Power-ups</h4>
+          <p class="howto-text"><span class="orb green"></span> +Size &nbsp; <span class="orb blue"></span> Speed &nbsp; <span class="orb purple"></span> Port</p>
+        </div>
       </section>
       <aside class="landing-right">
-        <h3>How To Play</h3>
-        <p class="howto-text">Drive your <strong>van</strong> to rescue strays. Bring them to the <strong>Adoption Center</strong> (green zone) to adopt out, earn <strong>5 RT each</strong>.</p>
-        <p class="howto-text">Drive out <strong>Breeders</strong> by better feeding their pets! <strong>Don't let the breeders setup a Mill</strong>!</p>
-        <p class="howto-text">Build a <strong>shelter</strong> (250 RT), then buy an <strong>Adoption Center</strong> (250 RT) to adopt at your shelter for only 2RT each! Add <strong>Advertising and Gravity</strong> (200 and 300 RT) to pull strays!</p>
-        <p class="howto-text">Press <span class="key">E</span> for build menu.</p>
-        <h4 class="howto-subtitle">Controls</h4>
-        <p class="howto-text howto-keys"><span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> Move &nbsp; <span class="key">E</span> Build</p>
-        <h4 class="howto-subtitle">Power-ups</h4>
-        <p class="howto-text"><span class="orb green"></span> +Size &nbsp; <span class="orb blue"></span> Speed &nbsp; <span class="orb purple"></span> Port</p>
       <div class="lobby-leaderboard-panel">
         <h4 class="lobby-leaderboard-title">Live Leaderboard (Daily)</h4>
         <div id="lobby-leaderboard-content" class="lobby-leaderboard-content">
@@ -836,6 +854,11 @@
       <h3>Settings</h3>
       <label><input type="checkbox" id="music-toggle" checked /> Music</label>
       <label><input type="checkbox" id="sfx-toggle" checked /> Sound effects</label>
+      <label for="fps-select">Frame rate</label>
+      <select id="fps-select" class="settings-fps-select" aria-label="Frame rate">
+        <option value="30">30 FPS</option>
+        <option value="60">60 FPS</option>
+      </select>
       <button type="button" id="exit-to-lobby-btn" class="settings-exit-lobby">Exit to lobby</button>
       <button type="button" id="settings-close" class="settings-close">Close</button>
     </div>

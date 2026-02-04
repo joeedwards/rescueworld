@@ -109,13 +109,13 @@ exports.REGISTRATION_GIFT = {
     speedBoost: true,
 };
 /**
- * Grant a registration gift to a new user and auto-claim Day 1.
+ * Grant a registration gift to a new user and set them up to claim Day 1.
  * Call this when a user registers for the first time.
+ * The user will be able to manually claim Day 1 gift on their signup day.
  */
 function grantRegistrationGift(userId) {
     (0, referrals_js_1.ensureReferralStorage)();
     initSqlite();
-    const today = getTodayDateUTC();
     // Check if user already has daily gifts (not a new registration)
     const existingRow = db().prepare('SELECT user_id FROM daily_gifts WHERE user_id = ?').get(userId);
     if (existingRow) {
@@ -126,19 +126,17 @@ function grantRegistrationGift(userId) {
             day1Reward: { tokens: 0 }
         };
     }
-    // New user - grant registration gift AND Day 1 gift
-    const day1Reward = exports.DAILY_GIFT_REWARDS[1]; // Day 1 reward
-    const nextDay = 2; // Move to day 2
-    // Insert with Day 1 already claimed
-    db().prepare('INSERT INTO daily_gifts (user_id, last_claim_date, current_day, total_claims) VALUES (?, ?, ?, ?)').run(userId, today, nextDay, 1);
-    // Actually deposit the rewards into the player's inventory (persistent storage)
+    // New user - grant registration gift only
+    // Don't insert daily_gifts row yet - let them claim Day 1 manually
+    // This way getDailyGiftStatus will return currentDay: 1, canClaimToday: true
+    // Only deposit the registration gift (not Day 1 - they'll claim that manually)
     depositGiftReward(userId, exports.REGISTRATION_GIFT);
-    depositGiftReward(userId, day1Reward);
-    log(`Registration gift granted to ${userId}: +${exports.REGISTRATION_GIFT.tokens} RT (registration) + +${day1Reward.tokens} RT (Day 1) - deposited to inventory`);
+    const day1Reward = exports.DAILY_GIFT_REWARDS[1]; // Day 1 reward (for return value only)
+    log(`Registration gift granted to ${userId}: +${exports.REGISTRATION_GIFT.tokens} RT (registration bonus) - Day 1 gift ready to claim`);
     return {
         success: true,
         registrationReward: exports.REGISTRATION_GIFT,
-        day1Reward,
+        day1Reward, // Return what they CAN claim, not what was claimed
     };
 }
 function claimDailyGift(userId) {

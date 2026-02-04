@@ -179,6 +179,7 @@ const exitToLobbyBtnEl = document.getElementById('exit-to-lobby-btn')!;
 const musicToggleEl = document.getElementById('music-toggle') as HTMLInputElement;
 const sfxToggleEl = document.getElementById('sfx-toggle') as HTMLInputElement;
 const settingsCloseEl = document.getElementById('settings-close')!;
+const fpsSelectEl = document.getElementById('fps-select') as HTMLSelectElement | null;
 const pingEl = document.getElementById('ping')!;
 const switchServerEl = document.getElementById('switch-server')!;
 const switchServerBtnEl = document.getElementById('switch-server-btn')!;
@@ -282,6 +283,13 @@ const equipPortsEl = document.getElementById('equip-ports')!;
 const equipSpeedEl = document.getElementById('equip-speed')!;
 const equipSizeEl = document.getElementById('equip-size')!;
 const equipNoteEl = document.getElementById('equip-note')!;
+
+// Karma Points Elements (shared across games)
+const karmaDisplayEl = document.getElementById('karma-display')!;
+const karmaPointsEl = document.getElementById('karma-points')!;
+
+// Karma state (from server)
+let currentKarmaPoints = 0;
 
 // Inventory state (from server)
 interface Inventory {
@@ -391,6 +399,7 @@ const PET_EMOJIS: Record<PetType, string> = {
 
 const COOKIE_CONSENT_KEY = 'cookieConsent';
 const MODE_KEY = 'rescueworld_mode';
+const FPS_KEY = 'rescueworld_fps';
 const REF_KEY = 'rescueworld_ref';
 const SKIN_KEY = 'rescueworld_skin_unlocked';
 let fightAllyTargetId: string | null = null;
@@ -399,8 +408,9 @@ const sentAllyRequests = new Set<string>(); // Track ally requests we've sent (b
 let lastAttackWarnTime = 0;
 const ATTACK_WARN_COOLDOWN_MS = 2000;
 
-// Van facing direction: 1 = right, -1 = left (persists when stopped)
-const vanFacingDirections = new Map<string, number>();
+// Van facing direction: 1 = right, -1 = left
+// Persists when stopped so van keeps its last direction
+const vanFacingDir = new Map<string, number>();
 
 // Port animation state: tracks players who are porting
 interface PortAnimation {
@@ -617,7 +627,7 @@ function updateColorUI(): void {
 }
 
 let toastTimeout: ReturnType<typeof setTimeout> | null = null;
-function showToast(message: string, type: 'success' | 'error' | 'info' = 'info'): void {
+function showToast(message: string, type: 'success' | 'error' | 'info' = 'info', allowHtml: boolean = false): void {
   let toastEl = document.getElementById('toast');
   if (!toastEl) {
     toastEl = document.createElement('div');
@@ -625,7 +635,14 @@ function showToast(message: string, type: 'success' | 'error' | 'info' = 'info')
     toastEl.className = 'toast';
     document.body.appendChild(toastEl);
   }
-  toastEl.textContent = message;
+  
+  // Use innerHTML if allowed (for server shutdown message), otherwise textContent for security
+  if (allowHtml) {
+    toastEl.innerHTML = message;
+  } else {
+    toastEl.textContent = message;
+  }
+  
   // Set color based on type
   toastEl.classList.remove('toast-success', 'toast-error', 'toast-info');
   toastEl.classList.add(`toast-${type}`);
@@ -1791,7 +1808,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         }
         if (msg.type === 'serverShutdown') {
           const message = typeof msg.message === 'string' ? msg.message : 'Server is updating. Your progress has been saved.';
-          showToast(message, 'info');
+          showToast(message, 'info', true); // Allow HTML for clickable link
           if (gameWs) {
             gameWs.close();
             gameWs = null;
@@ -1888,6 +1905,12 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           updateResumeMatchUI();
           // Refresh inventory display if we're showing lobby soon
           fetchSavedMatchStatus();
+          // Show karma notification if awarded
+          if (typeof msg.karmaAwarded === 'number' && msg.karmaAwarded > 0) {
+            showToast(`+${msg.karmaAwarded} Karma Point!`, 'success');
+            // Refresh karma display
+            fetchKarma();
+          }
         }
         // Match-wide announcements
         if (msg.type === 'announcement' && Array.isArray(msg.messages)) {
@@ -2047,12 +2070,31 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
 }
 
 // --- Tick: send input at server tick rate, advance prediction every frame for smooth camera ---
+// Frame rate: user choice (30 or 60), persisted in localStorage
+function getStoredFps(): 30 | 60 {
+  const v = localStorage.getItem(FPS_KEY);
+  if (v === '60') return 60;
+  return 30;
+}
+let targetFps: 30 | 60 = getStoredFps();
+let targetFrameMs = 1000 / targetFps;
 let lastTickTime = 0;
 let lastInputSendTime = 0;
+let lastRenderTime = 0;
+
 function tick(now: number): void {
+  // Schedule next frame immediately to maintain timing accuracy
+  requestAnimationFrame(tick);
+  
+  // Frame rate limiting - skip if not enough time has passed
+  if (lastRenderTime && now - lastRenderTime < targetFrameMs - 1) {
+    return; // Skip this frame, wait for next
+  }
+  
   if (!lastTickTime) lastTickTime = now;
   const dt = Math.min((now - lastTickTime) / 1000, 0.1);
   lastTickTime = now;
+  lastRenderTime = now;
 
   applyJoystickToInput();
   
@@ -2191,11 +2233,19 @@ function tick(now: number): void {
   }
 
   render(dt);
-  requestAnimationFrame(tick);
+  // Note: requestAnimationFrame is now called at the start of tick() for frame rate limiting
 }
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
+}
+
+/** Lerp toward target angle taking the shortest path around the circle; t in [0,1]. */
+function lerpAngle(from: number, to: number, t: number): number {
+  let diff = to - from;
+  while (diff > Math.PI) diff -= 2 * Math.PI;
+  while (diff < -Math.PI) diff += 2 * Math.PI;
+  return from + diff * t;
 }
 
 function getInterpolatedPlayer(id: string): PlayerState | null {
@@ -2270,12 +2320,10 @@ function drawAdoptionZone(z: AdoptionZoneState): void {
   ctx.restore();
 }
 
-const ADOPTION_EVENT_RADIUS = 350;
-
 function drawAdoptionEvent(ev: AdoptionEvent, nowTick: number): void {
   const cx = ev.x;
   const cy = ev.y;
-  const r = ADOPTION_EVENT_RADIUS;
+  const r = ev.radius; // Use event's randomized radius
   const remaining = Math.max(0, ev.startTick + ev.durationTicks - nowTick);
   const secLeft = Math.ceil(remaining / 25);
   const imgSize = 100; // Larger for better visibility
@@ -2341,10 +2389,14 @@ function drawAdoptionEvent(ev: AdoptionEvent, nowTick: number): void {
   const typeName = ev.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   ctx.fillText(`📢 ${typeName}`, cx, cy - r - 12);
   
-  // Timer label (below the image)
+  // Timer and progress label (below the image)
   ctx.font = 'bold 14px Rubik, sans-serif';
+  const totalNeeded = ev.totalNeeded ?? 100;
+  const totalRescued = ev.totalRescued ?? 0;
+  const progressText = `${totalRescued}/${totalNeeded} rescued`;
   const timerText = isNearby ? `${secLeft}s - DROP PETS HERE!` : `${secLeft}s left - bring pets here!`;
   ctx.fillText(timerText, cx, cy + imgSize / 2 + 18);
+  ctx.fillText(progressText, cx, cy + imgSize / 2 + 36);
   
   ctx.restore();
 }
@@ -2397,6 +2449,7 @@ function drawPortEffect(x: number, y: number, progress: number, isAppearing: boo
 }
 
 /** Draw animated fire/boost flames behind the van when speed boost is active
+ * @param facingDir 1 = facing right, -1 = facing left
  * @param size 'small' for permanent 20% upgrade, 'large' for temporary boost */
 function drawSpeedBoostFire(cx: number, cy: number, vanHalf: number, facingDir: number, size: 'small' | 'large' = 'large'): void {
   ctx.save();
@@ -2406,7 +2459,8 @@ function drawSpeedBoostFire(cx: number, cy: number, vanHalf: number, facingDir: 
   const alphaMultiplier = size === 'small' ? 0.6 : 1.0;
   
   // Fire is at the back of the van (opposite of facing direction)
-  const fireX = cx - facingDir * (vanHalf + 8 * scale);
+  const fireDistance = vanHalf + 8 * scale;
+  const fireX = cx - facingDir * fireDistance; // Back is opposite of facing
   const fireY = cy;
   
   // Animated flame effect using time
@@ -2425,28 +2479,34 @@ function drawSpeedBoostFire(cx: number, cy: number, vanHalf: number, facingDir: 
   ctx.arc(fireX, fireY, glowRadius, 0, Math.PI * 2);
   ctx.fill();
   
-  // Main flame (pointing away from van)
+  // Main flame (pointing away from van, in the back direction)
   const baseFlameLength = 18 * scale;
   const baseFlameWidth = 10 * scale;
   const flameLength = baseFlameLength + Math.sin(time * 5) * 4 * scale;
   const flameWidth = baseFlameWidth + Math.cos(time * 6) * 2 * scale;
   
+  // Translate to fire position
+  ctx.translate(fireX, fireY);
+  // Rotate to point away from van (left if facing right, right if facing left)
+  if (facingDir > 0) {
+    ctx.rotate(Math.PI); // Point left (backward)
+  }
+  // If facing left, flame already points right (backward)
+  
+  // Draw flame pointing in +X direction
   ctx.beginPath();
-  ctx.moveTo(fireX + facingDir * 5, fireY - flameWidth / 2);
+  ctx.moveTo(-5, -flameWidth / 2);
   ctx.quadraticCurveTo(
-    fireX - facingDir * flameLength * 0.6, fireY - flameWidth * 0.3 * flicker2,
-    fireX - facingDir * flameLength, fireY
+    flameLength * 0.6, -flameWidth * 0.3 * flicker2,
+    flameLength, 0
   );
   ctx.quadraticCurveTo(
-    fireX - facingDir * flameLength * 0.6, fireY + flameWidth * 0.3 * flicker2,
-    fireX + facingDir * 5, fireY + flameWidth / 2
+    flameLength * 0.6, flameWidth * 0.3 * flicker2,
+    -5, flameWidth / 2
   );
   ctx.closePath();
   
-  const flameGrad = ctx.createLinearGradient(
-    fireX + facingDir * 5, fireY,
-    fireX - facingDir * flameLength, fireY
-  );
+  const flameGrad = ctx.createLinearGradient(-5, 0, flameLength, 0);
   flameGrad.addColorStop(0, '#FFD700');
   flameGrad.addColorStop(0.3, '#FF8C00');
   flameGrad.addColorStop(0.7, '#FF4500');
@@ -2458,14 +2518,14 @@ function drawSpeedBoostFire(cx: number, cy: number, vanHalf: number, facingDir: 
   const innerLength = flameLength * 0.6;
   const innerWidth = flameWidth * 0.5;
   ctx.beginPath();
-  ctx.moveTo(fireX + facingDir * 5, fireY - innerWidth / 2);
+  ctx.moveTo(-5, -innerWidth / 2);
   ctx.quadraticCurveTo(
-    fireX - facingDir * innerLength * 0.5, fireY - innerWidth * 0.2,
-    fireX - facingDir * innerLength, fireY
+    innerLength * 0.5, -innerWidth * 0.2,
+    innerLength, 0
   );
   ctx.quadraticCurveTo(
-    fireX - facingDir * innerLength * 0.5, fireY + innerWidth * 0.2,
-    fireX + facingDir * 5, fireY + innerWidth / 2
+    innerLength * 0.5, innerWidth * 0.2,
+    -5, innerWidth / 2
   );
   ctx.closePath();
   ctx.fillStyle = '#FFFF80';
@@ -2496,13 +2556,14 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
     }
   }
   
-  // Determine facing direction (left/right) based on horizontal velocity only
-  // Update only when there's significant horizontal movement
-  if (Math.abs(p.vx) > 0.01) {
-    vanFacingDirections.set(p.id, p.vx > 0 ? 1 : -1);
-  }
-  // Get current facing direction (default to right = 1)
-  const facingDir = vanFacingDirections.get(p.id) ?? 1;
+  // Facing direction: 1 = right, -1 = left (updated in render() based on vx)
+  const speed = Math.hypot(p.vx, p.vy);
+  const facingDir = vanFacingDir.get(p.id) ?? 1; // Default to facing right
+  
+  // Bobbing: when moving, add a small vertical bounce (shocks)
+  const bobAmplitude = 3;
+  const bobFreq = 0.012;
+  const drawCy = speed > 0.01 ? cy + Math.sin(Date.now() * bobFreq) * bobAmplitude : cy;
   
   ctx.save();
   ctx.globalAlpha = portAlpha;
@@ -2518,9 +2579,9 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
   // Large flame for temporary boost, small flame for permanent 20% upgrade
   if (!p.eliminated) {
     if (hasTemporaryBoost) {
-      drawSpeedBoostFire(cx, cy, half, facingDir, 'large');
+      drawSpeedBoostFire(cx, drawCy, half, facingDir, 'large');
     } else if (hasPermanentSpeed) {
-      drawSpeedBoostFire(cx, cy, half, facingDir, 'small');
+      drawSpeedBoostFire(cx, drawCy, half, facingDir, 'small');
     }
   }
   
@@ -2535,10 +2596,7 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
       const parts = p.shelterColor.split(':');
       const color1 = parts[1] || '#ff5500';
       const color2 = parts[2] || '#00aaff';
-      const grad = ctx.createLinearGradient(cx - half, cy - half * 0.6, cx + half, cy + half * 0.6);
-      grad.addColorStop(0, color1);
-      grad.addColorStop(1, color2);
-      fillStyle = grad;
+      fillStyle = color1; // Will create gradient after transform
       baseColor = color1;
     } else {
       fillStyle = p.shelterColor;
@@ -2551,25 +2609,35 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
   // Van dimensions - always van shape (shelters are separate entities now)
   const vanWidth = half * 2;
   const vanHeight = half * 1.2; // Van is elongated rectangle
-  const vanLeft = cx - half;
-  const vanTop = cy - vanHeight * 0.5;
   const cornerRadius = Math.min(12, half * 0.3);
   const wheelRadius = Math.min(10, half * 0.25);
   
-  // For left-facing, we flip the van body horizontally around its center
-  // Move to center, scale X by -1 if facing left, then draw
-  ctx.translate(cx, cy);
+  // Translate to center - NO rotation, just horizontal flip based on facing direction
+  ctx.translate(cx, drawCy);
+  // Flip horizontally if facing left (wheels always stay at bottom)
   if (facingDir < 0) {
-    ctx.scale(-1, 1); // Flip horizontally
+    ctx.scale(-1, 1);
+  }
+  
+  // Handle gradient
+  if (p.shelterColor?.startsWith('gradient:') && !p.eliminated) {
+    const parts = p.shelterColor.split(':');
+    const color1 = parts[1] || '#ff5500';
+    const color2 = parts[2] || '#00aaff';
+    const grad = ctx.createLinearGradient(-half, 0, half, 0);
+    grad.addColorStop(0, color1);
+    grad.addColorStop(1, color2);
+    fillStyle = grad;
   }
   
   // Draw van body relative to origin (rounded rectangle)
+  // Van is drawn pointing right (+x is front), horizontal flip handles left direction
   ctx.fillStyle = fillStyle;
   ctx.beginPath();
   ctx.roundRect(-half, -vanHeight * 0.5, vanWidth, vanHeight, cornerRadius);
   ctx.fill();
   
-  // Van cabin (front section - darker) - front is on the right (+x direction when facing right)
+  // Van cabin (front section - darker) - front is on the right (+x direction)
   const cabinWidth = vanWidth * 0.3;
   ctx.fillStyle = 'rgba(0,0,0,0.15)';
   ctx.beginPath();
@@ -2600,52 +2668,57 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
   ctx.stroke();
   ctx.setLineDash([]);
   
-  // Reset scale for wheels - wheels should NOT be flipped, they stay at bottom
-  if (facingDir < 0) {
-    ctx.scale(-1, 1); // Undo flip
-  }
-  ctx.translate(-cx, -cy); // Undo translate
-  
-  // Wheels (always at bottom of van, regardless of facing direction)
+  // Wheels (always at bottom - wheels stay on ground/south)
   ctx.fillStyle = '#333';
-  const wheelY = vanTop + vanHeight + wheelRadius * 0.3;
-  const wheel1X = vanLeft + vanWidth * 0.2;
-  const wheel2X = vanLeft + vanWidth * 0.7;
+  // Front wheel (right side in local coordinates, which is the front)
+  const frontWheelX = half - vanWidth * 0.3;
+  // Rear wheel (left side in local coordinates)
+  const rearWheelX = -half + vanWidth * 0.3;
+  // Wheels are below the van body (always at bottom/south)
+  const wheelY = vanHeight * 0.5 + wheelRadius * 0.3;
   ctx.beginPath();
-  ctx.arc(wheel1X, wheelY, wheelRadius, 0, Math.PI * 2);
+  ctx.arc(rearWheelX, wheelY, wheelRadius, 0, Math.PI * 2);
   ctx.fill();
   ctx.beginPath();
-  ctx.arc(wheel2X, wheelY, wheelRadius, 0, Math.PI * 2);
+  ctx.arc(frontWheelX, wheelY, wheelRadius, 0, Math.PI * 2);
   ctx.fill();
   // Wheel hubcaps
   ctx.fillStyle = '#888';
   ctx.beginPath();
-  ctx.arc(wheel1X, wheelY, wheelRadius * 0.4, 0, Math.PI * 2);
+  ctx.arc(rearWheelX, wheelY, wheelRadius * 0.4, 0, Math.PI * 2);
   ctx.fill();
   ctx.beginPath();
-  ctx.arc(wheel2X, wheelY, wheelRadius * 0.4, 0, Math.PI * 2);
+  ctx.arc(frontWheelX, wheelY, wheelRadius * 0.4, 0, Math.PI * 2);
   ctx.fill();
   
-  // Labels (not transformed)
-  ctx.fillStyle = '#2d2d2d';
-  ctx.font = 'bold 12px Rubik, sans-serif';
+  // Undo horizontal flip so text is always readable
+  if (facingDir < 0) {
+    ctx.scale(-1, 1);
+  }
+  
+  // Pet count label (move into center of van with white font)
+  const displayCapacity = Math.min(Math.floor(p.size), VAN_MAX_CAPACITY);
+  ctx.fillStyle = '#fff'; // Use white for in-van label
+  ctx.font = 'bold 13px Rubik, sans-serif';
+  //we need this to align under the window - add 10px to the y position
+  const yOffset = 10;
   ctx.textAlign = 'center';
-  const label = isMe ? 'You' : (p.displayName ?? p.id);
-  ctx.fillText(label, cx, vanTop - 6);
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`Pets: ${p.petsInside.length}/${displayCapacity}`, 0, yOffset); // center of van
+  // Show player name only for other players (not "You" for local player)
+  if (!isMe) {
+    ctx.fillText(p.displayName ?? p.id, 0, -half - 24);
+  }
   if (hasAllyRequest) {
     ctx.fillStyle = '#7bed9f';
-    ctx.fillText('\uD83E\uDD1D', cx + half + 10, vanTop + 10);
+    ctx.fillText('\uD83E\uDD1D', half + 10, -half);
     ctx.fillStyle = '#2d2d2d';
   }
   if (p.eliminated) {
     ctx.font = '18px sans-serif';
-    ctx.fillText('\uD83D\uDC7B', cx - half * 0.3, cy);
+    ctx.fillText('\uD83D\uDC7B', 0, 0);
     ctx.font = 'bold 12px Rubik, sans-serif';
   }
-  // Pet count on van body - vans always capped at VAN_MAX_CAPACITY (shelters are separate)
-  const displayCapacity = Math.min(Math.floor(p.size), VAN_MAX_CAPACITY);
-  ctx.fillStyle = '#fff';
-  ctx.fillText(`Pets: ${p.petsInside.length}/${displayCapacity}`, cx, cy + 4);
   ctx.restore();
 }
 
@@ -3037,6 +3110,17 @@ function drawPickup(u: PickupState): void {
 
 function render(dt: number): void {
   try {
+    // Update van facing direction (left/right) based on horizontal velocity
+    if (latestSnapshot) {
+      for (const p of latestSnapshot.players) {
+        // Only update direction when there's significant horizontal movement
+        if (Math.abs(p.vx) > 0.5) {
+          vanFacingDir.set(p.id, p.vx > 0 ? 1 : -1);
+        }
+        // When stopped or moving mostly vertically, keep last facing direction
+      }
+    }
+
     const cam = getCamera();
     const camX = Number.isFinite(cam.x) ? Math.max(0, Math.min(MAP_WIDTH - cam.w, cam.x)) : 0;
     const camY = Number.isFinite(cam.y) ? Math.max(0, Math.min(MAP_HEIGHT - cam.h, cam.y)) : 0;
@@ -3318,7 +3402,7 @@ function render(dt: number): void {
     for (const ev of latestSnapshot.adoptionEvents ?? []) {
       const ex = ev.x * scale;
       const ey = ev.y * scale;
-      const r = Math.min(12, ADOPTION_EVENT_RADIUS * scale);
+      const r = Math.min(12, ev.radius * scale);
       
       // Pulsing effect - creates an expanding ring animation
       const pulseTime = Date.now() % 2000; // 2 second cycle
@@ -3742,26 +3826,30 @@ function render(dt: number): void {
   const points = me?.totalAdoptions ?? 0;
   timerEl.textContent = matchPhase === 'playing' ? `Points: ${points}` : '';
   
-  // Update game clock
-  const durationMs = latestSnapshot?.matchDurationMs ?? 0;
-  const totalSec = Math.floor(durationMs / 1000);
-  const hours = Math.floor(totalSec / 3600);
-  const mins = Math.floor((totalSec % 3600) / 60);
-  const secs = totalSec % 60;
-  gameClockEl.textContent = `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  // Update game clock (stop updating when match is over)
+  const matchIsOver = latestSnapshot != null && latestSnapshot.matchEndAt > 0 && latestSnapshot.tick >= latestSnapshot.matchEndAt;
+  if (!matchIsOver) {
+    const durationMs = latestSnapshot?.matchDurationMs ?? 0;
+    const totalSec = Math.floor(durationMs / 1000);
+    const hours = Math.floor(totalSec / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const secs = totalSec % 60;
+    gameClockEl.textContent = `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
   
   // Adoption events panel
   const events = latestSnapshot?.adoptionEvents ?? [];
   const snap = latestSnapshot;
   if (eventPanelEl && eventPanelListEl) {
     if (events.length > 0 && matchPhase === 'playing' && snap) {
-      const petTypeNames: Record<number, string> = { [PET_TYPE_CAT]: 'Cats', [PET_TYPE_DOG]: 'Dogs', [PET_TYPE_BIRD]: 'Birds', [PET_TYPE_RABBIT]: 'Rabbits', [PET_TYPE_SPECIAL]: 'Special' };
       eventPanelListEl.innerHTML = events.map(ev => {
         const typeName = ev.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         const remainingTicks = Math.max(0, ev.startTick + ev.durationTicks - snap.tick);
         const remainingSec = Math.ceil(remainingTicks / 25);
-        const reqs = ev.requirements.map(r => `${r.count} ${petTypeNames[r.petType] ?? 'Pets'}`).join(', ');
-        return `<div class="event-item"><div class="event-name">${escapeHtml(typeName)}</div><div class="event-reqs">Need: ${escapeHtml(reqs)}</div><div class="event-time">${remainingSec}s left</div></div>`;
+        const totalNeeded = ev.totalNeeded ?? 100;
+        const totalRescued = ev.totalRescued ?? 0;
+        const progress = `${totalRescued}/${totalNeeded}`;
+        return `<div class="event-item"><div class="event-name">${escapeHtml(typeName)}</div><div class="event-reqs">Need: ${progress} pets rescued</div><div class="event-time">${remainingSec}s left</div></div>`;
       }).join('');
       eventPanelEl.classList.remove('hidden');
     } else {
@@ -4212,6 +4300,17 @@ musicToggleEl.addEventListener('change', () => {
 sfxToggleEl.addEventListener('change', () => setSfxEnabled(sfxToggleEl.checked));
 settingsBtnEl.addEventListener('click', () => settingsPanelEl.classList.toggle('hidden'));
 settingsCloseEl.addEventListener('click', () => settingsPanelEl.classList.add('hidden'));
+
+// FPS setting: persist and apply
+if (fpsSelectEl) {
+  fpsSelectEl.value = String(targetFps);
+  fpsSelectEl.addEventListener('change', () => {
+    const v = fpsSelectEl.value === '60' ? 60 : 30;
+    targetFps = v;
+    targetFrameMs = 1000 / targetFps;
+    localStorage.setItem(FPS_KEY, String(v));
+  });
+}
 exitToLobbyBtnEl.addEventListener('click', async () => {
   const wasConnected = gameWs?.readyState === WebSocket.OPEN;
   
@@ -5690,6 +5789,29 @@ async function fetchInventory(): Promise<void> {
   }
 }
 
+async function fetchKarma(): Promise<void> {
+  try {
+    const res = await fetch('/api/karma', { credentials: 'include' });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.signedIn && typeof data.karmaPoints === 'number') {
+      currentKarmaPoints = data.karmaPoints;
+      updateKarmaDisplay();
+    }
+  } catch {
+    // Ignore errors
+  }
+}
+
+function updateKarmaDisplay(): void {
+  if (isSignedIn) {
+    karmaDisplayEl.classList.remove('hidden');
+    karmaPointsEl.textContent = String(currentKarmaPoints);
+  } else {
+    karmaDisplayEl.classList.add('hidden');
+  }
+}
+
 function updateEquipmentPanel(): void {
   equipRtEl.textContent = String(currentInventory.storedRt);
   equipPortsEl.textContent = String(currentInventory.portCharges);
@@ -5812,7 +5934,7 @@ function stopServerClock(): void {
 
 // --- Start ---
 storeReferralFromUrl();
-fetchAndRenderAuth().then(() => fetchInventory());
+fetchAndRenderAuth().then(() => { fetchInventory(); fetchKarma(); });
 updateLandingTokens();
 startServerClockWhenOnLobby();
 window.addEventListener('resize', resize);

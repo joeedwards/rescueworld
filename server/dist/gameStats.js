@@ -25,14 +25,13 @@ function db() {
     return sqlite;
 }
 /**
- * Get games count grouped by mode from match_history table
+ * Get games count grouped by mode from game_counts table (includes all games, not just authenticated users)
  */
 function getGamesByMode() {
     const conn = db();
     const rows = conn.prepare(`
-    SELECT mode, COUNT(*) as count 
-    FROM match_history 
-    GROUP BY mode
+    SELECT mode, total_games as count 
+    FROM game_counts
   `).all();
     const result = { solo: 0, ffa: 0, teams: 0 };
     for (const row of rows) {
@@ -46,12 +45,12 @@ function getGamesByMode() {
     return result;
 }
 /**
- * Get total games played across all modes
+ * Get total games played across all modes (includes all games, not just authenticated users)
  */
 function getTotalGamesPlayed() {
     const conn = db();
-    const row = conn.prepare('SELECT COUNT(*) as count FROM match_history').get();
-    return row.count;
+    const row = conn.prepare('SELECT SUM(total_games) as count FROM game_counts').get();
+    return row.count ?? 0;
 }
 /**
  * Determine the most popular game mode

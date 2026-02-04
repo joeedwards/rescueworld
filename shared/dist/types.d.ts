@@ -119,11 +119,17 @@ export interface AdoptionEvent {
     type: 'school_fair' | 'farmers_market' | 'petco_weekend' | 'stadium_night';
     x: number;
     y: number;
+    /** Event radius (randomized per event) */
+    radius: number;
     /** Required pets to complete event */
     requirements: {
         petType: number;
         count: number;
     }[];
+    /** Total pets needed to rescue for this event (70-300) */
+    totalNeeded: number;
+    /** Total pets rescued so far */
+    totalRescued: number;
     /** Current progress per player: playerId -> pet type contributions */
     contributions: {
         [playerId: string]: {
@@ -132,7 +138,7 @@ export interface AdoptionEvent {
     };
     /** Tick when event started */
     startTick: number;
-    /** Duration in ticks (2-4 minutes at 25 ticks/sec = 3000-6000 ticks) */
+    /** Duration in ticks (60-150 seconds at 25 ticks/sec = 1500-3750 ticks) */
     durationTicks: number;
     /** Score rewards for top contributors */
     rewards: {
@@ -141,6 +147,24 @@ export interface AdoptionEvent {
         top3: number;
         participation: number;
     };
+}
+/** Karma balance info (shared across games) */
+export interface KarmaBalance {
+    userId: string;
+    displayName: string;
+    karmaPoints: number;
+}
+/** Match end inventory message (sent via WebSocket JSON) */
+export interface MatchEndInventoryMessage {
+    type: 'matchEndInventory';
+    deposited: {
+        rt: number;
+        portCharges: number;
+    };
+    isWinner: boolean;
+    strayLoss: boolean;
+    /** Karma points awarded (1 for winner in FFA/Teams, 0 otherwise) */
+    karmaAwarded?: number;
 }
 export interface GameSnapshot {
     tick: number;

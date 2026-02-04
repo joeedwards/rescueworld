@@ -102,6 +102,7 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
     size += 1 + encoder.encode(ev.type).length; // type
     size += 4 + 4; // x, y
     size += 4 + 4; // startTick, durationTicks
+    size += 2 + 2; // totalNeeded(16), totalRescued(16)
   }
   const buf = new ArrayBuffer(size * 2); // No cap - large games need large buffers
   const view = new DataView(buf);
@@ -233,6 +234,10 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
     off += 4;
     view.setUint32(off, ev.durationTicks >>> 0, true);
     off += 4;
+    view.setUint16(off, Math.min(0xFFFF, ev.totalNeeded) >>> 0, true);
+    off += 2;
+    view.setUint16(off, Math.min(0xFFFF, ev.totalRescued) >>> 0, true);
+    off += 2;
   }
   return buf.slice(0, off);
 }
@@ -430,16 +435,23 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
     off += 4;
     const durationTicks = view.getUint32(off, true);
     off += 4;
+    const totalNeeded = off + 4 <= view.byteLength ? view.getUint16(off, true) : 0;
+    off += 2;
+    const totalRescued = off + 2 <= view.byteLength ? view.getUint16(off, true) : 0;
+    off += 2;
     adoptionEvents.push({
       id: evId,
       type: evType as AdoptionEvent['type'],
       x: evX,
       y: evY,
+      radius: 0, // Not encoded in snapshot; client may use default for display
+      requirements: [],
+      totalNeeded,
+      totalRescued,
+      contributions: {},
       startTick,
       durationTicks,
-      requirements: [], // Not needed on client
-      contributions: {}, // Not needed on client
-      rewards: { top1: 0, top2: 0, top3: 0, participation: 0 }, // Not needed on client
+      rewards: { top1: 0, top2: 0, top3: 0, participation: 0 },
     });
   }
   return { 

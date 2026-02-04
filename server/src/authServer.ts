@@ -24,6 +24,7 @@ import { getLeaderboard, getUserRank } from './leaderboard.js';
 import { getInventory, depositAfterMatch, withdrawForMatch } from './inventory.js';
 import { recordMatchWin, recordRtEarned, updateReputationOnQuit } from './leaderboard.js';
 import { getGameStats } from './gameStats.js';
+import { getKarmaBalance, getKarmaInfo, awardKarmaPoints, getKarmaHistory } from './karmaService.js';
 import { getRealtimeStats } from './GameServer.js';
 
 /** Timestamped log function for server output */
@@ -477,6 +478,110 @@ app.post('/api/inventory/deposit', (req: Request, res: Response) => {
   
   log(`Inventory deposited for ${userId}: ${rtAmount} RT, winner=${isWinner}`);
   res.json({ success: true, inventory });
+});
+
+// Karma Points API - shared across games (Rescue World / Shelter Sim)
+
+// Get current user's karma balance
+app.get('/api/karma', (req: Request, res: Response) => {
+  const userId = req.signedCookies?.session;
+  if (!userId) {
+    res.json({ karmaPoints: 0, signedIn: false });
+    return;
+  }
+  const karmaInfo = getKarmaInfo(userId);
+  if (!karmaInfo) {
+    res.json({ karmaPoints: 0, signedIn: true, userId });
+    return;
+  }
+  res.json({ 
+    karmaPoints: karmaInfo.karmaPoints, 
+    displayName: karmaInfo.displayName,
+    userId: karmaInfo.userId,
+    signedIn: true 
+  });
+});
+
+// Get karma transaction history for current user
+// NOTE: Must be defined before /api/karma/:userId to avoid route conflict
+app.get('/api/karma/history', (req: Request, res: Response) => {
+  const userId = req.signedCookies?.session;
+  if (!userId) {
+    res.status(401).json({ error: 'not_signed_in' });
+    return;
+  }
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 20, 1), 100);
+  const history = getKarmaHistory(userId, limit);
+  res.json({ history });
+});
+
+// Get karma for a specific user (server-to-server / Shelter Sim integration)
+app.get('/api/karma/:userId', (req: Request, res: Response) => {
+  const targetUserId = req.params.userId;
+  if (!targetUserId) {
+    res.status(400).json({ error: 'user_id_required' });
+    return;
+  }
+  const karmaInfo = getKarmaInfo(targetUserId);
+  if (!karmaInfo) {
+    res.status(404).json({ error: 'user_not_found' });
+    return;
+  }
+  res.json(karmaInfo);
+});
+
+// Award karma points (authenticated, for Shelter Sim server-to-server use)
+// Requires API key in header for server-to-server calls
+app.post('/api/karma/award', (req: Request, res: Response) => {
+  // Check for API key or session
+  const apiKey = req.headers['x-api-key'];
+  const expectedApiKey = process.env.KARMA_API_KEY;
+  const userId = req.signedCookies?.session;
+  
+  // Allow either session auth OR API key auth
+  const { targetUserId, amount, reason, source } = req.body as {
+    targetUserId?: string;
+    amount?: number;
+    reason?: string;
+    source?: string;
+  };
+  
+  // Determine which user to award karma to
+  let awardToUserId: string | null = null;
+  
+  if (apiKey && expectedApiKey && apiKey === expectedApiKey) {
+    // Server-to-server call with API key - use targetUserId
+    if (!targetUserId) {
+      res.status(400).json({ error: 'target_user_id_required' });
+      return;
+    }
+    awardToUserId = targetUserId;
+  } else if (userId) {
+    // Session auth - can only award to self (for future client-side features)
+    awardToUserId = userId;
+  } else {
+    res.status(401).json({ error: 'unauthorized' });
+    return;
+  }
+  
+  if (typeof amount !== 'number' || amount <= 0) {
+    res.status(400).json({ error: 'amount_must_be_positive' });
+    return;
+  }
+  
+  // TypeScript guard - should never reach here with null userId due to returns above
+  if (!awardToUserId) {
+    res.status(401).json({ error: 'unauthorized' });
+    return;
+  }
+  
+  const karmaReason = typeof reason === 'string' ? reason : 'External award';
+  const karmaSource = typeof source === 'string' ? source : 'sheltersim';
+  
+  const newBalance = awardKarmaPoints(awardToUserId, Math.floor(amount), karmaReason, karmaSource);
+  log(`Karma awarded: ${amount} KP to ${awardToUserId} (${karmaSource}: ${karmaReason})`);
+  
+  res.json({ success: true, userId: awardToUserId, karmaPoints: newBalance });
 });
 
 app.listen(API_PORT, () => {

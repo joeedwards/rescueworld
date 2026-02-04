@@ -20,6 +20,8 @@ exports.getSavedMatch = getSavedMatch;
 exports.deleteSavedMatch = deleteSavedMatch;
 exports.insertMatchHistory = insertMatchHistory;
 exports.getMatchHistory = getMatchHistory;
+exports.incrementGameCount = incrementGameCount;
+exports.getGameCounts = getGameCounts;
 const path_1 = __importDefault(require("path"));
 const registry_js_1 = require("./registry.js");
 const SQLITE_DB_PATH = process.env.SQLITE_DB_PATH || path_1.default.join(__dirname, '..', 'rescueworld.db');
@@ -201,6 +203,27 @@ function initSqlite() {
     catch {
         // Column already exists, ignore
     }
+    // Migration: Karma Points for cross-game currency (Shelter Sim integration)
+    try {
+        sqlite.exec(`ALTER TABLE player_stats ADD COLUMN karma_points INTEGER NOT NULL DEFAULT 0`);
+    }
+    catch {
+        // Column already exists, ignore
+    }
+    // Karma transactions table for audit trail (cross-game integration)
+    sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS karma_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      amount INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'rescueworld',
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS karma_transactions_user_id_idx ON karma_transactions(user_id);
+    CREATE INDEX IF NOT EXISTS karma_transactions_created_at_idx ON karma_transactions(created_at DESC);
+  `);
     // Saved matches for solo persistence (resume later)
     sqlite.exec(`
     CREATE TABLE IF NOT EXISTS saved_matches (
@@ -230,6 +253,17 @@ function initSqlite() {
     CREATE INDEX IF NOT EXISTS match_history_user_id_idx ON match_history(user_id);
     CREATE INDEX IF NOT EXISTS match_history_played_at_idx ON match_history(played_at DESC);
   `);
+    // Game counts table for tracking all games (including guests) - mode-agnostic totals
+    sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS game_counts (
+      mode TEXT PRIMARY KEY,
+      total_games INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+    // Initialize counters if not present
+    sqlite.prepare(`INSERT OR IGNORE INTO game_counts (mode, total_games) VALUES ('solo', 0)`).run();
+    sqlite.prepare(`INSERT OR IGNORE INTO game_counts (mode, total_games) VALUES ('ffa', 0)`).run();
+    sqlite.prepare(`INSERT OR IGNORE INTO game_counts (mode, total_games) VALUES ('teams', 0)`).run();
 }
 function ensureReferralStorage() {
     initSqlite();
@@ -416,4 +450,26 @@ function getMatchHistory(userId, limit = 50) {
     const rows = db().prepare(`SELECT id, user_id, match_id, mode, result, rt_earned, adoptions, duration_seconds, played_at
      FROM match_history WHERE user_id = ? ORDER BY played_at DESC LIMIT ?`).all(userId, limit);
     return rows;
+}
+/**
+ * Increment the total games counter for a mode (called for ALL games including guests)
+ */
+function incrementGameCount(mode) {
+    db().prepare(`UPDATE game_counts SET total_games = total_games + 1 WHERE mode = ?`).run(mode);
+}
+/**
+ * Get total game counts by mode (includes all games, not just authenticated users)
+ */
+function getGameCounts() {
+    const rows = db().prepare(`SELECT mode, total_games FROM game_counts`).all();
+    const result = { solo: 0, ffa: 0, teams: 0 };
+    for (const row of rows) {
+        if (row.mode === 'solo')
+            result.solo = row.total_games;
+        else if (row.mode === 'ffa')
+            result.ffa = row.total_games;
+        else if (row.mode === 'teams')
+            result.teams = row.total_games;
+    }
+    return result;
 }

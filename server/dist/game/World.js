@@ -1002,6 +1002,13 @@ class World {
         const type = eventTypes[Math.floor(Math.random() * eventTypes.length)];
         const x = 200 + Math.random() * (shared_1.MAP_WIDTH - 400);
         const y = 200 + Math.random() * (shared_1.MAP_HEIGHT - 400);
+        // Randomize radius between min and max
+        const radius = World.ADOPTION_EVENT_RADIUS_MIN +
+            Math.floor(Math.random() * (World.ADOPTION_EVENT_RADIUS_MAX - World.ADOPTION_EVENT_RADIUS_MIN));
+        // Randomize total pets needed to rescue (70-300)
+        const totalNeeded = World.ADOPTION_EVENT_NEEDED_MIN +
+            Math.floor(Math.random() * (World.ADOPTION_EVENT_NEEDED_MAX - World.ADOPTION_EVENT_NEEDED_MIN + 1));
+        // Keep requirements for variety tracking, but main goal is totalNeeded
         const numReqs = 1 + Math.floor(Math.random() * 2); // 1-2 requirement types
         const requirements = [];
         const usedTypes = new Set();
@@ -1012,14 +1019,19 @@ class World {
             usedTypes.add(pt);
             requirements.push({ petType: pt, count: 2 + Math.floor(Math.random() * 4) }); // 2-5 each
         }
-        const durationTicks = World.ADOPTION_EVENT_DURATION_MIN + Math.floor(Math.random() * (World.ADOPTION_EVENT_DURATION_MAX - World.ADOPTION_EVENT_DURATION_MIN));
+        // Randomize duration between 60s-150s
+        const durationTicks = World.ADOPTION_EVENT_DURATION_MIN +
+            Math.floor(Math.random() * (World.ADOPTION_EVENT_DURATION_MAX - World.ADOPTION_EVENT_DURATION_MIN));
         const eid = `event-${++this.adoptionEventIdSeq}`;
         const ev = {
             id: eid,
             type,
             x,
             y,
+            radius,
             requirements,
+            totalNeeded,
+            totalRescued: 0,
             contributions: {},
             startTick: now,
             durationTicks,
@@ -1027,8 +1039,8 @@ class World {
         };
         this.adoptionEvents.set(eid, ev);
         const typeName = type.replace(/_/g, ' ');
-        log(`Adoption event started: ${typeName} at (${Math.round(x)}, ${Math.round(y)}) for ${durationTicks / 25}s`);
-        this.pendingAnnouncements.push(`📢 ${typeName.replace(/\b\w/g, c => c.toUpperCase())} - bring pets here!`);
+        log(`Adoption event started: ${typeName} at (${Math.round(x)}, ${Math.round(y)}) radius=${radius} need=${totalNeeded} for ${Math.round(durationTicks / 25)}s`);
+        this.pendingAnnouncements.push(`📢 ${typeName.replace(/\b\w/g, c => c.toUpperCase())} - rescue ${totalNeeded} pets!`);
     }
     resolveAdoptionEvent(eid, ev) {
         const totals = [];
@@ -1062,10 +1074,11 @@ class World {
     recordEventContribution(playerId, petType, x, y) {
         for (const ev of this.adoptionEvents.values()) {
             const d = Math.hypot(ev.x - x, ev.y - y);
-            if (d <= World.ADOPTION_EVENT_RADIUS) {
+            if (d <= ev.radius) {
                 if (!ev.contributions[playerId])
                     ev.contributions[playerId] = {};
                 ev.contributions[playerId][petType] = (ev.contributions[playerId][petType] ?? 0) + 1;
+                ev.totalRescued += 1; // Track total rescues toward the goal
             }
         }
     }
@@ -1831,9 +1844,17 @@ class World {
             if (strayCountVictory === 0 && allBreedersCleared) {
                 this.matchEndedEarly = true;
                 this.matchEndAt = this.tick;
-                const firstShelter = this.shelters.values().next().value;
-                this.winnerId = firstShelter?.ownerId ?? null;
-                log(`Match end: zero strays and all breeders cleared at tick ${this.tick}. Winner: ${this.winnerId ?? 'co-op'}`);
+                // Winner is the player with the most adoptions (FFA/Teams rule)
+                let winnerId = null;
+                let maxAdoptions = 0;
+                for (const p of this.players.values()) {
+                    if (p.totalAdoptions > maxAdoptions) {
+                        maxAdoptions = p.totalAdoptions;
+                        winnerId = p.id;
+                    }
+                }
+                this.winnerId = winnerId;
+                log(`Match end: zero strays and all breeders cleared at tick ${this.tick}. Winner: ${this.winnerId ?? 'co-op'} (${maxAdoptions} adoptions)`);
             }
         }
         // Shelters with gravity upgrade pull strays toward them
@@ -2205,14 +2226,13 @@ class World {
         for (const ev of this.adoptionEvents.values()) {
             if (now >= ev.startTick + ev.durationTicks)
                 continue;
-            const eventRadius = World.ADOPTION_EVENT_RADIUS;
             for (const p of this.players.values()) {
                 if (this.eliminatedPlayerIds.has(p.id))
                     continue;
                 if (p.petsInside.length === 0)
                     continue;
                 const d = dist(p.x, p.y, ev.x, ev.y);
-                if (d > eventRadius)
+                if (d > ev.radius)
                     continue;
                 while (p.petsInside.length > 0) {
                     const pid = p.petsInside.pop();
@@ -2645,9 +2665,12 @@ World.BREEDER_STRAY_SPEED = 1.5; // Wild strays move 1.5x faster
 /** No strays inside this radius of breeder camps or shelters (clean map). */
 World.BREEDER_NO_STRAY_RADIUS = 100;
 World.BREEDER_STRAY_MIN_SPAWN_DIST = 100; // Min distance from breeder shelter when spawning wild strays
-World.ADOPTION_EVENT_RADIUS = 350;
-World.ADOPTION_EVENT_DURATION_MIN = 4500; // 3 min at 25 tps
-World.ADOPTION_EVENT_DURATION_MAX = 7500; // 5 min
+World.ADOPTION_EVENT_RADIUS_MAX = 350; // Maximum radius (current size)
+World.ADOPTION_EVENT_RADIUS_MIN = 150; // Minimum radius
+World.ADOPTION_EVENT_DURATION_MIN = 1500; // 60s at 25 tps
+World.ADOPTION_EVENT_DURATION_MAX = 3750; // 150s at 25 tps
+World.ADOPTION_EVENT_NEEDED_MIN = 70; // Min pets needed to rescue
+World.ADOPTION_EVENT_NEEDED_MAX = 300; // Max pets needed to rescue
 World.ADOPTION_EVENT_SPAWN_DELAY_MIN = 1500; // 1 min before first event
 World.ADOPTION_EVENT_SPAWN_DELAY_MAX = 3750; // 2.5 min between events
 // Default spawn margin is half the adoption zone radius to prevent spawning too close

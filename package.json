@@ -8,6 +8,8 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
+    "build:client": "npm run build -w client",
+    "build:server": "npm run build -w server",
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "npm run build -w shared && npm run dev -w server",
     "dev:client": "npm run dev -w client",

@@ -48,14 +48,13 @@ export interface GameStats {
 }
 
 /**
- * Get games count grouped by mode from match_history table
+ * Get games count grouped by mode from game_counts table (includes all games, not just authenticated users)
  */
 function getGamesByMode(): { solo: number; ffa: number; teams: number } {
   const conn = db();
   const rows = conn.prepare(`
-    SELECT mode, COUNT(*) as count 
-    FROM match_history 
-    GROUP BY mode
+    SELECT mode, total_games as count 
+    FROM game_counts
   `).all() as Array<{ mode: string; count: number }>;
 
   const result = { solo: 0, ffa: 0, teams: 0 };
@@ -68,12 +67,12 @@ function getGamesByMode(): { solo: number; ffa: number; teams: number } {
 }
 
 /**
- * Get total games played across all modes
+ * Get total games played across all modes (includes all games, not just authenticated users)
  */
 function getTotalGamesPlayed(): number {
   const conn = db();
-  const row = conn.prepare('SELECT COUNT(*) as count FROM match_history').get() as { count: number };
-  return row.count;
+  const row = conn.prepare('SELECT SUM(total_games) as count FROM game_counts').get() as { count: number | null };
+  return row.count ?? 0;
 }
 
 /**
