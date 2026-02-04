@@ -5,6 +5,9 @@
  * FFA games share a lobby until enough players join.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.getActiveMatchForUser = getActiveMatchForUser;
+exports.getRealtimeStats = getRealtimeStats;
+exports.gracefulShutdown = gracefulShutdown;
 const ws_1 = require("ws");
 const World_js_1 = require("./game/World.js");
 const shared_1 = require("shared");
@@ -39,8 +42,130 @@ const matches = new Map();
 const playerToMatch = new Map();
 // Solo: userId -> matchId for frozen matches (resume from memory)
 const userIdToSoloMatchId = new Map();
+// FFA/Teams: userId -> { matchId, playerId } for disconnected players who can rejoin
+const userIdToFfaMatch = new Map();
 // FFA lobby match (waiting for players)
 let ffaLobbyMatchId = null;
+/** Get active match info for a user (for API endpoint) */
+function getActiveMatchForUser(userId) {
+    // Check FFA/Teams first
+    const ffaInfo = userIdToFfaMatch.get(userId);
+    if (ffaInfo) {
+        const match = matches.get(ffaInfo.matchId);
+        if (match && match.phase === 'playing' && !match.world.isMatchOver()) {
+            return { matchId: ffaInfo.matchId, playerId: ffaInfo.playerId, mode: match.mode };
+        }
+        else {
+            // Match ended or doesn't exist, clean up
+            userIdToFfaMatch.delete(userId);
+        }
+    }
+    // Check Solo frozen match
+    const soloMatchId = userIdToSoloMatchId.get(userId);
+    if (soloMatchId) {
+        const match = matches.get(soloMatchId);
+        if (match?.frozen && match.soloPlayerId) {
+            return { matchId: soloMatchId, playerId: match.soloPlayerId, mode: 'solo' };
+        }
+    }
+    return null;
+}
+/** Get real-time game stats for the public API */
+function getRealtimeStats() {
+    let onlinePlayers = 0;
+    let ffaWaiting = 0;
+    let playingSolo = 0;
+    let playingFfa = 0;
+    let playingTeams = 0;
+    for (const match of matches.values()) {
+        const humanCount = match.players.size;
+        onlinePlayers += humanCount;
+        if (match.mode === 'solo') {
+            playingSolo += humanCount;
+        }
+        else if (match.phase === 'lobby' || match.phase === 'countdown') {
+            ffaWaiting += humanCount;
+        }
+        else if (match.mode === 'ffa') {
+            playingFfa += humanCount;
+        }
+        else if (match.mode === 'teams') {
+            playingTeams += humanCount;
+        }
+    }
+    return { onlinePlayers, ffaWaiting, playingSolo, playingFfa, playingTeams };
+}
+/** Graceful shutdown: save solo matches, deposit FFA/Teams RT, notify players, close connections */
+async function gracefulShutdown() {
+    log('Graceful shutdown initiated...');
+    // 1. Stop accepting new connections
+    wss.close();
+    // 2. Notify all connected players
+    for (const [, match] of matches) {
+        for (const [, ws] of match.players) {
+            if (ws.readyState === 1) {
+                try {
+                    ws.send(JSON.stringify({
+                        type: 'serverShutdown',
+                        message: 'Server updating, your match will be saved',
+                    }));
+                }
+                catch {
+                    // ignore send errors
+                }
+            }
+        }
+    }
+    // 3. Save all active solo matches (playing or frozen)
+    for (const [matchId, match] of matches) {
+        if (match.mode === 'solo' && match.phase === 'playing') {
+            const userId = match.soloUserId ?? match.playerUserIds.values().next().value;
+            if (userId) {
+                try {
+                    const worldState = match.world.serialize();
+                    (0, referrals_js_1.saveSavedMatch)(userId, 'solo', worldState, matchId);
+                    log(`Auto-saved solo match ${matchId} for ${userId}`);
+                }
+                catch (e) {
+                    log(`Auto-save failed for solo match ${matchId}: ${e}`);
+                }
+            }
+        }
+    }
+    // 4. Deposit RT for FFA/Teams players so they keep earned progress
+    for (const [matchId, match] of matches) {
+        if ((match.mode === 'ffa' || match.mode === 'teams') && match.phase === 'playing' && !match.world.isMatchProcessed()) {
+            const snapshot = match.world.getSnapshot();
+            const durationSeconds = Math.floor((snapshot.matchDurationMs ?? 0) / 1000);
+            for (const [playerId, userId] of match.playerUserIds) {
+                const playerMoney = match.world.getPlayerMoney(playerId);
+                const portCharges = match.world.getPortCharges(playerId);
+                const shelterPortCharges = match.world.getShelterPortCharges(playerId);
+                const playerState = snapshot.players.find((p) => p.id === playerId);
+                const adoptions = playerState?.totalAdoptions ?? 0;
+                if (playerMoney > 0 || portCharges > 0 || shelterPortCharges > 0) {
+                    (0, inventory_js_1.depositAfterMatch)(userId, playerMoney, portCharges, shelterPortCharges, 0, 0);
+                    log(`Shutdown: deposited for ${userId} (${playerId}): ${playerMoney} RT, ${portCharges} ports, ${shelterPortCharges} home ports`);
+                }
+                (0, leaderboard_js_1.recordMatchLoss)(userId, playerMoney);
+                (0, referrals_js_1.insertMatchHistory)(userId, matchId, match.mode, 'quit', playerMoney, adoptions, durationSeconds);
+                userIdToFfaMatch.delete(userId);
+            }
+        }
+    }
+    // 5. Close all WebSocket connections
+    for (const match of matches.values()) {
+        for (const ws of match.players.values()) {
+            try {
+                ws.close(1001, 'Server shutting down');
+            }
+            catch {
+                // ignore
+            }
+        }
+    }
+    log('Graceful shutdown complete');
+}
 let matchIdCounter = 0;
 function generateMatchId() {
     return `match-${Date.now().toString(36)}-${(++matchIdCounter).toString(36)}`;
@@ -80,6 +205,12 @@ function destroyMatch(matchId) {
     }
     for (const playerId of match.players.keys()) {
         playerToMatch.delete(playerId);
+    }
+    // Clean up FFA/Teams rejoin tracking for any users in this match
+    for (const [userId, info] of userIdToFfaMatch.entries()) {
+        if (info.matchId === matchId) {
+            userIdToFfaMatch.delete(userId);
+        }
     }
     matches.delete(matchId);
     if (ffaLobbyMatchId === matchId)
@@ -170,6 +301,45 @@ function removePlayerFromMatch(playerId, matchId) {
     // Solo: save match and freeze instead of removing/destroying (no deposit, no quit penalty)
     // But DON'T save if the match is already over (stray loss, win, or time expired)
     const matchOver = match.world.isMatchOver() || match.world.isStrayLoss();
+    // Solo mode: if match is over, process as proper win/loss before player leaves
+    if (match.mode === 'solo' && userId && match.phase === 'playing' && matchOver && !match.world.isMatchProcessed()) {
+        match.world.markMatchProcessed();
+        const isStrayLoss = match.world.isStrayLoss();
+        const snap = match.world.getSnapshot();
+        const playerState = snap.players.find(p => p.id === playerId);
+        const finalRT = isStrayLoss ? 0 : (playerState?.money ?? 0);
+        const portCharges = isStrayLoss ? 0 : match.world.getPortCharges(playerId);
+        const shelterPortCharges = isStrayLoss ? 0 : match.world.getShelterPortCharges(playerId);
+        const adoptions = playerState?.totalAdoptions ?? 0;
+        const durationSeconds = Math.floor((snap.matchDurationMs ?? 0) / 1000);
+        const isWinner = !isStrayLoss && snap.winnerId === playerId;
+        if (finalRT > 0 || portCharges > 0 || shelterPortCharges > 0) {
+            (0, inventory_js_1.depositAfterMatch)(userId, finalRT, portCharges, shelterPortCharges, 0, 0);
+            log(`Solo match ended on leave - deposited ${finalRT} RT, ${portCharges} ports for ${userId}`);
+        }
+        if (isStrayLoss) {
+            (0, leaderboard_js_1.recordMatchLoss)(userId, 0);
+            (0, referrals_js_1.insertMatchHistory)(userId, matchId, match.mode, 'stray_loss', 0, adoptions, durationSeconds);
+        }
+        else if (isWinner) {
+            (0, leaderboard_js_1.recordMatchWin)(userId, finalRT);
+            (0, referrals_js_1.insertMatchHistory)(userId, matchId, match.mode, 'win', finalRT, adoptions, durationSeconds);
+            log(`Recorded win for ${userId} on solo match end`);
+        }
+        else {
+            (0, leaderboard_js_1.recordMatchLoss)(userId, finalRT);
+            (0, referrals_js_1.insertMatchHistory)(userId, matchId, match.mode, 'loss', finalRT, adoptions, durationSeconds);
+        }
+        (0, referrals_js_1.deleteSavedMatch)(userId);
+        userIdToSoloMatchId.delete(userId);
+        match.playerUserIds.delete(playerId);
+        match.playerStartingInventory.delete(playerId);
+        match.world.removePlayer(playerId);
+        match.players.delete(playerId);
+        playerToMatch.delete(playerId);
+        destroyMatch(matchId);
+        return;
+    }
     if (match.mode === 'solo' && userId && match.phase === 'playing' && !matchOver) {
         try {
             match.world.recordPause(); // Record pause time for accurate match duration
@@ -194,12 +364,20 @@ function removePlayerFromMatch(playerId, matchId) {
         }
     }
     // FFA/Teams: van stops, shelter continues; do not remove from world or deposit
+    // Track userId -> matchId so player can rejoin
     if ((match.mode === 'ffa' || match.mode === 'teams') && match.phase === 'playing') {
         match.world.setPlayerDisconnected(playerId, true);
         match.players.delete(playerId);
         match.readySet.delete(playerId);
         playerToMatch.delete(playerId);
-        log(`FFA/Teams player ${playerId} disconnected - van stopped, shelter continues`);
+        // Save userId -> matchId mapping for rejoin capability
+        if (userId) {
+            userIdToFfaMatch.set(userId, { matchId, playerId });
+            log(`FFA/Teams player ${playerId} (userId=${userId}) disconnected - can rejoin matchId=${matchId}`);
+        }
+        else {
+            log(`FFA/Teams player ${playerId} disconnected - no userId, cannot rejoin`);
+        }
         return;
     }
     if (!match.frozen) {
@@ -243,6 +421,7 @@ wss.on('connection', async (ws) => {
     let playerUserId = null; // Auth user ID for inventory
     let startingRT = 0;
     let startingPorts = 0;
+    let startingShelterTier3Boosts = 0;
     let startingInventory = null;
     const addPlayerToMatch = (match, name) => {
         if (playerAdded)
@@ -253,10 +432,11 @@ wss.on('connection', async (ws) => {
             match.playerUserIds.set(effectivePlayerId, playerUserId);
             if (startingInventory) {
                 match.playerStartingInventory.set(effectivePlayerId, startingInventory);
+                startingShelterTier3Boosts = startingInventory.shelterTier3Boosts ?? 0;
             }
         }
         log(`player joined match id=${match.id} playerId=${effectivePlayerId} displayName=${name} startingRT=${startingRT}`);
-        match.world.addPlayer(effectivePlayerId, name, startingRT, startingPorts);
+        match.world.addPlayer(effectivePlayerId, name, startingRT, startingPorts, startingShelterTier3Boosts);
         match.players.set(effectivePlayerId, ws);
         playerToMatch.set(effectivePlayerId, match.id);
         currentMatchId = match.id;
@@ -426,6 +606,45 @@ wss.on('connection', async (ws) => {
                             match.world.startMatch();
                         }
                         else if (mode === 'ffa') {
+                            // Check if player has an active FFA match to rejoin
+                            if (playerUserId) {
+                                const ffaInfo = userIdToFfaMatch.get(playerUserId);
+                                if (ffaInfo) {
+                                    const existingMatch = matches.get(ffaInfo.matchId);
+                                    if (existingMatch && existingMatch.phase === 'playing' && !existingMatch.world.isMatchOver()) {
+                                        // Rejoin existing match with same playerId
+                                        effectivePlayerId = ffaInfo.playerId;
+                                        displayName = displayNameToUse;
+                                        playerAdded = true;
+                                        currentMatchId = existingMatch.id;
+                                        existingMatch.world.setPlayerDisconnected(ffaInfo.playerId, false);
+                                        existingMatch.players.set(ffaInfo.playerId, ws);
+                                        playerToMatch.set(ffaInfo.playerId, existingMatch.id);
+                                        userIdToFfaMatch.delete(playerUserId);
+                                        const snap = existingMatch.world.getSnapshot();
+                                        const p = snap.players.find((x) => x.id === ffaInfo.playerId);
+                                        const rt = p?.money ?? 0;
+                                        const ports = existingMatch.world.getPortCharges(ffaInfo.playerId);
+                                        const shelterPorts = existingMatch.world.getShelterPortCharges(ffaInfo.playerId);
+                                        ws.send(JSON.stringify({
+                                            type: 'welcome',
+                                            playerId: ffaInfo.playerId,
+                                            displayName: p?.displayName ?? displayNameToUse,
+                                            matchId: existingMatch.id,
+                                            startingRT: rt,
+                                            startingPorts: ports,
+                                            shelterPortCharges: shelterPorts,
+                                            resumed: true,
+                                        }));
+                                        log(`FFA match rejoined by ${playerUserId} playerId=${ffaInfo.playerId} matchId=${existingMatch.id}`);
+                                        return;
+                                    }
+                                    else {
+                                        // Match ended or doesn't exist, clean up
+                                        userIdToFfaMatch.delete(playerUserId);
+                                    }
+                                }
+                            }
                             // FFA: join the lobby match or create one
                             let match = ffaLobbyMatchId ? matches.get(ffaLobbyMatchId) : null;
                             if (!match || match.phase === 'playing') {
@@ -442,6 +661,45 @@ wss.on('connection', async (ws) => {
                             }
                         }
                         else {
+                            // Teams: check if player has an active teams match to rejoin
+                            if (playerUserId) {
+                                const teamsInfo = userIdToFfaMatch.get(playerUserId);
+                                if (teamsInfo) {
+                                    const existingMatch = matches.get(teamsInfo.matchId);
+                                    if (existingMatch && existingMatch.mode === 'teams' && existingMatch.phase === 'playing' && !existingMatch.world.isMatchOver()) {
+                                        // Rejoin existing match with same playerId
+                                        effectivePlayerId = teamsInfo.playerId;
+                                        displayName = displayNameToUse;
+                                        playerAdded = true;
+                                        currentMatchId = existingMatch.id;
+                                        existingMatch.world.setPlayerDisconnected(teamsInfo.playerId, false);
+                                        existingMatch.players.set(teamsInfo.playerId, ws);
+                                        playerToMatch.set(teamsInfo.playerId, existingMatch.id);
+                                        userIdToFfaMatch.delete(playerUserId);
+                                        const snap = existingMatch.world.getSnapshot();
+                                        const p = snap.players.find((x) => x.id === teamsInfo.playerId);
+                                        const rt = p?.money ?? 0;
+                                        const ports = existingMatch.world.getPortCharges(teamsInfo.playerId);
+                                        const shelterPorts = existingMatch.world.getShelterPortCharges(teamsInfo.playerId);
+                                        ws.send(JSON.stringify({
+                                            type: 'welcome',
+                                            playerId: teamsInfo.playerId,
+                                            displayName: p?.displayName ?? displayNameToUse,
+                                            matchId: existingMatch.id,
+                                            startingRT: rt,
+                                            startingPorts: ports,
+                                            shelterPortCharges: shelterPorts,
+                                            resumed: true,
+                                        }));
+                                        log(`Teams match rejoined by ${playerUserId} playerId=${teamsInfo.playerId} matchId=${existingMatch.id}`);
+                                        return;
+                                    }
+                                    else {
+                                        // Match ended or doesn't exist, clean up
+                                        userIdToFfaMatch.delete(playerUserId);
+                                    }
+                                }
+                            }
                             // Teams: similar to FFA for now
                             let match = ffaLobbyMatchId ? matches.get(ffaLobbyMatchId) : null;
                             if (!match) {
@@ -619,6 +877,45 @@ wss.on('connection', async (ws) => {
                     }));
                     return;
                 }
+                // Instant rescue for mills and camps at any level - requires tier 3+ shelter
+                if (msg.type === 'instantRescue' && typeof msg.cost === 'number' && typeof msg.totalPets === 'number') {
+                    const level = typeof msg.level === 'number' ? msg.level : 1;
+                    const isMill = !!msg.isMill;
+                    const cost = msg.cost;
+                    // Validate player has a tier 3+ shelter
+                    const shelter = match.world.getPlayerShelterInfo(effectivePlayerId);
+                    if (!shelter || shelter.tier < 3) {
+                        log(`Instant rescue rejected: player ${effectivePlayerId} doesn't have tier 3+ shelter`);
+                        return;
+                    }
+                    // Validate player has enough RT
+                    const playerRt = match.world.getPlayerMoney(effectivePlayerId);
+                    if (playerRt < cost) {
+                        log(`Instant rescue rejected: player ${effectivePlayerId} has ${playerRt} RT but needs ${cost}`);
+                        return;
+                    }
+                    // Deduct the cost
+                    match.world.deductPlayerMoney(effectivePlayerId, cost);
+                    // Complete the minigame with full success
+                    const result = match.world.completeBreederMiniGame(effectivePlayerId, msg.totalPets, msg.totalPets, level);
+                    match.activeMillGames?.delete(effectivePlayerId);
+                    // Instant rescue guarantees you get your money back + 20% bonus
+                    // The normal rescue rewards are separate (size, port charges, etc.)
+                    const instantRescueBonus = Math.floor(cost * 0.2); // 20% bonus
+                    const guaranteedTokens = cost + instantRescueBonus;
+                    const extraTokens = Math.max(0, guaranteedTokens - result.tokenBonus);
+                    if (extraTokens > 0) {
+                        match.world.addPlayerMoney(effectivePlayerId, extraTokens);
+                    }
+                    const finalTokenBonus = result.tokenBonus + extraTokens;
+                    log(`Instant rescue used by ${effectivePlayerId}: ${cost} RT for ${msg.totalPets} pets at level ${level}, bonus: ${finalTokenBonus} RT`);
+                    ws.send(JSON.stringify({
+                        type: 'breederRewards',
+                        tokenBonus: finalTokenBonus,
+                        rewards: result.rewards,
+                    }));
+                    return;
+                }
             }
             catch {
                 // not JSON, fall through to binary
@@ -678,6 +975,23 @@ setInterval(() => {
                 // Solo saved match: do not tick until resumed
             }
             else if (match.phase === 'playing') {
+                // Periodic auto-save for solo matches (crash recovery)
+                if (match.mode === 'solo') {
+                    const now = Date.now();
+                    const AUTO_SAVE_INTERVAL_MS = 30000;
+                    if (!match.lastAutoSave || now - match.lastAutoSave >= AUTO_SAVE_INTERVAL_MS) {
+                        const userId = match.soloUserId ?? match.playerUserIds.values().next().value;
+                        if (userId) {
+                            try {
+                                (0, referrals_js_1.saveSavedMatch)(userId, 'solo', match.world.serialize(), match.id);
+                                match.lastAutoSave = now;
+                            }
+                            catch {
+                                // ignore save errors, will retry next interval
+                            }
+                        }
+                    }
+                }
                 match.world.tickWorld(match.fightAllyChoices, match.allyRequests, match.cpuIds);
                 const snapshot = match.world.getSnapshot();
                 // CPU ally offers: randomly offer to ally with nearby human players

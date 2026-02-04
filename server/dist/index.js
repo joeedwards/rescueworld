@@ -56,6 +56,14 @@ async function main() {
     await Promise.resolve().then(() => __importStar(require('./SignalingServer.js')));
     await Promise.resolve().then(() => __importStar(require('./GameServer.js')));
     await Promise.resolve().then(() => __importStar(require('./authServer.js')));
+    // Graceful shutdown: save solo matches, deposit FFA/Teams RT, close connections
+    const onShutdown = async () => {
+        const { gracefulShutdown } = await Promise.resolve().then(() => __importStar(require('./GameServer.js')));
+        await gracefulShutdown();
+        process.exit(0);
+    };
+    process.on('SIGTERM', onShutdown);
+    process.on('SIGINT', onShutdown);
 }
 main().catch((err) => {
     console.error('Server failed to start:', err);

@@ -17,6 +17,7 @@ exports.claimDailyGift = claimDailyGift;
 exports.handleDailyGiftGet = handleDailyGiftGet;
 exports.handleDailyGiftClaim = handleDailyGiftClaim;
 const referrals_js_1 = require("./referrals.js");
+const inventory_js_1 = require("./inventory.js");
 /** Timestamped log function for server output */
 function log(message) {
     const now = new Date();
@@ -52,6 +53,30 @@ function getTodayDateUTC() {
     const m = String(d.getUTCMonth() + 1).padStart(2, '0');
     const day = String(d.getUTCDate()).padStart(2, '0');
     return `${y}-${m}-${day}`;
+}
+/**
+ * Deposit a gift reward into the player's inventory.
+ * This actually stores the items in the database so they persist.
+ */
+function depositGiftReward(userId, reward) {
+    // Ensure inventory row exists for this user
+    (0, inventory_js_1.initializeInventory)(userId);
+    // Deposit RT tokens
+    if (reward.tokens > 0) {
+        (0, inventory_js_1.addRt)(userId, reward.tokens);
+    }
+    // Deposit speed boost (1 boost item per gift)
+    if (reward.speedBoost) {
+        (0, inventory_js_1.addSpeedBoosts)(userId, 1);
+    }
+    // Deposit size bonus (stored as size boost count)
+    if (reward.sizeBonus && reward.sizeBonus > 0) {
+        (0, inventory_js_1.addSizeBoosts)(userId, reward.sizeBonus);
+    }
+    // Deposit port charge (1 random port per gift)
+    if (reward.portCharge) {
+        (0, inventory_js_1.addPortCharges)(userId, 1);
+    }
 }
 function getDailyGiftStatus(userId) {
     (0, referrals_js_1.ensureReferralStorage)();
@@ -106,7 +131,10 @@ function grantRegistrationGift(userId) {
     const nextDay = 2; // Move to day 2
     // Insert with Day 1 already claimed
     db().prepare('INSERT INTO daily_gifts (user_id, last_claim_date, current_day, total_claims) VALUES (?, ?, ?, ?)').run(userId, today, nextDay, 1);
-    log(`Registration gift granted to ${userId}: +${exports.REGISTRATION_GIFT.tokens} RT (registration) + +${day1Reward.tokens} RT (Day 1)`);
+    // Actually deposit the rewards into the player's inventory (persistent storage)
+    depositGiftReward(userId, exports.REGISTRATION_GIFT);
+    depositGiftReward(userId, day1Reward);
+    log(`Registration gift granted to ${userId}: +${exports.REGISTRATION_GIFT.tokens} RT (registration) + +${day1Reward.tokens} RT (Day 1) - deposited to inventory`);
     return {
         success: true,
         registrationReward: exports.REGISTRATION_GIFT,
@@ -131,7 +159,16 @@ function claimDailyGift(userId) {
     else {
         db().prepare('INSERT INTO daily_gifts (user_id, last_claim_date, current_day, total_claims) VALUES (?, ?, ?, ?)').run(userId, today, nextDay, 1);
     }
-    log(`Daily gift claimed by ${userId}: Day ${currentDay}, +${reward.tokens} RT`);
+    // Actually deposit the reward into the player's inventory (persistent storage)
+    depositGiftReward(userId, reward);
+    const rewardParts = [`+${reward.tokens} RT`];
+    if (reward.speedBoost)
+        rewardParts.push('+1 speed boost');
+    if (reward.sizeBonus)
+        rewardParts.push(`+${reward.sizeBonus} size boost`);
+    if (reward.portCharge)
+        rewardParts.push('+1 port charge');
+    log(`Daily gift claimed by ${userId}: Day ${currentDay}, ${rewardParts.join(', ')} - deposited to inventory`);
     return { success: true, reward, nextDay };
 }
 // HTTP handlers for Express-like routing

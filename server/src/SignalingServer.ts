@@ -5,6 +5,7 @@
 
 import { WebSocketServer } from 'ws';
 import { getGameServers } from './registry.js';
+import { subscribeToLeaderboard, unsubscribeFromLeaderboard } from './leaderboard.js';
 
 /** Timestamped log function for server output */
 function log(message: string): void {
@@ -20,9 +21,16 @@ const GAME_WS_URL_ALT = process.env.GAME_WS_URL_ALT || '';
 const wss = new WebSocketServer({ port: SIGNALING_PORT });
 
 wss.on('connection', (ws) => {
+  ws.on('close', () => {
+    unsubscribeFromLeaderboard(ws);
+  });
   ws.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
+      if (msg.type === 'subscribeLeaderboard') {
+        subscribeToLeaderboard(ws);
+        return;
+      }
       if (msg.type === 'join') {
         (async () => {
           const servers = await getGameServers();

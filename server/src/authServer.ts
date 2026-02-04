@@ -23,6 +23,8 @@ import { getDailyGiftStatus, claimDailyGift, grantRegistrationGift, REGISTRATION
 import { getLeaderboard, getUserRank } from './leaderboard.js';
 import { getInventory, depositAfterMatch, withdrawForMatch } from './inventory.js';
 import { recordMatchWin, recordRtEarned, updateReputationOnQuit } from './leaderboard.js';
+import { getGameStats } from './gameStats.js';
+import { getRealtimeStats } from './GameServer.js';
 
 /** Timestamped log function for server output */
 function log(message: string): void {
@@ -61,6 +63,12 @@ function clearRefCookie(res: Response): void {
 
 app.get('/health', (_req: Request, res: Response) => {
   res.json(getStorageStatus());
+});
+
+// Public game stats endpoint for analytics and advertising
+app.get('/api/game-stats', (_req: Request, res: Response) => {
+  const stats = getGameStats(getRealtimeStats);
+  res.json(stats);
 });
 
 app.get('/auth/me', (req, res) => {

@@ -22,6 +22,15 @@ async function main(): Promise<void> {
   await import('./SignalingServer.js');
   await import('./GameServer.js');
   await import('./authServer.js');
+
+  // Graceful shutdown: save solo matches, deposit FFA/Teams RT, close connections
+  const onShutdown = async (): Promise<void> => {
+    const { gracefulShutdown } = await import('./GameServer.js');
+    await gracefulShutdown();
+    process.exit(0);
+  };
+  process.on('SIGTERM', onShutdown);
+  process.on('SIGINT', onShutdown);
 }
 
 main().catch((err) => {

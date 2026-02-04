@@ -139,6 +139,7 @@ let lastProcessedInputSeq = -1;
 let lastKnownSize = 0;
 let lastTotalAdoptions = 0;
 let lastPetsInsideLength = 0;
+let lastShelterPortCharges = 0; // Track shelter port charges for toast notifications
 /** Van's pet IDs from previous snapshot (to detect which pets were just adopted) */
 let lastPetsInsideIds: string[] = [];
 /** Our shelter's pet IDs from previous snapshot (for shelter adoptions) */
@@ -267,6 +268,13 @@ const leaderboardCloseEl = document.getElementById('leaderboard-close')!;
 const leaderboardContentEl = document.getElementById('leaderboard-content')!;
 const leaderboardMyRankEl = document.getElementById('leaderboard-my-rank')!;
 const leaderboardBtnEl = document.getElementById('leaderboard-btn')!;
+const lobbyLeaderboardContentEl = document.getElementById('lobby-leaderboard-content');
+
+// Live lobby leaderboard: persistent signaling connection for real-time updates
+let lobbyLeaderboardWs: WebSocket | null = null;
+let lobbyLeaderboardReconnectAttempts = 0;
+let lobbyLeaderboardReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+const LOBBY_LEADERBOARD_MAX_RECONNECT_DELAY = 30000; // 30 seconds max
 
 // Equipment Panel Elements
 const equipRtEl = document.getElementById('equip-rt')!;
@@ -482,6 +490,49 @@ let currentDisplayName: string | null = null;
 let isSignedIn = false;
 let currentUserId: string | null = null;
 let currentShelterColor: string | null = null;
+
+// Track active FFA/Teams match for rejoin
+interface ActiveMultiplayerMatch {
+  matchId: string;
+  mode: 'ffa' | 'teams';
+}
+let activeMultiplayerMatch: ActiveMultiplayerMatch | null = null;
+const ACTIVE_MP_MATCH_KEY = 'rescueworld_active_mp_match';
+
+function getActiveMultiplayerMatch(): ActiveMultiplayerMatch | null {
+  try {
+    const stored = localStorage.getItem(ACTIVE_MP_MATCH_KEY);
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      if (parsed.matchId && (parsed.mode === 'ffa' || parsed.mode === 'teams')) {
+        return parsed;
+      }
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+function setActiveMultiplayerMatch(match: ActiveMultiplayerMatch | null): void {
+  activeMultiplayerMatch = match;
+  if (match) {
+    localStorage.setItem(ACTIVE_MP_MATCH_KEY, JSON.stringify(match));
+  } else {
+    localStorage.removeItem(ACTIVE_MP_MATCH_KEY);
+  }
+}
+
+/** Get short match ID for display (last 6 chars of hash) */
+function getShortMatchId(matchId: string): string {
+  // Match ID format: match-xxxx-x, we want the unique part
+  const parts = matchId.split('-');
+  if (parts.length >= 2) {
+    return parts.slice(1).join('-').toUpperCase().slice(-6);
+  }
+  return matchId.slice(-6).toUpperCase();
+}
+
+// Track current matchId for FFA/Teams
+let currentMatchId: string | null = null;
 
 function getTokens(): number {
   return parseInt(localStorage.getItem(TOKENS_KEY) || '0', 10);
@@ -916,13 +967,33 @@ function updateResumeMatchUI(): void {
   const resumeBtn = document.getElementById('resume-match-btn');
   const playBtn = document.getElementById('landing-play');
   if (!resumeBtn || !playBtn) return;
+  
+  // Check for solo saved match
   if (hasSavedMatch && selectedMode === 'solo') {
     resumeBtn.classList.remove('hidden');
+    resumeBtn.textContent = 'Resume Match';
     playBtn.textContent = 'Start new game';
-  } else {
-    resumeBtn.classList.add('hidden');
-    playBtn.textContent = 'Play';
+    return;
   }
+  
+  // Check for active FFA/Teams match (load from storage if needed)
+  if (!activeMultiplayerMatch) {
+    activeMultiplayerMatch = getActiveMultiplayerMatch();
+  }
+  
+  // Show return button for FFA/Teams if there's an active match AND the selected mode matches
+  if (activeMultiplayerMatch && isSignedIn && selectedMode === activeMultiplayerMatch.mode) {
+    const shortId = getShortMatchId(activeMultiplayerMatch.matchId);
+    resumeBtn.classList.remove('hidden');
+    resumeBtn.textContent = `Return to Match '${shortId}'`;
+    playBtn.textContent = 'Abandon & New Match';
+    return;
+  }
+  
+  // No active match to resume
+  resumeBtn.classList.add('hidden');
+  resumeBtn.textContent = 'Resume Match';
+  playBtn.textContent = 'Play';
 }
 
 async function fetchAndRenderAuth(): Promise<void> {
@@ -947,7 +1018,8 @@ async function fetchAndRenderAuth(): Promise<void> {
       landingProfileName.textContent = name;
       landingProfileAvatar.textContent = name.charAt(0).toUpperCase();
       landingProfileActions.innerHTML = `<a href="/auth/signout" class="auth-link" style="font-size:12px">Sign out</a>`;
-      landingAuthButtons.innerHTML = `<a href="${buildAuthUrl('/auth/google')}" class="auth-link" style="display:inline-block">Sign in with Google</a>`;
+      // Hide "Sign in with Google" button when already signed in (sign out button is in profile actions)
+      landingAuthButtons.innerHTML = '';
       if (landingNickInput) landingNickInput.placeholder = name;
     } else {
       const guestLabel = name ? `${escapeHtml(name)}` : 'Guest';
@@ -1581,6 +1653,8 @@ function showConnectionError(message: string): void {
 
 // --- Connect flow ---
 async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 'solo'; abandon?: boolean }): Promise<void> {
+  disconnectLobbyLeaderboard();
+  stopGameStatsPolling();
   if (pingIntervalId) {
     clearInterval(pingIntervalId);
     pingIntervalId = null;
@@ -1674,6 +1748,16 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         const msg = JSON.parse(e.data);
         if (msg.type === 'welcome' && msg.playerId) {
           myPlayerId = msg.playerId;
+          // Track current matchId for FFA/Teams rejoin capability
+          if (msg.matchId && (selectedMode === 'ffa' || selectedMode === 'teams')) {
+            // If resumed, clear the stored match (we're back in it)
+            if (msg.resumed) {
+              setActiveMultiplayerMatch(null);
+              showToast(`Rejoined match ${getShortMatchId(msg.matchId)}!`, 'success');
+            }
+            // Store current match info for potential rejoin later
+            currentMatchId = msg.matchId;
+          }
           playWelcome();
         }
         if (msg.type === 'savedMatchExpired') {
@@ -1686,7 +1770,50 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
             gameWs.close();
             gameWs = null;
           }
+          // Return to lobby
+          myPlayerId = null;
+          latestSnapshot = null;
+          currentMatchId = null;
+          setActiveMultiplayerMatch(null);
+          leaderboardEl.classList.remove('show');
+          matchEndPlayed = false;
+          matchEndTokensAwarded = false;
+          clearAnnouncements();
+          gameWrapEl.classList.remove('visible');
+          landingEl.classList.remove('hidden');
+          authAreaEl.classList.remove('hidden');
+          updateLandingTokens();
+          restoreModeSelection();
           connectionOverlayEl?.classList.add('hidden');
+          startServerClockWhenOnLobby();
+          connectLobbyLeaderboard();
+          startGameStatsPolling();
+        }
+        if (msg.type === 'serverShutdown') {
+          const message = typeof msg.message === 'string' ? msg.message : 'Server is updating. Your progress has been saved.';
+          showToast(message, 'info');
+          if (gameWs) {
+            gameWs.close();
+            gameWs = null;
+          }
+          myPlayerId = null;
+          latestSnapshot = null;
+          currentMatchId = null;
+          setActiveMultiplayerMatch(null);
+          leaderboardEl.classList.remove('show');
+          matchEndPlayed = false;
+          matchEndTokensAwarded = false;
+          clearAnnouncements();
+          gameWrapEl.classList.remove('visible');
+          landingEl.classList.remove('hidden');
+          authAreaEl.classList.remove('hidden');
+          updateLandingTokens();
+          restoreModeSelection();
+          updateResumeMatchUI();
+          fetchSavedMatchStatus();
+          connectionOverlayEl?.classList.add('hidden');
+          startServerClockWhenOnLobby();
+          connectLobbyLeaderboard();
         }
         if (msg.type === 'matchState' && typeof msg.phase === 'string') {
           matchPhase = msg.phase as MatchPhase;
@@ -1755,6 +1882,13 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           const rewards = Array.isArray(msg.rewards) ? msg.rewards : [];
           showBreederRewards(tokenBonus, rewards);
         }
+        // Match end inventory notification - match has ended, saved match cleared
+        if (msg.type === 'matchEndInventory') {
+          hasSavedMatch = false;
+          updateResumeMatchUI();
+          // Refresh inventory display if we're showing lobby soon
+          fetchSavedMatchStatus();
+        }
         // Match-wide announcements
         if (msg.type === 'announcement' && Array.isArray(msg.messages)) {
           showAnnouncement(msg.messages);
@@ -1809,6 +1943,16 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           }
         }
         prevPlayerPositions.set(p.id, { x: p.x, y: p.y });
+      }
+      // Toast when shelter port charges increase
+      const meForPorts = snap.players.find((p) => p.id === myPlayerId);
+      if (meForPorts) {
+        const currentShelterPorts = meForPorts.shelterPortCharges ?? 0;
+        if (currentShelterPorts > lastShelterPortCharges) {
+          const diff = currentShelterPorts - lastShelterPortCharges;
+          showToast(`+${diff} Home Port${diff > 1 ? 's' : ''} 🏠`, 'success');
+        }
+        lastShelterPortCharges = currentShelterPorts;
       }
       for (const pet of snap.pets) {
         const prev = interpolatedPets.get(pet.id)?.next ?? pet;
@@ -1876,6 +2020,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     gameWs = null;
     myPlayerId = null;
     latestSnapshot = null;
+    lastShelterPortCharges = 0;
     predictedPlayer = null;
     matchPhase = 'playing';
     sentAllyRequests.clear();
@@ -2133,38 +2278,74 @@ function drawAdoptionEvent(ev: AdoptionEvent, nowTick: number): void {
   const r = ADOPTION_EVENT_RADIUS;
   const remaining = Math.max(0, ev.startTick + ev.durationTicks - nowTick);
   const secLeft = Math.ceil(remaining / 25);
-  const imgSize = 80;
+  const imgSize = 100; // Larger for better visibility
+  
+  // Pulsing effect based on tick
+  const pulse = 0.8 + 0.2 * Math.sin(nowTick * 0.15);
+  
+  // Check if player is nearby (for enhanced glow)
+  const me = latestSnapshot?.players.find(p => p.id === myPlayerId);
+  const playerDist = me ? Math.hypot(me.x - cx, me.y - cy) : Infinity;
+  const isNearby = playerDist <= r;
 
   ctx.save();
+  
+  // Draw outer glow when nearby (pulsing)
+  if (isNearby) {
+    ctx.fillStyle = `rgba(255, 193, 7, ${0.15 * pulse})`;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r + 20, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  
+  // Draw main event image or fallback
   if (adoptionEventImageLoaded) {
     ctx.drawImage(adoptionEventImage, cx - imgSize / 2, cy - imgSize / 2, imgSize, imgSize);
   } else {
-    ctx.fillStyle = 'rgba(255, 193, 7, 0.4)';
+    // Fallback: bright yellow circle with icon
+    ctx.fillStyle = `rgba(255, 193, 7, ${0.5 * pulse})`;
     ctx.beginPath();
     ctx.arc(cx, cy, imgSize / 2, 0, Math.PI * 2);
     ctx.fill();
     ctx.strokeStyle = '#ffc107';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 4;
     ctx.stroke();
+    // Draw a tent/event icon
+    ctx.fillStyle = '#1a1a2e';
+    ctx.font = 'bold 36px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('🎪', cx, cy);
   }
-  ctx.strokeStyle = 'rgba(255, 193, 7, 0.8)';
-  ctx.lineWidth = 4;
+  
+  // Draw radius circle (dashed border)
+  ctx.strokeStyle = isNearby ? `rgba(123, 237, 159, ${0.9 * pulse})` : `rgba(255, 193, 7, ${0.8 * pulse})`;
+  ctx.lineWidth = isNearby ? 6 : 4;
   ctx.setLineDash([12, 8]);
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
   ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle = 'rgba(255, 193, 7, 0.12)';
+  
+  // Semi-transparent fill
+  ctx.fillStyle = isNearby ? `rgba(123, 237, 159, 0.15)` : `rgba(255, 193, 7, 0.15)`;
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = '#ffc107';
-  ctx.font = 'bold 14px Rubik, sans-serif';
+  
+  // Event name label (above the radius)
+  ctx.fillStyle = isNearby ? '#7bed9f' : '#ffc107';
+  ctx.font = 'bold 16px Rubik, sans-serif';
   ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
   const typeName = ev.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-  ctx.fillText(`📢 ${typeName}`, cx, cy - r - 10);
-  ctx.font = '12px Rubik, sans-serif';
-  ctx.fillText(`${secLeft}s left - bring pets here!`, cx, cy + imgSize / 2 + 14);
+  ctx.fillText(`📢 ${typeName}`, cx, cy - r - 12);
+  
+  // Timer label (below the image)
+  ctx.font = 'bold 14px Rubik, sans-serif';
+  const timerText = isNearby ? `${secLeft}s - DROP PETS HERE!` : `${secLeft}s left - bring pets here!`;
+  ctx.fillText(timerText, cx, cy + imgSize / 2 + 18);
+  
   ctx.restore();
 }
 
@@ -3049,31 +3230,72 @@ function render(dt: number): void {
     // Draw shelters on minimap (buildings)
     for (const shelter of latestSnapshot.shelters ?? []) {
       const isOwner = shelter.ownerId === myPlayerId;
-      minimapCtx.fillStyle = isOwner ? '#e8d5b7' : '#d4c4a8';
-      // Cap visual size on minimap to prevent overflow
+      const sx = shelter.x * scale;
+      const sy = shelter.y * scale;
+      
+      // Calculate the coverage radius (actual shelter size)
       const cappedSize = Math.min(shelter.size, 2000);
       const shelterSize = (SHELTER_BASE_RADIUS + cappedSize * SHELTER_RADIUS_PER_SIZE) * scale;
-      const half = Math.min(60, Math.max(4, shelterSize));
-      minimapCtx.fillRect(shelter.x * scale - half, shelter.y * scale - half, half * 2, half * 2);
-      // Border
+      const coverageRadius = Math.min(60, Math.max(4, shelterSize));
+      
+      // Draw small fixed-size building icon (doesn't grow)
+      const iconHalf = 4;
+      minimapCtx.fillStyle = isOwner ? '#e8d5b7' : '#d4c4a8';
+      minimapCtx.fillRect(sx - iconHalf, sy - iconHalf, iconHalf * 2, iconHalf * 2);
       minimapCtx.strokeStyle = isOwner ? '#7bed9f' : '#8B4513';
       minimapCtx.lineWidth = 1;
-      minimapCtx.strokeRect(shelter.x * scale - half, shelter.y * scale - half, half * 2, half * 2);
+      minimapCtx.strokeRect(sx - iconHalf, sy - iconHalf, iconHalf * 2, iconHalf * 2);
       
       // Draw home icon for player's own shelter
       if (isOwner) {
-        const sx = shelter.x * scale;
-        const sy = shelter.y * scale;
         // Draw a small house roof shape
         minimapCtx.fillStyle = '#7bed9f';
         minimapCtx.beginPath();
-        minimapCtx.moveTo(sx, sy - half - 4); // Top of roof
-        minimapCtx.lineTo(sx - 5, sy - half + 1); // Left corner
-        minimapCtx.lineTo(sx + 5, sy - half + 1); // Right corner
+        minimapCtx.moveTo(sx, sy - iconHalf - 4); // Top of roof
+        minimapCtx.lineTo(sx - 5, sy - iconHalf + 1); // Left corner
+        minimapCtx.lineTo(sx + 5, sy - iconHalf + 1); // Right corner
         minimapCtx.closePath();
         minimapCtx.fill();
         // House body indicator
-        minimapCtx.fillRect(sx - 3, sy - half + 1, 6, 5);
+        minimapCtx.fillRect(sx - 3, sy - iconHalf + 1, 6, 5);
+        
+        // Draw pulsing radar coverage if shelter has grown beyond base size
+        if (coverageRadius > 8) {
+          minimapCtx.save();
+          
+          // Pulsing radar effect - expanding ring
+          const pulseTime = Date.now() / 1500; // Slower pulse (1.5s cycle)
+          const pulseProgress = pulseTime % 1;
+          const pulseRadius = coverageRadius * pulseProgress;
+          const pulseAlpha = 0.6 * (1 - pulseProgress);
+          
+          minimapCtx.strokeStyle = `rgba(123, 237, 159, ${pulseAlpha})`;
+          minimapCtx.lineWidth = 2;
+          minimapCtx.beginPath();
+          minimapCtx.arc(sx, sy, pulseRadius, 0, Math.PI * 2);
+          minimapCtx.stroke();
+          
+          // Second pulse offset by half cycle for continuous effect
+          const pulse2Progress = (pulseTime + 0.5) % 1;
+          const pulse2Radius = coverageRadius * pulse2Progress;
+          const pulse2Alpha = 0.6 * (1 - pulse2Progress);
+          
+          minimapCtx.strokeStyle = `rgba(123, 237, 159, ${pulse2Alpha})`;
+          minimapCtx.beginPath();
+          minimapCtx.arc(sx, sy, pulse2Radius, 0, Math.PI * 2);
+          minimapCtx.stroke();
+          
+          // Static dashed outline showing max coverage
+          minimapCtx.strokeStyle = 'rgba(123, 237, 159, 0.4)';
+          minimapCtx.lineWidth = 1;
+          minimapCtx.setLineDash([3, 3]);
+          minimapCtx.beginPath();
+          minimapCtx.arc(sx, sy, coverageRadius, 0, Math.PI * 2);
+          minimapCtx.stroke();
+          minimapCtx.setLineDash([]);
+          
+          minimapCtx.restore();
+        }
       }
     }
     // Draw breeder shelters (mills) on minimap - prominent so they're easily seen
@@ -3092,11 +3314,43 @@ function render(dt: number): void {
       minimapCtx.strokeRect(bx - bHalf, by - bHalf, bHalf * 2, bHalf * 2);
       minimapCtx.restore();
     }
-    // Draw adoption events on minimap (teal ring)
+    // Draw adoption events on minimap (pulsing teal ring for visibility)
     for (const ev of latestSnapshot.adoptionEvents ?? []) {
       const ex = ev.x * scale;
       const ey = ev.y * scale;
       const r = Math.min(12, ADOPTION_EVENT_RADIUS * scale);
+      
+      // Pulsing effect - creates an expanding ring animation
+      const pulseTime = Date.now() % 2000; // 2 second cycle
+      const pulseProgress = pulseTime / 2000;
+      const pulseRadius = r + pulseProgress * 8; // Expands outward
+      const pulseAlpha = 1 - pulseProgress; // Fades out as it expands
+      
+      minimapCtx.save();
+      
+      // Draw expanding pulse ring
+      minimapCtx.strokeStyle = `rgba(94, 234, 212, ${pulseAlpha * 0.8})`;
+      minimapCtx.lineWidth = 3 - pulseProgress * 2;
+      minimapCtx.beginPath();
+      minimapCtx.arc(ex, ey, pulseRadius, 0, Math.PI * 2);
+      minimapCtx.stroke();
+      
+      // Draw second pulse ring (offset timing for continuous effect)
+      const pulse2Time = (Date.now() + 1000) % 2000;
+      const pulse2Progress = pulse2Time / 2000;
+      const pulse2Radius = r + pulse2Progress * 8;
+      const pulse2Alpha = 1 - pulse2Progress;
+      minimapCtx.strokeStyle = `rgba(94, 234, 212, ${pulse2Alpha * 0.8})`;
+      minimapCtx.lineWidth = 3 - pulse2Progress * 2;
+      minimapCtx.beginPath();
+      minimapCtx.arc(ex, ey, pulse2Radius, 0, Math.PI * 2);
+      minimapCtx.stroke();
+      
+      // Draw glowing center
+      minimapCtx.shadowColor = '#5eead4';
+      minimapCtx.shadowBlur = 6 + Math.sin(Date.now() * 0.005) * 3;
+      
+      // Main event circle
       minimapCtx.strokeStyle = '#5eead4';
       minimapCtx.lineWidth = 2;
       minimapCtx.setLineDash([4, 4]);
@@ -3104,8 +3358,19 @@ function render(dt: number): void {
       minimapCtx.arc(ex, ey, r, 0, Math.PI * 2);
       minimapCtx.stroke();
       minimapCtx.setLineDash([]);
-      minimapCtx.fillStyle = 'rgba(94, 234, 212, 0.3)';
+      
+      // Filled center
+      minimapCtx.fillStyle = 'rgba(94, 234, 212, 0.4)';
       minimapCtx.fill();
+      
+      // Draw event icon in center
+      minimapCtx.fillStyle = '#5eead4';
+      minimapCtx.font = 'bold 8px sans-serif';
+      minimapCtx.textAlign = 'center';
+      minimapCtx.textBaseline = 'middle';
+      minimapCtx.fillText('📢', ex, ey);
+      
+      minimapCtx.restore();
     }
     // Sort players by adoption count for leader visibility scaling
     const sortedByAdoptions = [...latestSnapshot.players].sort((a, b) => b.totalAdoptions - a.totalAdoptions);
@@ -3372,10 +3637,24 @@ function render(dt: number): void {
     portBtnEl.classList.add('hidden');
   }
   
-  // Shelter port button - show when player has shelter port charges AND a shelter
-  const shelterPortCount = me?.shelterPortCharges ?? 0;
-  if (me && shelterPortCount > 0 && hasShelter && !isEliminated && matchPhase === 'playing') {
-    shelterPortBtnEl.textContent = `Home [H] (${shelterPortCount})`;
+  // Shelter port button - show when player has shelter port charges
+  // If no shelter yet, show but indicate it needs a shelter
+  const shelterPortCount = Math.max(me?.shelterPortCharges ?? 0, lastShelterPortCharges);
+  if (me && shelterPortCount > 0 && !isEliminated) {
+    if (hasShelter) {
+      shelterPortBtnEl.textContent = `Home [H] (${shelterPortCount})`;
+      (shelterPortBtnEl as HTMLButtonElement).disabled = false;
+      shelterPortBtnEl.setAttribute('aria-disabled', 'false');
+      shelterPortBtnEl.style.opacity = '1';
+      shelterPortBtnEl.style.cursor = 'pointer';
+    } else {
+      // Show the button but indicate it's not usable without a shelter
+      shelterPortBtnEl.textContent = `Home [H] (${shelterPortCount}) 🔒`;
+      (shelterPortBtnEl as HTMLButtonElement).disabled = false;
+      shelterPortBtnEl.setAttribute('aria-disabled', 'true');
+      shelterPortBtnEl.style.opacity = '0.6';
+      shelterPortBtnEl.style.cursor = 'not-allowed';
+    }
     shelterPortBtnEl.classList.remove('hidden');
   } else {
     shelterPortBtnEl.classList.add('hidden');
@@ -3542,7 +3821,7 @@ function render(dt: number): void {
       const winnerId = latestSnapshot.winnerId;
       const winnerPlayer = latestSnapshot.players.find(p => p.id === winnerId);
       const winnerName = winnerPlayer?.id === myPlayerId ? 'You' : (winnerPlayer?.displayName ?? 'Someone');
-      title = `${winnerName} achieved 51% domination!`;
+      title = `${winnerName} won!`;
     }
     const adHtml = `
       <div class="match-ads">
@@ -3610,12 +3889,20 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
     matchEndPlayed = false;
     matchEndTokensAwarded = false;
     latestSnapshot = null;
+    currentMatchId = null;
     gameWrapEl.classList.remove('visible');
     landingEl.classList.remove('hidden');
     authAreaEl.classList.remove('hidden');
     updateLandingTokens();
     restoreModeSelection();
+    // Clear saved match state since match ended
+    hasSavedMatch = false;
+    // Clear active FFA/Teams match since match ended properly
+    setActiveMultiplayerMatch(null);
+    updateResumeMatchUI();
+    fetchSavedMatchStatus(); // Sync with server
     startServerClockWhenOnLobby();
+    connectLobbyLeaderboard();
   }
 }
 
@@ -3673,6 +3960,7 @@ lobbyBackBtnEl.addEventListener('click', () => {
   updateLandingTokens();
   restoreModeSelection(); // Restore sticky mode
   startServerClockWhenOnLobby();
+  connectLobbyLeaderboard();
 });
 
 // --- Fight / Ally ---
@@ -3704,6 +3992,14 @@ portBtnEl.addEventListener('click', () => {
 shelterPortBtnEl.addEventListener('click', () => {
   if (breederGame.active) return; // Don't allow porting during mini-game
   if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  const me = latestSnapshot?.players.find((pl) => pl.id === myPlayerId);
+  if (!me) return;
+  if ((me.shelterPortCharges ?? 0) <= 0) return;
+  if (!me.shelterId) {
+    showToast('Build a shelter first!', 'info');
+    return;
+  }
+  if (me.eliminated || matchPhase !== 'playing') return;
   gameWs.send(JSON.stringify({ type: 'useShelterPort' }));
 });
 
@@ -3862,9 +4158,14 @@ document.addEventListener('keydown', (e) => {
     if (breederGame.active) return;
     if (gameWs && gameWs.readyState === WebSocket.OPEN) {
       const me = latestSnapshot?.players.find((pl) => pl.id === myPlayerId);
-      if (me && (me.shelterPortCharges ?? 0) > 0 && me.shelterId && !me.eliminated && matchPhase === 'playing') {
-        gameWs.send(JSON.stringify({ type: 'useShelterPort' }));
+      if (!me) return;
+      if ((me.shelterPortCharges ?? 0) <= 0) return;
+      if (!me.shelterId) {
+        showToast('Build a shelter first!', 'info');
+        return;
       }
+      if (me.eliminated || matchPhase !== 'playing') return;
+      gameWs.send(JSON.stringify({ type: 'useShelterPort' }));
     }
   }
 });
@@ -3912,36 +4213,58 @@ sfxToggleEl.addEventListener('change', () => setSfxEnabled(sfxToggleEl.checked))
 settingsBtnEl.addEventListener('click', () => settingsPanelEl.classList.toggle('hidden'));
 settingsCloseEl.addEventListener('click', () => settingsPanelEl.classList.add('hidden'));
 exitToLobbyBtnEl.addEventListener('click', async () => {
-  if (gameWs?.readyState === WebSocket.OPEN) {
+  const wasConnected = gameWs?.readyState === WebSocket.OPEN;
+  
+  // Show appropriate toast if connection is still open
+  if (wasConnected) {
     if (selectedMode === 'solo') {
       showToast('Your match has been saved.', 'success');
     } else if (selectedMode === 'ffa' || selectedMode === 'teams') {
-      showToast('Your van will stop but your shelter continues.', 'info');
+      // Check if player has a shelter yet
+      const me = latestSnapshot?.players.find(p => p.id === myPlayerId);
+      const myShelter = me?.shelterId ? latestSnapshot?.shelters?.find(s => s.id === me.shelterId) : null;
+      if (myShelter) {
+        showToast('Your van will stop but your shelter continues. Return to rejoin!', 'info');
+      } else {
+        showToast('Your van will stop. Return to rejoin the match!', 'info');
+      }
     }
-    settingsPanelEl.classList.add('hidden');
+  }
+  
+  // Always close and return to lobby (even if WebSocket is already closed)
+  settingsPanelEl.classList.add('hidden');
+  if (gameWs) {
     gameWs.close();
     gameWs = null;
-    myPlayerId = null;
-    latestSnapshot = null;
-    leaderboardEl.classList.remove('show');
-    matchEndPlayed = false;
-    matchEndTokensAwarded = false;
-    // Clear any pending announcements/banners immediately
-    clearAnnouncements();
-    gameWrapEl.classList.remove('visible');
-    landingEl.classList.remove('hidden');
-    authAreaEl.classList.remove('hidden');
-    updateLandingTokens();
-    restoreModeSelection();
-    // For solo mode, immediately show Resume button (we know we just saved)
-    if (selectedMode === 'solo') {
-      hasSavedMatch = true;
-      updateResumeMatchUI();
-    }
-    // Also fetch to sync with server (in background)
-    fetchSavedMatchStatus();
-    startServerClockWhenOnLobby();
   }
+  myPlayerId = null;
+  latestSnapshot = null;
+  leaderboardEl.classList.remove('show');
+  matchEndPlayed = false;
+  matchEndTokensAwarded = false;
+  // Clear any pending announcements/banners immediately
+  clearAnnouncements();
+  gameWrapEl.classList.remove('visible');
+  landingEl.classList.remove('hidden');
+  authAreaEl.classList.remove('hidden');
+  updateLandingTokens();
+  restoreModeSelection();
+  // For solo mode with active connection, show Resume button (we know we just saved)
+  if (selectedMode === 'solo' && wasConnected) {
+    hasSavedMatch = true;
+    updateResumeMatchUI();
+  } else if ((selectedMode === 'ffa' || selectedMode === 'teams') && currentMatchId && isSignedIn) {
+    // For FFA/Teams, store the match info for rejoin (only if signed in)
+    setActiveMultiplayerMatch({ matchId: currentMatchId, mode: selectedMode });
+    updateResumeMatchUI();
+  } else {
+    // Match already ended or unknown state - fetch from server
+    fetchSavedMatchStatus();
+  }
+  currentMatchId = null;
+  startServerClockWhenOnLobby();
+  connectLobbyLeaderboard();
+  startGameStatsPolling();
 });
 switchServerBtnEl.addEventListener('click', () => {
   if (gameWs) {
@@ -4067,8 +4390,15 @@ function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boole
 const resumeMatchBtnEl = document.getElementById('resume-match-btn');
 if (resumeMatchBtnEl) {
   resumeMatchBtnEl.addEventListener('click', () => {
-    if (selectedMode !== 'solo') return;
-    startConnect({ mode: 'solo', resume: true });
+    if (selectedMode === 'solo' && hasSavedMatch) {
+      startConnect({ mode: 'solo', resume: true });
+      return;
+    }
+    // FFA/Teams rejoin - just start connect with the mode, server will handle rejoin
+    if (activeMultiplayerMatch && selectedMode === activeMultiplayerMatch.mode) {
+      startConnect({ mode: selectedMode });
+      return;
+    }
   });
 }
 
@@ -4083,6 +4413,16 @@ landingPlayBtn.addEventListener('click', () => {
           startConnect({ mode: 'solo', abandon: true });
         })
         .catch(() => showToast('Failed to abandon saved match.', 'error'));
+    });
+    return;
+  }
+  // FFA/Teams: if there's an active match, confirm abandon before starting new
+  if (activeMultiplayerMatch && selectedMode === activeMultiplayerMatch.mode) {
+    showAbandonConfirmPopup(() => {
+      // Clear the stored match and start new
+      setActiveMultiplayerMatch(null);
+      updateResumeMatchUI();
+      startConnect({ mode: selectedMode });
     });
     return;
   }
@@ -4249,6 +4589,16 @@ interface BreederStartOptions {
 
 function startBreederMiniGame(petCount: number, level: number = 1, opts: BreederStartOptions = {}): void {
   breederGame.active = true;
+  
+  // Clear all movement input flags to stop the van when minigame opens
+  // This prevents the bug where holding a key when hitting a breeder camp
+  // would cause the minigame dialog to continue moving
+  setInputFlag(INPUT_LEFT, false);
+  setInputFlag(INPUT_RIGHT, false);
+  setInputFlag(INPUT_UP, false);
+  setInputFlag(INPUT_DOWN, false);
+  sendInputImmediately(); // Send stop to server immediately
+  
   breederGame.pets = [];
   breederGame.selectedPetIndex = null;
   breederGame.timeLeft = typeof opts.timeLimitSeconds === 'number' ? opts.timeLimitSeconds : getBreederTimeLimitSeconds(level);
@@ -4304,6 +4654,9 @@ function startBreederMiniGame(petCount: number, level: number = 1, opts: Breeder
     }
   }
 
+  // Setup instant rescue button (only for mills and tier 3+ shelters)
+  setupInstantRescueButton();
+
   // Start timer
   breederGame.timerInterval = setInterval(() => {
     breederGame.timeLeft--;
@@ -4312,6 +4665,79 @@ function startBreederMiniGame(petCount: number, level: number = 1, opts: Breeder
       endBreederMiniGame(false);
     }
   }, 1000);
+}
+
+/** Calculate the total RT cost to instantly rescue all remaining pets */
+function calculateInstantRescueCost(): number {
+  const remainingPets = breederGame.pets.filter(p => !p.rescued).length;
+  const ingredientsPerMeal = getRequiredIngredients(breederGame.level);
+  // Average cost per ingredient based on level
+  // Level 1-2: avg ~8 RT (apple 5, carrot 8, chicken 15, seeds 5 = avg 8.25)
+  // Level 3-5: avg ~8 RT (same)
+  // Level 6-9: avg ~10 RT (add water 20)
+  // Level 10+: avg ~12 RT (add bowl 20)
+  let avgCostPerIngredient = 8;
+  if (breederGame.level >= 10) avgCostPerIngredient = 12;
+  else if (breederGame.level >= 6) avgCostPerIngredient = 10;
+  
+  return remainingPets * ingredientsPerMeal * avgCostPerIngredient;
+}
+
+/** Setup the instant rescue button visibility and click handler */
+function setupInstantRescueButton(): void {
+  const btn = document.getElementById('instant-rescue-btn') as HTMLButtonElement | null;
+  if (!btn) return;
+
+  // Only show for mills and tier 3+ shelters
+  const me = latestSnapshot?.players.find(p => p.id === myPlayerId);
+  const myShelter = latestSnapshot?.shelters?.find(s => s.ownerId === myPlayerId);
+  const shelterTier = myShelter?.tier ?? 0;
+  
+  // Show instant rescue for mills and camps at any level, requires tier 3+ shelter
+  if (shelterTier < 3) {
+    btn.classList.add('hidden');
+    return;
+  }
+
+  const cost = calculateInstantRescueCost();
+  const currentRt = me?.money ?? 0;
+  const canAfford = currentRt >= cost;
+
+  btn.textContent = `⚡ Instant Rescue (${cost} RT)`;
+  btn.disabled = !canAfford;
+  btn.classList.remove('hidden');
+
+  // Remove old event listener and add new one
+  const newBtn = btn.cloneNode(true) as HTMLButtonElement;
+  btn.parentNode?.replaceChild(newBtn, btn);
+  
+  newBtn.addEventListener('click', () => {
+    if (!canAfford) {
+      showToast(`Not enough RT! Need ${cost}`, 'error');
+      return;
+    }
+    // Send instant rescue request to server
+    sendInstantRescue();
+  });
+}
+
+/** Send instant rescue request to server */
+function sendInstantRescue(): void {
+  if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  
+  const cost = calculateInstantRescueCost();
+  gameWs.send(JSON.stringify({
+    type: 'instantRescue',
+    cost,
+    totalPets: breederGame.totalPets,
+    level: breederGame.level,
+    isMill: breederGame.isMill
+  }));
+  
+  // Immediately end the minigame with full success (server will validate)
+  breederGame.rescuedCount = breederGame.totalPets;
+  breederGame.pets.forEach(p => p.rescued = true);
+  endBreederMiniGame(true);
 }
 
 /** Show/hide water and bowl buttons based on breeder level */
@@ -4624,6 +5050,7 @@ function showBreederRewards(tokenBonus: number, rewards: Array<{ type: string; a
     if (r.type === 'size') rewardLines.push(`<div class="breeder-reward-item">+${r.amount} Size</div>`);
     if (r.type === 'speed') rewardLines.push(`<div class="breeder-reward-item">Speed Boost!</div>`);
     if (r.type === 'port') rewardLines.push(`<div class="breeder-reward-item">+${r.amount} Port Charge</div>`);
+    if (r.type === 'shelterPort') rewardLines.push(`<div class="breeder-reward-item">+${r.amount} Home Port 🏠</div>`);
   });
   
   const title = hasRewards 
@@ -4901,6 +5328,158 @@ dailyGiftBtnEl.addEventListener('click', openDailyGiftModal);
 dailyGiftCloseEl.addEventListener('click', closeDailyGiftModal);
 dailyGiftClaimBtnEl.addEventListener('click', claimDailyGiftAction);
 lobbyGiftBtnEl.addEventListener('click', openDailyGiftModal);
+
+// ========== Live Lobby Leaderboard (WebSocket) ==========
+
+function renderLobbyLeaderboard(entries: { rank: number; userId?: string; displayName: string; adoptionScore?: number; rtEarned?: number; shelterColor?: string | null }[]): void {
+  if (!lobbyLeaderboardContentEl) return;
+  if (entries.length === 0) {
+    lobbyLeaderboardContentEl.innerHTML = '<div class="lobby-leaderboard-loading">No scores yet. Play to appear!</div>';
+    return;
+  }
+  const myId = currentUserId ?? '';
+  lobbyLeaderboardContentEl.innerHTML = entries.map((entry) => {
+    const score = entry.adoptionScore ?? entry.rtEarned ?? 0;
+    const highlight = entry.userId === myId ? ' highlight' : '';
+    const rankClass = entry.rank === 1 ? 'gold' : entry.rank === 2 ? 'silver' : entry.rank === 3 ? 'bronze' : '';
+    const colorSpan = entry.shelterColor
+      ? `<span class="leaderboard-color" style="background:${escapeHtml(entry.shelterColor)}"></span>`
+      : '';
+    return `<div class="lobby-leaderboard-entry${highlight}">
+      <span class="lobby-leaderboard-rank ${rankClass}">#${entry.rank}</span>
+      ${colorSpan}
+      <span class="lobby-leaderboard-name">${escapeHtml(entry.displayName)}</span>
+      <span class="lobby-leaderboard-score">${score}</span>
+    </div>`;
+  }).join('');
+}
+
+function connectLobbyLeaderboard(): void {
+  if (!lobbyLeaderboardContentEl) return;
+  if (lobbyLeaderboardWs?.readyState === WebSocket.OPEN) return;
+  if (lobbyLeaderboardWs) {
+    try { lobbyLeaderboardWs.close(); } catch { /* ignore */ }
+    lobbyLeaderboardWs = null;
+  }
+  // Clear any pending reconnect timer
+  if (lobbyLeaderboardReconnectTimer) {
+    clearTimeout(lobbyLeaderboardReconnectTimer);
+    lobbyLeaderboardReconnectTimer = null;
+  }
+  lobbyLeaderboardContentEl.innerHTML = '<div class="lobby-leaderboard-loading">Connecting…</div>';
+  const ws = new WebSocket(SIGNALING_URL);
+  lobbyLeaderboardWs = ws;
+  ws.onopen = () => {
+    lobbyLeaderboardReconnectAttempts = 0; // Reset on successful connection
+    ws.send(JSON.stringify({ type: 'subscribeLeaderboard' }));
+  };
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data as string);
+      if (msg.type === 'leaderboardUpdate' && Array.isArray(msg.entries)) {
+        renderLobbyLeaderboard(msg.entries);
+      }
+    } catch {
+      // ignore
+    }
+  };
+  ws.onerror = () => {
+    if (lobbyLeaderboardContentEl) lobbyLeaderboardContentEl.innerHTML = '<div class="lobby-leaderboard-loading">Connection error</div>';
+  };
+  ws.onclose = () => {
+    if (lobbyLeaderboardWs === ws) {
+      lobbyLeaderboardWs = null;
+      // Schedule reconnect with exponential backoff
+      scheduleLeaderboardReconnect();
+    }
+  };
+}
+
+function scheduleLeaderboardReconnect(): void {
+  // Only reconnect if we're on the lobby screen (landing visible)
+  const landing = document.getElementById('landing');
+  if (!landing || landing.style.display === 'none') return;
+  
+  lobbyLeaderboardReconnectAttempts++;
+  const delay = Math.min(1000 * Math.pow(2, lobbyLeaderboardReconnectAttempts - 1), LOBBY_LEADERBOARD_MAX_RECONNECT_DELAY);
+  
+  if (lobbyLeaderboardContentEl) {
+    lobbyLeaderboardContentEl.innerHTML = `<div class="lobby-leaderboard-loading">Reconnecting in ${Math.round(delay / 1000)}s…</div>`;
+  }
+  
+  lobbyLeaderboardReconnectTimer = setTimeout(() => {
+    lobbyLeaderboardReconnectTimer = null;
+    connectLobbyLeaderboard();
+  }, delay);
+}
+
+function disconnectLobbyLeaderboard(): void {
+  // Clear any pending reconnect timer
+  if (lobbyLeaderboardReconnectTimer) {
+    clearTimeout(lobbyLeaderboardReconnectTimer);
+    lobbyLeaderboardReconnectTimer = null;
+  }
+  lobbyLeaderboardReconnectAttempts = 0;
+  if (lobbyLeaderboardWs) {
+    try { lobbyLeaderboardWs.close(); } catch { /* ignore */ }
+    lobbyLeaderboardWs = null;
+  }
+  if (lobbyLeaderboardContentEl) {
+    lobbyLeaderboardContentEl.innerHTML = '<div class="lobby-leaderboard-loading">Connecting…</div>';
+  }
+}
+
+// ========== Game Stats ==========
+const gameStatsContentEl = document.getElementById('game-stats-content');
+let gameStatsIntervalId: ReturnType<typeof setInterval> | null = null;
+
+async function fetchGameStats(): Promise<void> {
+  if (!gameStatsContentEl) return;
+  try {
+    const res = await fetch('/api/game-stats', { credentials: 'include' });
+    if (!res.ok) throw new Error('Failed to fetch stats');
+    const stats = await res.json();
+    renderGameStats(stats);
+  } catch {
+    gameStatsContentEl.innerHTML = '<div style="color:rgba(255,255,255,0.6)">Stats unavailable</div>';
+  }
+}
+
+function renderGameStats(stats: {
+  realtime: { onlinePlayers: number; ffaWaiting: number; playingSolo: number; playingFfa: number; playingTeams: number };
+  historical: { totalGamesPlayed: number; gamesByMode: { solo: number; ffa: number; teams: number }; mostPopularMode: string | null; newUsersToday: number };
+}): void {
+  if (!gameStatsContentEl) return;
+  const { realtime, historical } = stats;
+  const html = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;margin-bottom:8px">
+      <div><span style="color:#7bed9f;font-weight:700">${realtime.onlinePlayers}</span> online now</div>
+      <div><span style="color:#ffd93d;font-weight:700">${realtime.ffaWaiting}</span> in FFA queue</div>
+      <div><span style="color:#70a3ff">${realtime.playingSolo}</span> playing Solo</div>
+      <div><span style="color:#c77dff">${realtime.playingFfa}</span> playing FFA</div>
+      <div><span style="color:#ff9f43">${realtime.playingTeams}</span> playing Teams</div>
+    </div>
+    <div style="border-top:1px solid rgba(255,255,255,0.15);padding-top:6px;margin-top:4px">
+      <div><span style="font-weight:700">${historical.totalGamesPlayed.toLocaleString()}</span> total games played</div>
+      <div>Popular mode: <span style="color:#7bed9f;font-weight:600">${historical.mostPopularMode ?? 'N/A'}</span></div>
+      <div><span style="color:#5eead4">${historical.newUsersToday}</span> new players today</div>
+    </div>
+  `;
+  gameStatsContentEl.innerHTML = html;
+}
+
+function startGameStatsPolling(): void {
+  if (gameStatsIntervalId) return;
+  fetchGameStats();
+  gameStatsIntervalId = setInterval(fetchGameStats, 10000); // Refresh every 10 seconds
+}
+
+function stopGameStatsPolling(): void {
+  if (gameStatsIntervalId) {
+    clearInterval(gameStatsIntervalId);
+    gameStatsIntervalId = null;
+  }
+}
 
 // ========== Leaderboard System ==========
 
@@ -5220,6 +5799,8 @@ function startServerClockWhenOnLobby(): void {
   }, 1000);
   // Refresh next midnight from server every 30s
   setInterval(() => fetchServerTimeForClock(), 30000);
+  connectLobbyLeaderboard();
+  startGameStatsPolling();
 }
 
 function stopServerClock(): void {

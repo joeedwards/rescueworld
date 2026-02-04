@@ -4,6 +4,67 @@
 
 import { ensureReferralStorage } from './referrals.js';
 
+/** Subscriber interface for live leaderboard (e.g. WebSocket with send()). */
+export type LeaderboardSubscriber = { send(data: string): void; readyState?: number };
+
+const leaderboardSubscribers = new Set<LeaderboardSubscriber>();
+const LIVE_BROADCAST_THROTTLE_MS = 2500;
+let lastBroadcastTime = 0;
+let broadcastScheduled: ReturnType<typeof setImmediate> | null = null;
+
+export function subscribeToLeaderboard(ws: LeaderboardSubscriber): void {
+  leaderboardSubscribers.add(ws);
+  sendLeaderboardToSubscriber(ws);
+}
+
+export function unsubscribeFromLeaderboard(ws: LeaderboardSubscriber): void {
+  leaderboardSubscribers.delete(ws);
+}
+
+function sendLeaderboardToSubscriber(ws: LeaderboardSubscriber): void {
+  if (ws.readyState !== undefined && ws.readyState !== 1) return;
+  try {
+    const entries = getLeaderboard('daily', 10, 'score');
+    ws.send(JSON.stringify({ type: 'leaderboardUpdate', entries }));
+  } catch (err) {
+    log('Leaderboard send error', err);
+  }
+}
+
+/** Throttled broadcast to all lobby subscribers. Call after recordMatchWin/Loss/recordRtEarned. */
+export function broadcastLeaderboardUpdate(): void {
+  if (leaderboardSubscribers.size === 0) return;
+  const now = Date.now();
+  if (now - lastBroadcastTime < LIVE_BROADCAST_THROTTLE_MS) {
+    if (!broadcastScheduled) {
+      broadcastScheduled = setImmediate(() => {
+        broadcastScheduled = null;
+        lastBroadcastTime = Date.now();
+        const entries = getLeaderboard('daily', 10, 'score');
+        const payload = JSON.stringify({ type: 'leaderboardUpdate', entries });
+        for (const ws of leaderboardSubscribers) {
+          try {
+            if (ws.readyState === 1) ws.send(payload);
+          } catch {
+            leaderboardSubscribers.delete(ws);
+          }
+        }
+      });
+    }
+    return;
+  }
+  lastBroadcastTime = now;
+  const entries = getLeaderboard('daily', 10, 'score');
+  const payload = JSON.stringify({ type: 'leaderboardUpdate', entries });
+  for (const ws of leaderboardSubscribers) {
+    try {
+      if ((ws.readyState ?? 1) === 1) ws.send(payload);
+    } catch {
+      leaderboardSubscribers.delete(ws);
+    }
+  }
+}
+
 // Timestamp helper for logging
 function log(...args: unknown[]): void {
   const ts = new Date().toISOString();
@@ -317,6 +378,7 @@ export function recordMatchLoss(userId: string, rtEarned: number): void {
   }
 
   log(`Recorded loss for user ${userId}: +${rtEarned} RT, games_played+1, losses+1`);
+  broadcastLeaderboardUpdate();
 }
 
 /**

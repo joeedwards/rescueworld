@@ -34,7 +34,7 @@ function db() {
 function getInventory(userId) {
     const conn = db();
     const row = conn.prepare(`
-    SELECT stored_rt, port_charges, shelter_port_charges, speed_boosts, size_boosts 
+    SELECT stored_rt, port_charges, shelter_port_charges, speed_boosts, size_boosts, shelter_tier3_boosts 
     FROM inventory 
     WHERE user_id = ?
   `).get(userId);
@@ -45,6 +45,7 @@ function getInventory(userId) {
             shelterPortCharges: 0,
             speedBoosts: 0,
             sizeBoosts: 0,
+            shelterTier3Boosts: 0,
         };
     }
     return {
@@ -53,6 +54,7 @@ function getInventory(userId) {
         shelterPortCharges: row.shelter_port_charges ?? 0,
         speedBoosts: row.speed_boosts,
         sizeBoosts: row.size_boosts,
+        shelterTier3Boosts: row.shelter_tier3_boosts ?? 0,
     };
 }
 /**
@@ -61,8 +63,8 @@ function getInventory(userId) {
 function initializeInventory(userId, startingRt = 0) {
     const conn = db();
     conn.prepare(`
-    INSERT OR IGNORE INTO inventory (user_id, stored_rt, port_charges, shelter_port_charges, speed_boosts, size_boosts)
-    VALUES (?, ?, 0, 0, 0, 0)
+    INSERT OR IGNORE INTO inventory (user_id, stored_rt, port_charges, shelter_port_charges, speed_boosts, size_boosts, shelter_tier3_boosts)
+    VALUES (?, ?, 0, 0, 0, 0, 0)
   `).run(userId, startingRt);
 }
 /**
@@ -72,8 +74,8 @@ function depositAfterMatch(userId, rt, portCharges = 0, shelterPortCharges = 0, 
     const conn = db();
     // Upsert - insert if not exists, otherwise update
     conn.prepare(`
-    INSERT INTO inventory (user_id, stored_rt, port_charges, shelter_port_charges, speed_boosts, size_boosts)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO inventory (user_id, stored_rt, port_charges, shelter_port_charges, speed_boosts, size_boosts, shelter_tier3_boosts)
+    VALUES (?, ?, ?, ?, ?, ?, 0)
     ON CONFLICT(user_id) DO UPDATE SET 
       stored_rt = stored_rt + ?,
       port_charges = port_charges + ?,
@@ -91,14 +93,14 @@ function withdrawForMatch(userId) {
     const conn = db();
     // Get current inventory
     const inventory = getInventory(userId);
-    if (inventory.storedRt > 0 || inventory.portCharges > 0 || inventory.shelterPortCharges > 0 || inventory.speedBoosts > 0 || inventory.sizeBoosts > 0) {
+    if (inventory.storedRt > 0 || inventory.portCharges > 0 || inventory.shelterPortCharges > 0 || inventory.speedBoosts > 0 || inventory.sizeBoosts > 0 || inventory.shelterTier3Boosts > 0) {
         // Clear the inventory
         conn.prepare(`
       UPDATE inventory 
-      SET stored_rt = 0, port_charges = 0, shelter_port_charges = 0, speed_boosts = 0, size_boosts = 0
+      SET stored_rt = 0, port_charges = 0, shelter_port_charges = 0, speed_boosts = 0, size_boosts = 0, shelter_tier3_boosts = 0
       WHERE user_id = ?
     `).run(userId);
-        log(`Withdrew for ${userId}: ${inventory.storedRt} RT, ${inventory.portCharges} ports, ${inventory.shelterPortCharges} home ports, ${inventory.speedBoosts} speed, ${inventory.sizeBoosts} size`);
+        log(`Withdrew for ${userId}: ${inventory.storedRt} RT, ${inventory.portCharges} ports, ${inventory.shelterPortCharges} home ports, ${inventory.speedBoosts} speed, ${inventory.sizeBoosts} size, ${inventory.shelterTier3Boosts} tier3 shelter boosts`);
     }
     return inventory;
 }

@@ -3,6 +3,9 @@
  * Leaderboard module - tracks match wins, all-time stats, and daily leaderboard rewards
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.subscribeToLeaderboard = subscribeToLeaderboard;
+exports.unsubscribeFromLeaderboard = unsubscribeFromLeaderboard;
+exports.broadcastLeaderboardUpdate = broadcastLeaderboardUpdate;
 exports.updateReputationOnAdoption = updateReputationOnAdoption;
 exports.updateReputationOnQuit = updateReputationOnQuit;
 exports.updateReputationOnEventPodium = updateReputationOnEventPodium;
@@ -14,6 +17,66 @@ exports.getUserRank = getUserRank;
 exports.grantDailyRewards = grantDailyRewards;
 exports.resetDailyWins = resetDailyWins;
 const referrals_js_1 = require("./referrals.js");
+const leaderboardSubscribers = new Set();
+const LIVE_BROADCAST_THROTTLE_MS = 2500;
+let lastBroadcastTime = 0;
+let broadcastScheduled = null;
+function subscribeToLeaderboard(ws) {
+    leaderboardSubscribers.add(ws);
+    sendLeaderboardToSubscriber(ws);
+}
+function unsubscribeFromLeaderboard(ws) {
+    leaderboardSubscribers.delete(ws);
+}
+function sendLeaderboardToSubscriber(ws) {
+    if (ws.readyState !== undefined && ws.readyState !== 1)
+        return;
+    try {
+        const entries = getLeaderboard('daily', 10, 'score');
+        ws.send(JSON.stringify({ type: 'leaderboardUpdate', entries }));
+    }
+    catch (err) {
+        log('Leaderboard send error', err);
+    }
+}
+/** Throttled broadcast to all lobby subscribers. Call after recordMatchWin/Loss/recordRtEarned. */
+function broadcastLeaderboardUpdate() {
+    if (leaderboardSubscribers.size === 0)
+        return;
+    const now = Date.now();
+    if (now - lastBroadcastTime < LIVE_BROADCAST_THROTTLE_MS) {
+        if (!broadcastScheduled) {
+            broadcastScheduled = setImmediate(() => {
+                broadcastScheduled = null;
+                lastBroadcastTime = Date.now();
+                const entries = getLeaderboard('daily', 10, 'score');
+                const payload = JSON.stringify({ type: 'leaderboardUpdate', entries });
+                for (const ws of leaderboardSubscribers) {
+                    try {
+                        if (ws.readyState === 1)
+                            ws.send(payload);
+                    }
+                    catch {
+                        leaderboardSubscribers.delete(ws);
+                    }
+                }
+            });
+        }
+        return;
+    }
+    lastBroadcastTime = now;
+    const entries = getLeaderboard('daily', 10, 'score');
+    const payload = JSON.stringify({ type: 'leaderboardUpdate', entries });
+    for (const ws of leaderboardSubscribers) {
+        try {
+            if ((ws.readyState ?? 1) === 1)
+                ws.send(payload);
+        }
+        catch {
+            leaderboardSubscribers.delete(ws);
+        }
+    }
+}
 // Timestamp helper for logging
 function log(...args) {
     const ts = new Date().toISOString();
@@ -238,6 +301,7 @@ function recordMatchLoss(userId, rtEarned) {
     `).run(userId, rtEarned, rtEarned, today, thisWeek, rtEarned, thisSeason, rtEarned);
     }
     log(`Recorded loss for user ${userId}: +${rtEarned} RT, games_played+1, losses+1`);
+    broadcastLeaderboardUpdate();
 }
 /**
  * Get leaderboard (daily, weekly, season, all-time, or games)

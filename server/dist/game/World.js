@@ -149,6 +149,7 @@ class World {
         this.groundedPlayerIds = new Set(); // Players who chose to ground themselves
         this.portCharges = new Map(); // Random port charges per player
         this.shelterPortCharges = new Map(); // Shelter port charges per player
+        this.shelterTier3Boosts = new Map(); // Pre-match tier-3 shelter boosts per player
         this.playerColors = new Map(); // Player shelter colors
         this.playerMoney = new Map(); // In-game money per player
         this.eliminatedPlayerIds = new Set();
@@ -186,6 +187,8 @@ class World {
         this.pendingCpuBreederCompletions = new Map();
         /** Only one van can engage a breeder: breederUid -> playerId */
         this.breederClaimedBy = new Map();
+        /** Cooldown preventing CPU from targeting breeders after abandoning one: cpuId -> tick when they can target again */
+        this.cpuBreederCooldown = new Map();
         // Breeder camp tracking for growth mechanic
         this.breederCamps = new Map();
         // Breeder shelters - formed when breeders grow too large
@@ -215,7 +218,7 @@ class World {
             radius: shared_1.ADOPTION_ZONE_RADIUS,
         });
     }
-    addPlayer(id, displayName, startingRT, startingPorts) {
+    addPlayer(id, displayName, startingRT, startingPorts, shelterTier3Boosts) {
         const name = displayName ?? `rescue${String(100 + Math.floor(Math.random() * 900))}`;
         const x = shared_1.MAP_WIDTH * (0.2 + Math.random() * 0.6);
         const y = shared_1.MAP_HEIGHT * (0.2 + Math.random() * 0.6);
@@ -241,6 +244,11 @@ class World {
         if (startingPorts && startingPorts > 0) {
             this.portCharges.set(id, startingPorts);
             log(`Player ${name} starting with ${startingPorts} port charges`);
+        }
+        // Pre-match tier-3 shelter boosts (shelter starts at size 250 when built)
+        if (shelterTier3Boosts && shelterTier3Boosts > 0) {
+            this.shelterTier3Boosts.set(id, shelterTier3Boosts);
+            log(`Player ${name} starting with ${shelterTier3Boosts} tier-3 shelter boost(s)`);
         }
     }
     shelterInZoneAABB(p, zone) {
@@ -290,10 +298,22 @@ class World {
             // Check breeder shelters
             if (ok) {
                 for (const shelter of this.breederShelters.values()) {
-                    const shelterRadius = 40 + shelter.size * 0.5 + 50; // Shelter radius + margin
+                    const breederShelterR = 40 + shelter.size * 0.5 + 50; // Shelter radius + margin
                     const dx = x - shelter.x;
                     const dy = y - shelter.y;
-                    if (dx * dx + dy * dy < shelterRadius * shelterRadius) {
+                    if (dx * dx + dy * dy < breederShelterR * breederShelterR) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            // Check player shelters - don't spawn inside or near them
+            if (ok) {
+                for (const shelter of this.shelters.values()) {
+                    const playerShelterR = shelterRadius(shelter.size) + 100; // Shelter radius + safety margin
+                    const dx = x - shelter.x;
+                    const dy = y - shelter.y;
+                    if (dx * dx + dy * dy < playerShelterR * playerShelterR) {
                         ok = false;
                         break;
                     }
@@ -364,6 +384,9 @@ class World {
         }
         // Create shelter at player's current position
         const shelterId = `shelter-${++this.shelterIdSeq}`;
+        const hasTier3Boost = (this.shelterTier3Boosts.get(id) ?? 0) > 0;
+        const initialSize = hasTier3Boost ? 250 : 10; // Tier 3 = size >= 250
+        const initialTier = calculateShelterTier(initialSize);
         const shelter = {
             id: shelterId,
             ownerId: id,
@@ -373,10 +396,18 @@ class World {
             hasGravity: false,
             hasAdvertising: false,
             petsInside: [],
-            size: 10, // Initial shelter size
+            size: initialSize,
             totalAdoptions: 0,
-            tier: 1, // Initial tier
+            tier: initialTier,
         };
+        if (hasTier3Boost) {
+            const remaining = (this.shelterTier3Boosts.get(id) ?? 1) - 1;
+            if (remaining <= 0)
+                this.shelterTier3Boosts.delete(id);
+            else
+                this.shelterTier3Boosts.set(id, remaining);
+            log(`Player ${p.displayName} used tier-3 shelter boost: shelter built at size ${initialSize} (tier ${initialTier})`);
+        }
         this.shelters.set(shelterId, shelter);
         this.playerShelterIds.set(id, shelterId);
         this.playerMoney.set(id, currentMoney - shared_1.SHELTER_BUILD_COST);
@@ -684,6 +715,15 @@ class World {
         }
         return { x: tx, y: ty };
     }
+    /** Set CPU target and release any previous breeder claim if changing targets */
+    setCpuTarget(playerId, target) {
+        const oldTarget = this.cpuTargets.get(playerId);
+        // Release old breeder claim if we're switching to a different target
+        if (oldTarget?.breederClaimId && oldTarget.breederClaimId !== target.breederClaimId) {
+            this.breederClaimedBy.delete(oldTarget.breederClaimId);
+        }
+        this.cpuTargets.set(playerId, target);
+    }
     cpuAI(p) {
         const zone = this.adoptionZones[0];
         if (!zone)
@@ -709,7 +749,7 @@ class World {
                 const len = Math.hypot(dx, dy) || 1;
                 const fleeX = clamp(p.x + (dx / len) * 200, 50, shared_1.MAP_WIDTH - 50);
                 const fleeY = clamp(p.y + (dy / len) * 200, 50, shared_1.MAP_HEIGHT - 50);
-                this.cpuTargets.set(p.id, { x: fleeX, y: fleeY, type: 'wander' });
+                this.setCpuTarget(p.id, { x: fleeX, y: fleeY, type: 'wander' });
                 return this.directionToward(p.x, p.y, fleeX, fleeY);
             }
         }
@@ -729,13 +769,13 @@ class World {
                     continue;
                 const allyShelter = this.getPlayerShelter(other.id);
                 if (allyShelter && allyShelter.petsInside.length < shelterMaxPets(other.size)) {
-                    this.cpuTargets.set(p.id, { x: allyShelter.x, y: allyShelter.y, type: 'zone' });
+                    this.setCpuTarget(p.id, { x: allyShelter.x, y: allyShelter.y, type: 'zone' });
                     return this.directionToward(p.x, p.y, allyShelter.x, allyShelter.y);
                 }
             }
             // No ally shelter, go to adoption zone
             const edge = this.zoneSquareEdgeTarget(zone, p.x, p.y, sr, false);
-            this.cpuTargets.set(p.id, { x: edge.x, y: edge.y, type: 'zone' });
+            this.setCpuTarget(p.id, { x: edge.x, y: edge.y, type: 'zone' });
             return this.directionToward(p.x, p.y, edge.x, edge.y);
         }
         // Check if current target is still valid
@@ -761,6 +801,18 @@ class World {
                 else if (currentTarget.type === 'pickup') {
                     for (const u of this.pickups.values()) {
                         if (dist(u.x, u.y, currentTarget.x, currentTarget.y) < 20) {
+                            // If this is a breeder target, re-check RT and cooldown
+                            if (currentTarget.breederClaimId && u.type === shared_3.PICKUP_TYPE_BREEDER) {
+                                const cpuRt = this.playerMoney.get(p.id) ?? 0;
+                                const cooldownEnd = this.cpuBreederCooldown.get(p.id) ?? 0;
+                                const breederLevel = this.breederCamps.get(u.id)?.level ?? 1;
+                                const minRt = World.minRtForBreederLevel(breederLevel);
+                                // Invalid if on cooldown or can't afford
+                                if (this.tick < cooldownEnd || cpuRt < minRt) {
+                                    targetValid = false;
+                                    break;
+                                }
+                            }
                             targetValid = true;
                             break;
                         }
@@ -774,6 +826,10 @@ class World {
                     return this.directionToward(p.x, p.y, currentTarget.x, currentTarget.y);
                 }
                 else {
+                    // Target is gone - release any breeder claim
+                    if (currentTarget.breederClaimId) {
+                        this.breederClaimedBy.delete(currentTarget.breederClaimId);
+                    }
                     this.cpuTargets.delete(p.id);
                 }
             }
@@ -788,12 +844,41 @@ class World {
             strayCandidates.push({ x: pet.x, y: pet.y, d });
         }
         strayCandidates.sort((a, b) => a.d - b.d);
+        const cpuRt = this.playerMoney.get(p.id) ?? 0;
+        const breederCooldownEnd = this.cpuBreederCooldown.get(p.id) ?? 0;
+        const canTargetBreeders = this.tick >= breederCooldownEnd;
         for (const u of this.pickups.values()) {
             // Skip breeder camps if CPU is not allowed to shut them down
             if (u.type === shared_3.PICKUP_TYPE_BREEDER && !this.cpuCanShutdownBreeders)
                 continue;
+            // Skip breeder camps that are already claimed by another player (human or CPU physically at breeder)
+            if (u.type === shared_3.PICKUP_TYPE_BREEDER) {
+                // Check if breeder is claimed by someone physically at it
+                const claim = this.breederClaimedBy.get(u.id);
+                if (claim !== undefined && claim !== p.id)
+                    continue;
+                // Check if another CPU is targeting this breeder (to prevent multiple CPUs heading to same one)
+                let anotherCpuTargeting = false;
+                for (const [cpuId, target] of this.cpuTargets) {
+                    if (cpuId !== p.id && target.breederClaimId === u.id) {
+                        anotherCpuTargeting = true;
+                        break;
+                    }
+                }
+                if (anotherCpuTargeting)
+                    continue;
+                // Skip if CPU is on breeder cooldown
+                if (!canTargetBreeders)
+                    continue;
+                // Skip if CPU doesn't have enough RT for this breeder level
+                const breederLevel = this.breederCamps.get(u.id)?.level ?? 1;
+                const minRt = World.minRtForBreederLevel(breederLevel);
+                if (cpuRt < minRt)
+                    continue;
+            }
             const d = dist(p.x, p.y, u.x, u.y);
-            pickupCandidates.push({ x: u.x, y: u.y, d, type: u.type });
+            const level = u.type === shared_3.PICKUP_TYPE_BREEDER ? (this.breederCamps.get(u.id)?.level ?? 1) : undefined;
+            pickupCandidates.push({ x: u.x, y: u.y, d, type: u.type, id: u.id, level });
         }
         pickupCandidates.sort((a, b) => a.d - b.d);
         // Pick target with slight randomness (but persist it)
@@ -812,8 +897,11 @@ class World {
             if (breederCandidates.length > 0) {
                 // Always prioritize if 2+ breeders, or 60% chance with 1 breeder
                 if (breederCandidates.length >= 2 || Math.random() < 0.6) {
-                    const target = breederCandidates[0]; // Nearest breeder
-                    this.cpuTargets.set(p.id, { x: target.x, y: target.y, type: 'pickup' });
+                    const target = breederCandidates[0]; // Nearest UNCLAIMED breeder
+                    // Note: Don't set breederClaimedBy here - that blocks human players
+                    // The breederClaimId in cpuTargets is enough to prevent other CPUs from targeting
+                    // Actual claim happens when CPU physically arrives at the breeder
+                    this.setCpuTarget(p.id, { x: target.x, y: target.y, type: 'pickup', breederClaimId: target.id });
                     return this.directionToward(p.x, p.y, target.x, target.y);
                 }
             }
@@ -822,17 +910,17 @@ class World {
         const pickupTarget = pickWithJitter(pickupCandidates);
         // Prefer strays when not full, then pickups
         if (strayTarget) {
-            this.cpuTargets.set(p.id, { x: strayTarget.x, y: strayTarget.y, type: 'stray' });
+            this.setCpuTarget(p.id, { x: strayTarget.x, y: strayTarget.y, type: 'stray' });
             return this.directionToward(p.x, p.y, strayTarget.x, strayTarget.y);
         }
         if (pickupTarget) {
-            this.cpuTargets.set(p.id, { x: pickupTarget.x, y: pickupTarget.y, type: 'pickup' });
+            this.setCpuTarget(p.id, { x: pickupTarget.x, y: pickupTarget.y, type: 'pickup' });
             return this.directionToward(p.x, p.y, pickupTarget.x, pickupTarget.y);
         }
         // No strays or pickups on map: wander randomly (not toward zone)
         const wanderX = shared_1.MAP_WIDTH * (0.1 + Math.random() * 0.8);
         const wanderY = shared_1.MAP_HEIGHT * (0.1 + Math.random() * 0.8);
-        this.cpuTargets.set(p.id, { x: wanderX, y: wanderY, type: 'wander' });
+        this.setCpuTarget(p.id, { x: wanderX, y: wanderY, type: 'wander' });
         return this.directionToward(p.x, p.y, wanderX, wanderY);
     }
     applyInput(p, inputFlags) {
@@ -898,6 +986,7 @@ class World {
         this.cpuAtBreeder.clear();
         this.pendingCpuBreederCompletions.clear();
         this.breederClaimedBy.clear();
+        this.cpuBreederCooldown.clear();
         this.breederCamps.clear();
         this.breederShelters.clear();
         this.millInCombat.clear();
@@ -1033,6 +1122,18 @@ class World {
             avgCost = 10;
         }
         return petCount * ingredientCount * avgCost;
+    }
+    /** Minimum RT required to attempt a breeder of given level (used for early CPU checks). */
+    static minRtForBreederLevel(level) {
+        // Conservative estimate: assume average pet count and add buffer
+        // Level 1-2: ~45 RT, Level 3-5: ~80 RT, Level 6-9: ~120 RT, Level 10+: ~200 RT
+        if (level >= 10)
+            return 200;
+        if (level >= 6)
+            return 120;
+        if (level >= 3)
+            return 80;
+        return 45; // Level 1-2 minimum
     }
     tickWorld(fightAllyChoices, allyRequests, cpuIds) {
         if (!this.matchStarted)
@@ -1188,11 +1289,16 @@ class World {
         // Breeder wave spawning: about every minute (45-75s), spawn all 5 breeders of current level at random locations
         const ticksSinceStart = now - this.matchStartTick;
         const ticksSinceLastWave = now - this.lastBreederWaveTick;
+        // Check if victory conditions are met (don't spawn new waves if we've won)
+        const currentStrayCount = Array.from(this.pets.values()).filter((p) => p.insideShelterId === null).length;
+        const allBreedersClearedNow = this.breederShelters.size === 0 && this.breederCamps.size === 0;
+        const victoryConditionsMet = this.shelters.size > 0 && currentStrayCount === 0 && allBreedersClearedNow;
         // Determine if it's time for a new wave
         const isFirstWave = this.lastBreederWaveTick === 0 && ticksSinceStart >= World.BREEDER_FIRST_WAVE_DELAY_TICKS;
         const isNextWave = this.lastBreederWaveTick > 0 && this.breederWaveSpawned &&
             this.nextBreederWaveInterval > 0 && ticksSinceLastWave >= this.nextBreederWaveInterval;
-        if (isFirstWave || isNextWave) {
+        // Don't spawn new waves if victory conditions are met
+        if ((isFirstWave || isNextWave) && !victoryConditionsMet) {
             // Advance level if this isn't the first wave (cap at MAX_BREEDER_LEVEL)
             if (isNextWave) {
                 this.breederCurrentLevel = Math.min(this.breederCurrentLevel + 1, World.MAX_BREEDER_LEVEL);
@@ -1257,19 +1363,44 @@ class World {
                 }
                 else {
                     // Spawn a new camp next to this one (no limit on camps now!)
-                    const angle = Math.random() * Math.PI * 2;
-                    const newX = clamp(camp.x + Math.cos(angle) * World.BREEDER_GROWTH_RADIUS, 50, shared_1.MAP_WIDTH - 50);
-                    const newY = clamp(camp.y + Math.sin(angle) * World.BREEDER_GROWTH_RADIUS, 50, shared_1.MAP_HEIGHT - 50);
-                    const newUid = `pickup-${++this.pickupIdSeq}`;
-                    this.pickups.set(newUid, {
-                        id: newUid,
-                        x: newX,
-                        y: newY,
-                        type: shared_3.PICKUP_TYPE_BREEDER,
-                        level: newLevel,
-                    });
-                    this.breederSpawnCount++;
-                    this.breederCamps.set(newUid, { x: newX, y: newY, spawnTick: this.tick, level: newLevel });
+                    // Try multiple angles to find a valid position not inside a player shelter
+                    let newX = 0, newY = 0, validPosition = false;
+                    for (let attempt = 0; attempt < 8; attempt++) {
+                        const angle = Math.random() * Math.PI * 2;
+                        newX = clamp(camp.x + Math.cos(angle) * World.BREEDER_GROWTH_RADIUS, 50, shared_1.MAP_WIDTH - 50);
+                        newY = clamp(camp.y + Math.sin(angle) * World.BREEDER_GROWTH_RADIUS, 50, shared_1.MAP_HEIGHT - 50);
+                        // Check if position is inside a player shelter
+                        let insideShelter = false;
+                        for (const shelter of this.shelters.values()) {
+                            const playerShelterR = shelterRadius(shelter.size) + 50; // Shelter radius + margin
+                            const dx = newX - shelter.x;
+                            const dy = newY - shelter.y;
+                            if (dx * dx + dy * dy < playerShelterR * playerShelterR) {
+                                insideShelter = true;
+                                break;
+                            }
+                        }
+                        if (!insideShelter) {
+                            validPosition = true;
+                            break;
+                        }
+                    }
+                    // Only spawn if we found a valid position
+                    if (validPosition) {
+                        const newUid = `pickup-${++this.pickupIdSeq}`;
+                        this.pickups.set(newUid, {
+                            id: newUid,
+                            x: newX,
+                            y: newY,
+                            type: shared_3.PICKUP_TYPE_BREEDER,
+                            level: newLevel,
+                        });
+                        this.breederSpawnCount++;
+                        this.breederCamps.set(newUid, { x: newX, y: newY, spawnTick: this.tick, level: newLevel });
+                        // Announce the growth
+                        this.pendingAnnouncements.push(`Level ${newLevel} breeders are expanding! More camps have appeared!`);
+                        log(`Breeder camp grew! Level ${newLevel} spawned at (${Math.round(newX)}, ${Math.round(newY)})`);
+                    }
                     // Update original camp's spawn tick so it doesn't immediately grow again
                     camp.spawnTick = this.tick;
                     camp.level = newLevel;
@@ -1278,9 +1409,6 @@ class World {
                     if (originalPickup) {
                         originalPickup.level = newLevel;
                     }
-                    // Announce the growth
-                    this.pendingAnnouncements.push(`Level ${newLevel} breeders are expanding! More camps have appeared!`);
-                    log(`Breeder camp grew! Level ${newLevel} spawned at (${Math.round(newX)}, ${Math.round(newY)})`);
                 }
             }
         }
@@ -1498,9 +1626,12 @@ class World {
             ny = clamp(ny, radius, shared_1.MAP_HEIGHT - radius);
             // Vans can pass through each other (no van-van collision)
             // Vans only collide with stationary shelters (not other vans)
+            // Vans can pass through allied shelters (for pet delivery)
             for (const shelter of this.shelters.values()) {
                 if (shelter.ownerId === p.id)
                     continue; // Don't collide with own shelter
+                if (this.isAlly(p.id, shelter.ownerId, this.lastAllyPairs))
+                    continue; // Allies can pass through
                 const sr = shelterRadius(shelter.size);
                 if (!aabbOverlap(nx, ny, radius, shelter.x, shelter.y, sr))
                     continue;
@@ -1644,6 +1775,14 @@ class World {
                 }
                 if (loser.size <= World.ELIMINATED_SIZE_THRESHOLD) {
                     this.eliminatedPlayerIds.add(loser.id);
+                    // Clean up CPU state when eliminated
+                    const cpuTarget = this.cpuTargets.get(loser.id);
+                    if (cpuTarget?.breederClaimId) {
+                        this.breederClaimedBy.delete(cpuTarget.breederClaimId);
+                    }
+                    this.cpuTargets.delete(loser.id);
+                    this.cpuAtBreeder.delete(loser.id);
+                    this.pendingCpuBreederCompletions.delete(loser.id);
                 }
                 // Eject excess pets from loser when capacity drops below what they're holding
                 const loserCapacity = Math.floor(loser.size);
@@ -1825,6 +1964,24 @@ class World {
             const basePets = 3 + Math.floor(Math.random() * 3);
             const levelBonus = Math.floor((level - 1) / 2);
             const petCount = Math.min(basePets + levelBonus, 15); // Cap 15 for high-level breeders
+            // Check if CPU has enough RT to attempt - if not, they can't start
+            const cost = World.estimatedBreederRtCost(level, petCount);
+            const currentRt = this.playerMoney.get(playerId) ?? 0;
+            if (currentRt < cost) {
+                // CPU doesn't have enough RT - they leave the breeder camp alone
+                this.cpuAtBreeder.delete(playerId);
+                this.breederClaimedBy.delete(data.breederUid);
+                // Add cooldown before CPU can target breeders again (30 seconds)
+                this.cpuBreederCooldown.set(playerId, now + shared_1.TICK_RATE * 30);
+                // Clear the CPU's target so they find something else
+                const cpuTarget = this.cpuTargets.get(playerId);
+                if (cpuTarget?.breederClaimId) {
+                    this.cpuTargets.delete(playerId);
+                }
+                log(`CPU ${player.displayName} can't afford level ${level} breeder (need ${cost} RT, have ${currentRt}) - cooldown 30s`);
+                continue;
+            }
+            // CPU has enough RT - proceed with the attempt
             this.pickups.delete(data.breederUid);
             this.breederCamps.delete(data.breederUid);
             this.breederClaimedBy.delete(data.breederUid);
@@ -1853,16 +2010,52 @@ class World {
                         const existingClaim = this.breederClaimedBy.get(uid);
                         if (existingClaim !== undefined && existingClaim !== p.id)
                             continue; // Another van already attacking
+                        // Skip if CPU is on breeder cooldown
+                        const cooldownEnd = this.cpuBreederCooldown.get(p.id) ?? 0;
+                        if (now < cooldownEnd)
+                            continue;
+                        // Skip if CPU doesn't have enough RT for this breeder level
                         const camp = this.breederCamps.get(uid);
                         const level = camp?.level ?? 1;
+                        const cpuRt = this.playerMoney.get(p.id) ?? 0;
+                        const minRt = World.minRtForBreederLevel(level);
+                        if (cpuRt < minRt)
+                            continue;
+                        // Check if any human player is already in a minigame for this specific breeder
+                        let breederAlreadyBeingAttacked = false;
+                        for (const [, miniGame] of this.pendingBreederMiniGames) {
+                            if (miniGame.breederUid === uid) {
+                                breederAlreadyBeingAttacked = true;
+                                break;
+                            }
+                        }
+                        if (breederAlreadyBeingAttacked)
+                            continue;
                         this.breederClaimedBy.set(uid, p.id);
                         this.cpuAtBreeder.set(p.id, { breederUid: uid, level, arrivalTick: now });
                         continue;
                     }
+                    // Human players: don't allow if already attempting a breeder
+                    if (this.pendingBreederMiniGames.has(p.id))
+                        continue;
+                    // Check if another player (human or CPU) has claimed this breeder
+                    const existingClaim = this.breederClaimedBy.get(uid);
+                    if (existingClaim !== undefined && existingClaim !== p.id)
+                        continue;
+                    // Check if any player is already in a minigame for this specific breeder
+                    let breederAlreadyBeingAttacked = false;
+                    for (const [, miniGame] of this.pendingBreederMiniGames) {
+                        if (miniGame.breederUid === uid) {
+                            breederAlreadyBeingAttacked = true;
+                            break;
+                        }
+                    }
+                    if (breederAlreadyBeingAttacked)
+                        continue;
+                    // Set claim immediately to prevent race conditions
+                    this.breederClaimedBy.set(uid, p.id);
                 }
                 this.pickups.delete(uid);
-                if (u.type === shared_3.PICKUP_TYPE_BREEDER)
-                    this.breederClaimedBy.delete(uid);
                 if (u.type === shared_3.PICKUP_TYPE_BREEDER) {
                     // Get level before removing from camps tracking
                     const camp = this.breederCamps.get(uid);
@@ -1871,17 +2064,19 @@ class World {
                     const basePets = 3 + Math.floor(Math.random() * 3); // 3-5 base
                     const levelBonus = Math.floor((level - 1) / 2); // +1 pet every 2 levels
                     const petCount = Math.min(basePets + levelBonus, 15); // Cap 15 for high-level breeders
-                    // Breeder mini-game - track for this player with level
+                    // Breeder mini-game - track for this player with level AND breeder UID
                     this.pendingBreederMiniGames.set(p.id, {
                         petCount,
                         startTick: now,
                         level,
+                        breederUid: uid,
                     });
                     // Remove from breeder camps tracking (prevents growth)
                     this.breederCamps.delete(uid);
+                    // Claim is kept until minigame completes
                     // Announce breeder takedown attempt
                     this.pendingAnnouncements.push(`${p.displayName} is shutting down a Level ${level} breeder camp!`);
-                    log(`Player ${p.displayName} triggered level ${level} breeder mini-game`);
+                    log(`Player ${p.displayName} triggered level ${level} breeder mini-game (breeder ${uid})`);
                 }
                 else {
                     p.speedBoostUntil = 0; // end speed boost when picking up any boost
@@ -2049,6 +2244,14 @@ class World {
                 }
             }
         }
+        // Periodic cleanup of expired CPU cooldowns (once per minute to prevent memory growth)
+        if (now % 1500 === 0) {
+            for (const [cpuId, cooldownEnd] of Array.from(this.cpuBreederCooldown.entries())) {
+                if (now >= cooldownEnd) {
+                    this.cpuBreederCooldown.delete(cpuId);
+                }
+            }
+        }
     }
     isStrayLoss() {
         return this.strayLoss;
@@ -2144,6 +2347,11 @@ class World {
     }
     /** Clear a player's pending breeder mini-game (after they acknowledge it) */
     clearPendingBreederMiniGame(playerId) {
+        // Clear breeder claim before deleting the minigame entry
+        const miniGame = this.pendingBreederMiniGames.get(playerId);
+        if (miniGame?.breederUid) {
+            this.breederClaimedBy.delete(miniGame.breederUid);
+        }
         this.pendingBreederMiniGames.delete(playerId);
     }
     /** Get pending match-wide announcements */
@@ -2156,6 +2364,11 @@ class World {
     }
     /** Complete a breeder mini-game and award rewards or apply penalties */
     completeBreederMiniGame(playerId, rescuedCount, totalPets, level = 1) {
+        // Clear breeder claim before deleting the minigame entry
+        const miniGame = this.pendingBreederMiniGames.get(playerId);
+        if (miniGame?.breederUid) {
+            this.breederClaimedBy.delete(miniGame.breederUid);
+        }
         this.pendingBreederMiniGames.delete(playerId);
         const millShelterId = this.activeMillByPlayer.get(playerId);
         const isMill = !!millShelterId;
@@ -2194,18 +2407,44 @@ class World {
         const sizeAmount = 5 + Math.floor(level / 2);
         for (let i = 0; i < numItems; i++) {
             const roll = Math.random();
-            if (roll < 0.4) {
-                player.size += sizeAmount;
-                rewards.push({ type: 'size', amount: sizeAmount });
-            }
-            else if (roll < 0.7) {
-                player.speedBoostUntil = this.tick + shared_1.SPEED_BOOST_DURATION_TICKS * 2;
-                rewards.push({ type: 'speed', amount: 1 });
+            // Level 7+: include home port as a possible reward
+            // Reward distribution for level 7+: 30% size, 25% speed, 25% port, 20% home port
+            // Reward distribution for level 1-6: 40% size, 30% speed, 30% port
+            if (level >= 7) {
+                if (roll < 0.30) {
+                    player.size += sizeAmount;
+                    rewards.push({ type: 'size', amount: sizeAmount });
+                }
+                else if (roll < 0.55) {
+                    player.speedBoostUntil = this.tick + shared_1.SPEED_BOOST_DURATION_TICKS * 2;
+                    rewards.push({ type: 'speed', amount: 1 });
+                }
+                else if (roll < 0.80) {
+                    const current = this.portCharges.get(playerId) ?? 0;
+                    this.portCharges.set(playerId, current + 1);
+                    rewards.push({ type: 'port', amount: 1 });
+                }
+                else {
+                    // Home port reward (20% chance for level 7+)
+                    const current = this.shelterPortCharges.get(playerId) ?? 0;
+                    this.shelterPortCharges.set(playerId, current + 1);
+                    rewards.push({ type: 'shelterPort', amount: 1 });
+                }
             }
             else {
-                const current = this.portCharges.get(playerId) ?? 0;
-                this.portCharges.set(playerId, current + 1);
-                rewards.push({ type: 'port', amount: 1 });
+                if (roll < 0.4) {
+                    player.size += sizeAmount;
+                    rewards.push({ type: 'size', amount: sizeAmount });
+                }
+                else if (roll < 0.7) {
+                    player.speedBoostUntil = this.tick + shared_1.SPEED_BOOST_DURATION_TICKS * 2;
+                    rewards.push({ type: 'speed', amount: 1 });
+                }
+                else {
+                    const current = this.portCharges.get(playerId) ?? 0;
+                    this.portCharges.set(playerId, current + 1);
+                    rewards.push({ type: 'port', amount: 1 });
+                }
             }
         }
         if (rescuedCount > 0) {
@@ -2244,6 +2483,23 @@ class World {
     getPlayerMoney(playerId) {
         return this.playerMoney.get(playerId) ?? 0;
     }
+    /** Deduct money/RT from a player */
+    deductPlayerMoney(playerId, amount) {
+        const current = this.playerMoney.get(playerId) ?? 0;
+        this.playerMoney.set(playerId, Math.max(0, current - amount));
+    }
+    /** Add money to a player's balance */
+    addPlayerMoney(playerId, amount) {
+        const current = this.playerMoney.get(playerId) ?? 0;
+        this.playerMoney.set(playerId, current + amount);
+    }
+    /** Get a player's shelter info (public wrapper for private getPlayerShelter) */
+    getPlayerShelterInfo(playerId) {
+        const shelter = this.getPlayerShelter(playerId);
+        if (!shelter)
+            return undefined;
+        return { id: shelter.id, tier: shelter.tier, size: shelter.size };
+    }
     /** Serialize world state for persistence (solo save/resume). */
     serialize() {
         const state = {
@@ -2270,6 +2526,7 @@ class World {
             groundedPlayerIds: Array.from(this.groundedPlayerIds),
             portCharges: Array.from(this.portCharges.entries()),
             shelterPortCharges: Array.from(this.shelterPortCharges.entries()),
+            shelterTier3Boosts: Array.from(this.shelterTier3Boosts.entries()),
             playerColors: Array.from(this.playerColors.entries()),
             playerMoney: Array.from(this.playerMoney.entries()),
             eliminatedPlayerIds: Array.from(this.eliminatedPlayerIds),
@@ -2334,6 +2591,7 @@ class World {
         w.groundedPlayerIds = new Set(state.groundedPlayerIds);
         w.portCharges = new Map(state.portCharges);
         w.shelterPortCharges = new Map(state.shelterPortCharges);
+        w.shelterTier3Boosts = new Map(state.shelterTier3Boosts ?? []);
         w.playerColors = new Map(state.playerColors);
         w.playerMoney = new Map(state.playerMoney);
         w.eliminatedPlayerIds = new Set(state.eliminatedPlayerIds);
@@ -2388,8 +2646,8 @@ World.BREEDER_STRAY_SPEED = 1.5; // Wild strays move 1.5x faster
 World.BREEDER_NO_STRAY_RADIUS = 100;
 World.BREEDER_STRAY_MIN_SPAWN_DIST = 100; // Min distance from breeder shelter when spawning wild strays
 World.ADOPTION_EVENT_RADIUS = 350;
-World.ADOPTION_EVENT_DURATION_MIN = 3000; // 2 min at 25 tps
-World.ADOPTION_EVENT_DURATION_MAX = 6000; // 4 min
+World.ADOPTION_EVENT_DURATION_MIN = 4500; // 3 min at 25 tps
+World.ADOPTION_EVENT_DURATION_MAX = 7500; // 5 min
 World.ADOPTION_EVENT_SPAWN_DELAY_MIN = 1500; // 1 min before first event
 World.ADOPTION_EVENT_SPAWN_DELAY_MAX = 3750; // 2.5 min between events
 // Default spawn margin is half the adoption zone radius to prevent spawning too close

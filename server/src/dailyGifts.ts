@@ -10,7 +10,8 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
-import { ensureReferralStorage, getUserByProvider } from './referrals.js';
+import { ensureReferralStorage } from './referrals.js';
+import { addRt, addSpeedBoosts, addSizeBoosts, addPortCharges, initializeInventory } from './inventory.js';
 
 /** Timestamped log function for server output */
 function log(message: string): void {
@@ -69,6 +70,35 @@ function getTodayDateUTC(): string {
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   const day = String(d.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+/**
+ * Deposit a gift reward into the player's inventory.
+ * This actually stores the items in the database so they persist.
+ */
+function depositGiftReward(userId: string, reward: DailyGiftReward): void {
+  // Ensure inventory row exists for this user
+  initializeInventory(userId);
+  
+  // Deposit RT tokens
+  if (reward.tokens > 0) {
+    addRt(userId, reward.tokens);
+  }
+  
+  // Deposit speed boost (1 boost item per gift)
+  if (reward.speedBoost) {
+    addSpeedBoosts(userId, 1);
+  }
+  
+  // Deposit size bonus (stored as size boost count)
+  if (reward.sizeBonus && reward.sizeBonus > 0) {
+    addSizeBoosts(userId, reward.sizeBonus);
+  }
+  
+  // Deposit port charge (1 random port per gift)
+  if (reward.portCharge) {
+    addPortCharges(userId, 1);
+  }
 }
 
 export function getDailyGiftStatus(userId: string): DailyGiftStatus {
@@ -147,7 +177,11 @@ export function grantRegistrationGift(userId: string): {
     'INSERT INTO daily_gifts (user_id, last_claim_date, current_day, total_claims) VALUES (?, ?, ?, ?)'
   ).run(userId, today, nextDay, 1);
   
-  log(`Registration gift granted to ${userId}: +${REGISTRATION_GIFT.tokens} RT (registration) + +${day1Reward.tokens} RT (Day 1)`);
+  // Actually deposit the rewards into the player's inventory (persistent storage)
+  depositGiftReward(userId, REGISTRATION_GIFT);
+  depositGiftReward(userId, day1Reward);
+  
+  log(`Registration gift granted to ${userId}: +${REGISTRATION_GIFT.tokens} RT (registration) + +${day1Reward.tokens} RT (Day 1) - deposited to inventory`);
   
   return { 
     success: true, 
@@ -190,7 +224,14 @@ export function claimDailyGift(userId: string): {
     ).run(userId, today, nextDay, 1);
   }
   
-  log(`Daily gift claimed by ${userId}: Day ${currentDay}, +${reward.tokens} RT`);
+  // Actually deposit the reward into the player's inventory (persistent storage)
+  depositGiftReward(userId, reward);
+  
+  const rewardParts: string[] = [`+${reward.tokens} RT`];
+  if (reward.speedBoost) rewardParts.push('+1 speed boost');
+  if (reward.sizeBonus) rewardParts.push(`+${reward.sizeBonus} size boost`);
+  if (reward.portCharge) rewardParts.push('+1 port charge');
+  log(`Daily gift claimed by ${userId}: Day ${currentDay}, ${rewardParts.join(', ')} - deposited to inventory`);
   
   return { success: true, reward, nextDay };
 }

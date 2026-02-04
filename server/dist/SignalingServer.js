@@ -6,6 +6,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const ws_1 = require("ws");
 const registry_js_1 = require("./registry.js");
+const leaderboard_js_1 = require("./leaderboard.js");
 /** Timestamped log function for server output */
 function log(message) {
     const now = new Date();
@@ -17,9 +18,16 @@ const GAME_WS_URL = process.env.GAME_WS_URL || 'ws://localhost:4001';
 const GAME_WS_URL_ALT = process.env.GAME_WS_URL_ALT || '';
 const wss = new ws_1.WebSocketServer({ port: SIGNALING_PORT });
 wss.on('connection', (ws) => {
+    ws.on('close', () => {
+        (0, leaderboard_js_1.unsubscribeFromLeaderboard)(ws);
+    });
     ws.on('message', (raw) => {
         try {
             const msg = JSON.parse(raw.toString());
+            if (msg.type === 'subscribeLeaderboard') {
+                (0, leaderboard_js_1.subscribeToLeaderboard)(ws);
+                return;
+            }
             if (msg.type === 'join') {
                 (async () => {
                     const servers = await (0, registry_js_1.getGameServers)();

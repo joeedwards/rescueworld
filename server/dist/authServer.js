@@ -14,6 +14,8 @@ const dailyGifts_js_1 = require("./dailyGifts.js");
 const leaderboard_js_1 = require("./leaderboard.js");
 const inventory_js_1 = require("./inventory.js");
 const leaderboard_js_2 = require("./leaderboard.js");
+const gameStats_js_1 = require("./gameStats.js");
+const GameServer_js_1 = require("./GameServer.js");
 /** Timestamped log function for server output */
 function log(message) {
     const now = new Date();
@@ -47,6 +49,11 @@ function clearRefCookie(res) {
 }
 app.get('/health', (_req, res) => {
     res.json((0, registry_js_1.getStorageStatus)());
+});
+// Public game stats endpoint for analytics and advertising
+app.get('/api/game-stats', (_req, res) => {
+    const stats = (0, gameStats_js_1.getGameStats)(GameServer_js_1.getRealtimeStats);
+    res.json(stats);
 });
 app.get('/auth/me', (req, res) => {
     const userId = req.signedCookies?.session;

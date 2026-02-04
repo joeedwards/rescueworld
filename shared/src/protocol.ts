@@ -3,7 +3,7 @@
  * Snapshot: shelters (players) with size/petsInside, strays (pets), adoption zones.
  */
 
-import type { GameSnapshot, PlayerState, PetState, AdoptionZoneState, PickupState, ShelterState, BreederShelterState } from './types';
+import type { GameSnapshot, PlayerState, PetState, AdoptionZoneState, PickupState, ShelterState, BreederShelterState, AdoptionEvent } from './types';
 import type { InputFlags } from './types';
 
 export const MSG_INPUT = 0x01;
@@ -53,13 +53,14 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
   const pickups = snap.pickups ?? [];
   const shelters = snap.shelters ?? [];
   const breederShelters = snap.breederShelters ?? [];
+  const adoptionEvents = snap.adoptionEvents ?? [];
   // msg(1), tick(4), matchEndAt(4), matchEndedEarly(1), winnerId(string), totalMatchAdoptions(4), scarcityLevel(1), matchDurationMs(4), numPlayers(1)
   let size = 1 + 4 + 4 + 1 + 1 + encoder.encode(snap.winnerId ?? '').length + 4 + 1 + 4 + 1;
   for (const p of players) {
     size += 1 + encoder.encode(p.id).length + 1 + encoder.encode(p.displayName ?? p.id).length + 4 * 4 + 4 + 4 + 1; // id, displayName, x,y,vx,vy, size(4), totalAdoptions(4), numPets
     for (const pid of p.petsInside) size += 1 + encoder.encode(pid).length;
     size += 4 + 1; // speedBoostUntil(4), inputSeq(1)
-    size += 1 + 1 + 1 + 1; // eliminated(1), grounded(1), portCharges(1), numAllies(1)
+    size += 1 + 1 + 1 + 1 + 1; // eliminated(1), grounded(1), portCharges(1), shelterPortCharges(1), numAllies(1)
     for (const aid of p.allies ?? []) size += 1 + encoder.encode(aid).length;
     size += 1 + encoder.encode(p.shelterColor ?? '').length; // shelterColor string
     size += 2; // money (Uint16)
@@ -93,6 +94,14 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
   size += 1;
   for (const b of breederShelters) {
     size += 1 + encoder.encode(b.id).length + 4 + 4 + 1 + 4; // id, x, y, level, size
+  }
+  // Adoption events
+  size += 1; // count
+  for (const ev of adoptionEvents) {
+    size += 1 + encoder.encode(ev.id).length; // id
+    size += 1 + encoder.encode(ev.type).length; // type
+    size += 4 + 4; // x, y
+    size += 4 + 4; // startTick, durationTicks
   }
   const buf = new ArrayBuffer(size * 2); // No cap - large games need large buffers
   const view = new DataView(buf);
@@ -133,6 +142,7 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
     view.setUint8(off++, (p.eliminated ? 1 : 0));
     view.setUint8(off++, (p.grounded ? 1 : 0));
     view.setUint8(off++, (p.portCharges ?? 0) & 0xff);
+    view.setUint8(off++, (p.shelterPortCharges ?? 0) & 0xff);
     const allies = p.allies ?? [];
     view.setUint8(off++, allies.length);
     for (const aid of allies) off = writeString(view, off, aid);
@@ -210,6 +220,20 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
     view.setFloat32(off, b.size, true);
     off += 4;
   }
+  // Encode adoption events
+  view.setUint8(off++, adoptionEvents.length);
+  for (const ev of adoptionEvents) {
+    off = writeString(view, off, ev.id);
+    off = writeString(view, off, ev.type);
+    view.setFloat32(off, ev.x, true);
+    off += 4;
+    view.setFloat32(off, ev.y, true);
+    off += 4;
+    view.setUint32(off, ev.startTick >>> 0, true);
+    off += 4;
+    view.setUint32(off, ev.durationTicks >>> 0, true);
+    off += 4;
+  }
   return buf.slice(0, off);
 }
 
@@ -261,6 +285,7 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
     const eliminated = view.getUint8(off++) !== 0;
     const grounded = view.getUint8(off++) !== 0;
     const portCharges = view.getUint8(off++);
+    const shelterPortCharges = view.getUint8(off++);
     const numAllies = view.getUint8(off++);
     const allies: string[] = [];
     for (let k = 0; k < numAllies; k++) {
@@ -291,6 +316,7 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
       ...(eliminated ? { eliminated: true } : {}),
       ...(grounded ? { grounded: true } : {}),
       ...(portCharges > 0 ? { portCharges } : {}),
+      ...(shelterPortCharges > 0 ? { shelterPortCharges } : {}),
       ...(shelterColor ? { shelterColor } : {}),
       ...(money > 0 ? { money } : {}),
       ...(shelterId ? { shelterId } : {}),
@@ -388,6 +414,34 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
     off += 4;
     breederShelters.push({ id: bid, x: bx, y: by, level, size: bsize });
   }
+  // Decode adoption events
+  const numAdoptionEvents = off < view.byteLength ? view.getUint8(off++) : 0;
+  const adoptionEvents: AdoptionEvent[] = [];
+  for (let i = 0; i < numAdoptionEvents; i++) {
+    const { s: evId, next: evn1 } = readString(view, off);
+    off = evn1;
+    const { s: evType, next: evn2 } = readString(view, off);
+    off = evn2;
+    const evX = view.getFloat32(off, true);
+    off += 4;
+    const evY = view.getFloat32(off, true);
+    off += 4;
+    const startTick = view.getUint32(off, true);
+    off += 4;
+    const durationTicks = view.getUint32(off, true);
+    off += 4;
+    adoptionEvents.push({
+      id: evId,
+      type: evType as AdoptionEvent['type'],
+      x: evX,
+      y: evY,
+      startTick,
+      durationTicks,
+      requirements: [], // Not needed on client
+      contributions: {}, // Not needed on client
+      rewards: { top1: 0, top2: 0, top3: 0, participation: 0 }, // Not needed on client
+    });
+  }
   return { 
     tick, 
     matchEndAt, 
@@ -402,5 +456,6 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
     pickups,
     shelters: shelters.length > 0 ? shelters : undefined,
     breederShelters: breederShelters.length > 0 ? breederShelters : undefined,
+    adoptionEvents: adoptionEvents.length > 0 ? adoptionEvents : undefined,
   };
 }

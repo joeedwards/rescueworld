@@ -20,10 +20,10 @@
     #ui > * { pointer-events: auto; }
     .top-bar {
       position: absolute; top: 0; left: 0; right: 0; height: 48px;
-      background: linear-gradient(180deg, rgba(30,35,50,0.97) 0%, rgba(22,26,38,0.97) 100%);
-      border-bottom: 2px solid rgba(255,255,255,0.12);
+      background: linear-gradient(180deg, rgba(30,35,50,0.4) 0%, rgba(22,26,38,0.4) 100%);
+      border-bottom: 2px solid rgba(255,255,255,0.08);
       display: flex; align-items: center; justify-content: space-between; padding: 0 16px;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.2);
     }
     .top-bar .score { font: 700 14px/1 Rubik, sans-serif; color: #7bed9f; text-shadow: 0 0 12px rgba(123,237,159,0.4); }
     .top-bar .game-clock { font: 600 14px/1 monospace; color: rgba(255,255,255,0.7); background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px; }
@@ -145,10 +145,10 @@
     #event-panel .event-time { font: 600 10px Rubik, sans-serif; color: #7bed9f; }
     .bottom-bar {
       position: absolute; bottom: 0; left: 0; right: 0; height: 72px;
-      background: linear-gradient(0deg, rgba(30,35,50,0.97), rgba(22,26,38,0.97));
-      border-top: 2px solid rgba(255,255,255,0.12);
+      background: linear-gradient(0deg, rgba(30,35,50,0.4), rgba(22,26,38,0.4));
+      border-top: 2px solid rgba(255,255,255,0.08);
       display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
-      box-shadow: 0 -4px 20px rgba(0,0,0,0.4);
+      box-shadow: 0 -4px 20px rgba(0,0,0,0.2);
     }
     #carried { font: 600 14px Rubik, sans-serif; color: #ffd93d; }
     #tag-cooldown { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.7); }
@@ -215,6 +215,15 @@
     .breeder-title { font: 700 18px Rubik, sans-serif; color: #ff6b6b; }
     .breeder-timer { font: 700 16px Rubik, sans-serif; color: #ffd93d; }
     .breeder-tokens { font: 600 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 12px; }
+    .instant-rescue-btn {
+      padding: 10px 24px; margin-bottom: 16px; font: 600 14px Rubik, sans-serif;
+      background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff;
+      border: 2px solid #fbbf24; border-radius: 8px; cursor: pointer;
+      transition: all 0.2s; box-shadow: 0 2px 8px rgba(245, 158, 11, 0.3);
+    }
+    .instant-rescue-btn:hover:not(:disabled) { transform: scale(1.05); box-shadow: 0 4px 16px rgba(245, 158, 11, 0.5); }
+    .instant-rescue-btn:disabled { opacity: 0.5; cursor: not-allowed; background: #666; border-color: #888; }
+    .instant-rescue-btn.hidden { display: none; }
     .breeder-pets { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; justify-content: center; }
     .breeder-pet {
       width: 60px; height: 60px; border-radius: 12px; display: flex; flex-direction: column;
@@ -372,6 +381,18 @@
     .leaderboard-close:hover { color: #fff; }
     .leaderboard-empty { text-align: center; padding: 30px 20px; color: rgba(255,255,255,0.6); }
     .leaderboard-sort.hidden { display: none; }
+    .lobby-leaderboard-panel { margin-top: 20px; padding: 12px; background: rgba(0,0,0,0.25); border-radius: 10px; border: 1px solid rgba(255,255,255,0.15); }
+    .lobby-leaderboard-title { font: 700 14px Rubik, sans-serif; color: #7bed9f; margin: 0 0 10px 0; }
+    .lobby-leaderboard-content { min-height: 80px; max-height: 220px; overflow-y: auto; font-size: 12px; color: #fff; }
+    .lobby-leaderboard-loading { color: rgba(255,255,255,0.6); padding: 8px 0; }
+    .lobby-leaderboard-entry { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; margin-bottom: 4px; background: rgba(255,255,255,0.06); }
+    .lobby-leaderboard-entry.highlight { background: rgba(123,237,159,0.15); }
+    .lobby-leaderboard-rank { font: 700 13px Rubik, sans-serif; color: #ffd93d; min-width: 22px; }
+    .lobby-leaderboard-rank.gold { color: #ffd700; }
+    .lobby-leaderboard-rank.silver { color: #c0c0c0; }
+    .lobby-leaderboard-rank.bronze { color: #cd7f32; }
+    .lobby-leaderboard-name { flex: 1; overflow: hidden; text-overflow: ellipsis; color: #fff; }
+    .lobby-leaderboard-score { color: rgba(255,255,255,0.8); font-weight: 600; }
     .match-history-entry {
       display: grid; grid-template-columns: 80px 1fr auto auto auto auto;
       gap: 10px; align-items: center; padding: 10px 12px;
@@ -752,17 +773,31 @@
             </label>
           </div>
         </div>
+        <div class="howto-section" style="margin-top:20px; text-align:left; max-width:360px;">
+          <h3 style="font: 700 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 12px;">How To Play</h3>
+          <p class="howto-text">Drive your <strong>van</strong> to rescue strays. Bring them to the <strong>Adoption Center</strong> (green zone) to adopt out, earn <strong>5 RT each</strong>.</p>
+          <p class="howto-text">Drive out <strong>Breeders</strong> by better feeding their pets! <strong>Don't let the breeders setup a Mill</strong>!</p>
+          <p class="howto-text">Build a <strong>shelter</strong> (250 RT), then buy an <strong>Adoption Center</strong> (250 RT) to adopt at your shelter for only 2RT each! Add <strong>Advertising and Gravity</strong> (200 and 300 RT) to pull strays!</p>
+          <p class="howto-text">Press <span class="key">E</span> for build menu.</p>
+          <h4 class="howto-subtitle">Controls</h4>
+          <p class="howto-text howto-keys"><span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> Move &nbsp; <span class="key">E</span> Build</p>
+          <h4 class="howto-subtitle">Power-ups</h4>
+          <p class="howto-text"><span class="orb green"></span> +Size &nbsp; <span class="orb blue"></span> Speed &nbsp; <span class="orb purple"></span> Port</p>
+        </div>
       </section>
       <aside class="landing-right">
-        <h3>How To Play</h3>
-        <p class="howto-text">Drive your <strong>van</strong> to rescue strays. Bring them to the <strong>Adoption Center</strong> (green zone) to adopt out, earn <strong>5 RT each</strong>.</p>
-        <p class="howto-text">Drive out <strong>Breeders</strong> by better feeding their pets! <strong>Don't let the breeders setup a Mill</strong>!</p>
-        <p class="howto-text">Build a <strong>shelter</strong> (250 RT), then buy an <strong>Adoption Center</strong> (250 RT) to adopt at your shelter for only 2RT each! Add <strong>Advertising and Gravity</strong> (200 and 300 RT) to pull strays!</p>
-        <p class="howto-text">Press <span class="key">E</span> for build menu. First to <strong>51%</strong> wins!</p>
-        <h4 class="howto-subtitle">Controls</h4>
-        <p class="howto-text howto-keys"><span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> Move &nbsp; <span class="key">E</span> Build</p>
-        <h4 class="howto-subtitle">Power-ups</h4>
-        <p class="howto-text"><span class="orb green"></span> +Size &nbsp; <span class="orb blue"></span> Speed &nbsp; <span class="orb purple"></span> Port</p>
+      <div class="lobby-leaderboard-panel">
+        <h4 class="lobby-leaderboard-title">Live Leaderboard (Daily)</h4>
+        <div id="lobby-leaderboard-content" class="lobby-leaderboard-content">
+          <div class="lobby-leaderboard-loading">Connecting…</div>
+        </div>
+      </div>
+      <div class="lobby-leaderboard-panel" style="margin-top:12px">
+        <h4 class="lobby-leaderboard-title">Game Stats</h4>
+        <div id="game-stats-content" class="lobby-leaderboard-content" style="font-size:12px">
+          <div class="lobby-leaderboard-loading">Loading…</div>
+        </div>
+      </div>
       <div class="referral-panel">
         <h4>Referrals</h4>
         <div id="referral-status" class="referral-status">Sign in to get your referral link.</div>
@@ -831,6 +866,7 @@
       <div class="breeder-tokens" id="breeder-tokens">Your Tokens: 0 RT</div>
       <p id="breeder-instruction-1" style="margin-bottom:8px;color:rgba(255,255,255,0.8);font-size:12px;">1. Click a pet to select it</p>
       <p id="breeder-instruction-2" style="margin-bottom:12px;color:rgba(255,255,255,0.8);font-size:12px;">2. Click the matching food to rescue it!</p>
+      <button type="button" id="instant-rescue-btn" class="instant-rescue-btn hidden">⚡ Instant Rescue (0 RT)</button>
       <div class="breeder-pets" id="breeder-pets">
         <!-- Pets will be added dynamically -->
       </div>
