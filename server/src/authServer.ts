@@ -15,11 +15,14 @@ import {
   claimReward,
   updateUserNickname,
   updateUserShelterColor,
+  getSavedMatch,
+  deleteSavedMatch,
+  getMatchHistory,
 } from './referrals.js';
 import { getDailyGiftStatus, claimDailyGift, grantRegistrationGift, REGISTRATION_GIFT } from './dailyGifts.js';
 import { getLeaderboard, getUserRank } from './leaderboard.js';
 import { getInventory, depositAfterMatch, withdrawForMatch } from './inventory.js';
-import { recordMatchWin, recordRtEarned } from './leaderboard.js';
+import { recordMatchWin, recordRtEarned, updateReputationOnQuit } from './leaderboard.js';
 
 /** Timestamped log function for server output */
 function log(message: string): void {
@@ -329,11 +332,50 @@ app.post('/api/daily-gift/claim', (req: Request, res: Response) => {
   });
 });
 
+// Server time (UTC). Daily gift resets at 00:00 UTC.
+app.get('/api/server-time', (_req: Request, res: Response) => {
+  const now = new Date();
+  const utc = now.toISOString();
+  const nextMidnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+  const nextMidnightUtc = nextMidnight.toISOString();
+  res.json({ utc, nextMidnightUtc });
+});
+
+// Saved match (solo): check for existing match to resume
+app.get('/api/saved-match', (req: Request, res: Response) => {
+  const userId = req.signedCookies?.session;
+  if (!userId) {
+    res.json({ hasSavedMatch: false });
+    return;
+  }
+  const saved = getSavedMatch(userId);
+  res.json({
+    hasSavedMatch: !!saved,
+    matchId: saved?.id ?? null,
+    createdAt: saved?.created_at ?? null,
+  });
+});
+
+// Abandon saved solo match (applies quit penalty)
+app.delete('/api/saved-match', (req: Request, res: Response) => {
+  const userId = req.signedCookies?.session;
+  if (!userId) {
+    res.status(401).json({ error: 'not_signed_in' });
+    return;
+  }
+  deleteSavedMatch(userId);
+  updateReputationOnQuit(userId);
+  res.json({ success: true });
+});
+
 // Leaderboard endpoints
 app.get('/api/leaderboard', (req: Request, res: Response) => {
-  const type = req.query.type === 'daily' ? 'daily' : 'alltime';
+  const q = req.query.type;
+  const type = (q === 'daily' || q === 'weekly' || q === 'season' || q === 'alltime' || q === 'games') ? q : 'alltime';
   const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 10, 1), 100);
-  const entries = getLeaderboard(type, limit);
+  const sortQ = req.query.sort;
+  const sort = (sortQ === 'wins' || sortQ === 'losses' || sortQ === 'games' || sortQ === 'score') ? sortQ : 'score';
+  const entries = getLeaderboard(type, limit, sort);
   res.json({ type, entries });
 });
 
@@ -346,6 +388,30 @@ app.get('/api/leaderboard/my-rank', (req: Request, res: Response) => {
   const alltime = getUserRank(userId, 'alltime');
   const daily = getUserRank(userId, 'daily');
   res.json({ alltime, daily });
+});
+
+// Match history - current user
+app.get('/api/match-history', (req: Request, res: Response) => {
+  const userId = req.signedCookies?.session;
+  if (!userId) {
+    res.json({ matches: [] });
+    return;
+  }
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 50, 1), 100);
+  const matches = getMatchHistory(userId, limit);
+  res.json({ matches });
+});
+
+// Match history for a specific user (e.g. for leaderboard profile)
+app.get('/api/user/:userId/matches', (req: Request, res: Response) => {
+  const targetUserId = req.params.userId;
+  if (!targetUserId) {
+    res.status(400).json({ error: 'user_id_required' });
+    return;
+  }
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 20, 1), 50);
+  const matches = getMatchHistory(targetUserId, limit);
+  res.json({ matches });
 });
 
 // Inventory endpoints

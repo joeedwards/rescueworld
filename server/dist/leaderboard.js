@@ -3,8 +3,12 @@
  * Leaderboard module - tracks match wins, all-time stats, and daily leaderboard rewards
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.updateReputationOnAdoption = updateReputationOnAdoption;
+exports.updateReputationOnQuit = updateReputationOnQuit;
+exports.updateReputationOnEventPodium = updateReputationOnEventPodium;
 exports.recordMatchWin = recordMatchWin;
 exports.recordRtEarned = recordRtEarned;
+exports.recordMatchLoss = recordMatchLoss;
 exports.getLeaderboard = getLeaderboard;
 exports.getUserRank = getUserRank;
 exports.grantDailyRewards = grantDailyRewards;
@@ -25,89 +29,304 @@ function db() {
     }
     return sqlite;
 }
+/** Today's date in UTC (YYYY-MM-DD). Game server uses UTC for all date boundaries. */
+function getTodayUTC() {
+    const d = new Date();
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+/** ISO week string in UTC e.g. 2026-W05 */
+function getCurrentWeekUTC() {
+    const d = new Date();
+    const thursday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 4 - (d.getUTCDay() || 7)));
+    const yearStart = new Date(Date.UTC(thursday.getUTCFullYear(), 0, 1));
+    const weekNo = Math.ceil((((thursday.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+    return `${thursday.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
+/** Season string in UTC e.g. 2026-Q1 */
+function getCurrentSeasonUTC() {
+    const d = new Date();
+    const q = Math.floor(d.getUTCMonth() / 3) + 1;
+    return `${d.getUTCFullYear()}-Q${q}`;
+}
+const REPUTATION_MIN = 0;
+const REPUTATION_MAX = 100;
+const REPUTATION_DEFAULT = 50;
+function clampReputation(value) {
+    return Math.max(REPUTATION_MIN, Math.min(REPUTATION_MAX, Math.round(value)));
+}
+/**
+ * Formula B: on adoption, Reputation += 2*(Q - 1). Ideal matches raise it, poor lower it.
+ * Returns new reputation after update.
+ */
+function updateReputationOnAdoption(userId, qualityMultiplier) {
+    const conn = db();
+    const row = conn.prepare('SELECT reputation FROM player_stats WHERE user_id = ?').get(userId);
+    const current = row ? clampReputation(row.reputation) : REPUTATION_DEFAULT;
+    const delta = 2 * (qualityMultiplier - 1);
+    const next = clampReputation(current + delta);
+    if (row) {
+        conn.prepare('UPDATE player_stats SET reputation = ? WHERE user_id = ?').run(next, userId);
+    }
+    else {
+        conn.prepare('INSERT INTO player_stats (user_id, total_wins, total_rt_earned, total_games_played, total_losses, reputation) VALUES (?, 0, 0, 0, 0, ?)').run(userId, next);
+    }
+    return next;
+}
+/**
+ * Formula B: on player quit, Reputation -= 8.
+ * Returns new reputation after update.
+ */
+function updateReputationOnQuit(userId) {
+    const conn = db();
+    const row = conn.prepare('SELECT reputation FROM player_stats WHERE user_id = ?').get(userId);
+    const current = row ? clampReputation(row.reputation) : REPUTATION_DEFAULT;
+    const next = clampReputation(current - 8);
+    if (row) {
+        conn.prepare('UPDATE player_stats SET reputation = ? WHERE user_id = ?').run(next, userId);
+    }
+    else {
+        conn.prepare('INSERT INTO player_stats (user_id, total_wins, total_rt_earned, total_games_played, total_losses, reputation) VALUES (?, 0, 0, 0, 0, ?)').run(userId, next);
+    }
+    log(`Reputation on quit: ${userId} ${current} -> ${next}`);
+    return next;
+}
+/**
+ * Formula B: on event top-3 finish, Reputation += 3.
+ * Returns new reputation after update.
+ */
+function updateReputationOnEventPodium(userId) {
+    const conn = db();
+    const row = conn.prepare('SELECT reputation FROM player_stats WHERE user_id = ?').get(userId);
+    const current = row ? clampReputation(row.reputation) : REPUTATION_DEFAULT;
+    const next = clampReputation(current + 3);
+    if (row) {
+        conn.prepare('UPDATE player_stats SET reputation = ? WHERE user_id = ?').run(next, userId);
+    }
+    else {
+        conn.prepare('INSERT INTO player_stats (user_id, total_wins, total_rt_earned, total_games_played, total_losses, reputation) VALUES (?, 0, 0, 0, 0, ?)').run(userId, next);
+    }
+    return next;
+}
 /**
  * Record a match win for a user
  */
 function recordMatchWin(userId, rtEarned) {
-    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const today = getTodayUTC();
     const conn = db();
-    // Check if user has stats row
+    const thisWeek = getCurrentWeekUTC();
+    const thisSeason = getCurrentSeasonUTC();
+    // Check if user has stats row (include total_games_played, total_losses for migration compatibility)
     const existing = conn.prepare('SELECT * FROM player_stats WHERE user_id = ?').get(userId);
     if (existing) {
-        // Reset daily wins if it's a new day
         const newDailyWins = existing.last_win_date === today ? existing.daily_wins + 1 : 1;
+        const newDailyRt = existing.last_played_date === today ? (existing.daily_rt_earned ?? 0) + rtEarned : rtEarned;
+        const newWeeklyScore = existing.current_week === thisWeek ? (existing.weekly_score ?? 0) + rtEarned : rtEarned;
+        const newSeasonScore = existing.current_season === thisSeason ? (existing.season_score ?? 0) + rtEarned : rtEarned;
         conn.prepare(`
       UPDATE player_stats 
       SET total_wins = total_wins + 1, 
+          total_games_played = COALESCE(total_games_played, 0) + 1,
           total_rt_earned = total_rt_earned + ?, 
           daily_wins = ?,
-          last_win_date = ?
+          last_win_date = ?,
+          daily_rt_earned = ?,
+          last_played_date = ?,
+          current_week = ?,
+          weekly_score = ?,
+          current_season = ?,
+          season_score = ?
       WHERE user_id = ?
-    `).run(rtEarned, newDailyWins, today, userId);
+    `).run(rtEarned, newDailyWins, today, newDailyRt, today, thisWeek, newWeeklyScore, thisSeason, newSeasonScore, userId);
     }
     else {
         conn.prepare(`
-      INSERT INTO player_stats (user_id, total_wins, total_rt_earned, daily_wins, last_win_date)
-      VALUES (?, 1, ?, 1, ?)
-    `).run(userId, rtEarned, today);
+      INSERT INTO player_stats (user_id, total_wins, total_rt_earned, total_games_played, total_losses, daily_wins, last_win_date, daily_rt_earned, last_played_date, current_week, weekly_score, current_season, season_score)
+      VALUES (?, 1, ?, 1, 0, 1, ?, ?, ?, ?, ?, ?, ?)
+    `).run(userId, rtEarned, today, rtEarned, today, thisWeek, rtEarned, thisSeason, rtEarned);
     }
     log(`Recorded win for user ${userId}: +${rtEarned} RT`);
 }
 /**
- * Record RT earned (even without winning)
+ * Record RT earned (even without winning) - also tracks daily participation
  */
 function recordRtEarned(userId, rtEarned) {
+    const today = getTodayUTC();
+    const thisWeek = getCurrentWeekUTC();
+    const thisSeason = getCurrentSeasonUTC();
     const conn = db();
-    const existing = conn.prepare('SELECT user_id FROM player_stats WHERE user_id = ?').get(userId);
+    const existing = conn.prepare('SELECT user_id, last_played_date, current_week, current_season, weekly_score, season_score FROM player_stats WHERE user_id = ?').get(userId);
     if (existing) {
-        conn.prepare(`
-      UPDATE player_stats 
-      SET total_rt_earned = total_rt_earned + ?
-      WHERE user_id = ?
-    `).run(rtEarned, userId);
+        const sameDay = existing.last_played_date === today;
+        const newWeeklyScore = existing.current_week === thisWeek ? (existing.weekly_score ?? 0) + rtEarned : rtEarned;
+        const newSeasonScore = existing.current_season === thisSeason ? (existing.season_score ?? 0) + rtEarned : rtEarned;
+        if (sameDay) {
+            conn.prepare(`
+        UPDATE player_stats 
+        SET total_rt_earned = total_rt_earned + ?,
+            daily_rt_earned = daily_rt_earned + ?,
+            current_week = ?, weekly_score = ?,
+            current_season = ?, season_score = ?
+        WHERE user_id = ?
+      `).run(rtEarned, rtEarned, thisWeek, newWeeklyScore, thisSeason, newSeasonScore, userId);
+        }
+        else {
+            conn.prepare(`
+        UPDATE player_stats 
+        SET total_rt_earned = total_rt_earned + ?,
+            daily_rt_earned = ?,
+            last_played_date = ?,
+            current_week = ?, weekly_score = ?,
+            current_season = ?, season_score = ?
+        WHERE user_id = ?
+      `).run(rtEarned, rtEarned, today, thisWeek, newWeeklyScore, thisSeason, newSeasonScore, userId);
+        }
     }
     else {
         conn.prepare(`
-      INSERT INTO player_stats (user_id, total_wins, total_rt_earned, daily_wins, last_win_date)
-      VALUES (?, 0, ?, 0, NULL)
-    `).run(userId, rtEarned);
+      INSERT INTO player_stats (user_id, total_wins, total_rt_earned, daily_wins, last_win_date, daily_rt_earned, last_played_date, current_week, weekly_score, current_season, season_score)
+      VALUES (?, 0, ?, 0, NULL, ?, ?, ?, ?, ?, ?)
+    `).run(userId, rtEarned, rtEarned, today, thisWeek, rtEarned, thisSeason, rtEarned);
     }
+    log(`Recorded ${rtEarned} RT for user ${userId}`);
 }
 /**
- * Get leaderboard (all-time or daily)
+ * Record a match loss (or quit): increment games_played, losses, and add RT earned.
  */
-function getLeaderboard(type, limit = 10) {
+function recordMatchLoss(userId, rtEarned) {
+    const today = getTodayUTC();
+    const thisWeek = getCurrentWeekUTC();
+    const thisSeason = getCurrentSeasonUTC();
     const conn = db();
-    const today = new Date().toISOString().split('T')[0];
-    let query;
-    if (type === 'daily') {
-        query = `
-      SELECT ps.user_id, u.display_name, u.shelter_color, ps.daily_wins as wins, ps.total_rt_earned as rt_earned
-      FROM player_stats ps
-      JOIN users u ON ps.user_id = u.id
-      WHERE ps.last_win_date = ?
-      ORDER BY ps.daily_wins DESC, ps.total_rt_earned DESC
-      LIMIT ?
-    `;
+    const existing = conn.prepare('SELECT user_id, last_played_date, current_week, current_season, weekly_score, season_score, total_games_played, total_losses FROM player_stats WHERE user_id = ?').get(userId);
+    if (existing) {
+        const sameDay = existing.last_played_date === today;
+        const newWeeklyScore = existing.current_week === thisWeek ? (existing.weekly_score ?? 0) + rtEarned : rtEarned;
+        const newSeasonScore = existing.current_season === thisSeason ? (existing.season_score ?? 0) + rtEarned : rtEarned;
+        if (sameDay) {
+            conn.prepare(`
+        UPDATE player_stats 
+        SET total_games_played = COALESCE(total_games_played, 0) + 1,
+            total_losses = COALESCE(total_losses, 0) + 1,
+            total_rt_earned = total_rt_earned + ?,
+            daily_rt_earned = daily_rt_earned + ?,
+            current_week = ?, weekly_score = ?,
+            current_season = ?, season_score = ?
+        WHERE user_id = ?
+      `).run(rtEarned, rtEarned, thisWeek, newWeeklyScore, thisSeason, newSeasonScore, userId);
+        }
+        else {
+            conn.prepare(`
+        UPDATE player_stats 
+        SET total_games_played = COALESCE(total_games_played, 0) + 1,
+            total_losses = COALESCE(total_losses, 0) + 1,
+            total_rt_earned = total_rt_earned + ?,
+            daily_rt_earned = ?,
+            last_played_date = ?,
+            current_week = ?, weekly_score = ?,
+            current_season = ?, season_score = ?
+        WHERE user_id = ?
+      `).run(rtEarned, rtEarned, today, thisWeek, newWeeklyScore, thisSeason, newSeasonScore, userId);
+        }
     }
     else {
-        query = `
-      SELECT ps.user_id, u.display_name, u.shelter_color, ps.total_wins as wins, ps.total_rt_earned as rt_earned
+        conn.prepare(`
+      INSERT INTO player_stats (user_id, total_wins, total_rt_earned, total_games_played, total_losses, daily_wins, last_win_date, daily_rt_earned, last_played_date, current_week, weekly_score, current_season, season_score)
+      VALUES (?, 0, ?, 1, 1, 0, NULL, ?, ?, ?, ?, ?, ?)
+    `).run(userId, rtEarned, rtEarned, today, thisWeek, rtEarned, thisSeason, rtEarned);
+    }
+    log(`Recorded loss for user ${userId}: +${rtEarned} RT, games_played+1, losses+1`);
+}
+/**
+ * Get leaderboard (daily, weekly, season, all-time, or games)
+ * Optional sort: wins, losses, games, score (composite/default)
+ */
+function getLeaderboard(type, limit = 10, sort = 'score') {
+    const conn = db();
+    const today = getTodayUTC();
+    const thisWeek = getCurrentWeekUTC();
+    const thisSeason = getCurrentSeasonUTC();
+    let rows;
+    if (type === 'games') {
+        rows = conn.prepare(`
+      SELECT ps.user_id, u.display_name, u.shelter_color, ps.total_wins as wins, ps.total_rt_earned as rt_earned,
+             COALESCE(ps.adoption_score_alltime, ps.total_rt_earned) as adoption_score,
+             COALESCE(ps.total_games_played, 0) as games_played, COALESCE(ps.total_losses, 0) as losses
       FROM player_stats ps
       JOIN users u ON ps.user_id = u.id
-      ORDER BY ps.total_wins DESC, ps.total_rt_earned DESC
+      ORDER BY COALESCE(ps.total_games_played, 0) DESC, ps.total_wins DESC
       LIMIT ?
-    `;
+    `).all(limit);
     }
-    const rows = type === 'daily'
-        ? conn.prepare(query).all(today, limit)
-        : conn.prepare(query).all(limit);
+    else if (type === 'daily') {
+        rows = conn.prepare(`
+      SELECT ps.user_id, u.display_name, u.shelter_color, ps.daily_wins as wins, ps.daily_rt_earned as rt_earned,
+             COALESCE(ps.adoption_score_daily, ps.daily_rt_earned) as adoption_score,
+             COALESCE(ps.total_games_played, 0) as games_played, COALESCE(ps.total_losses, 0) as losses
+      FROM player_stats ps
+      JOIN users u ON ps.user_id = u.id
+      WHERE ps.last_played_date = ?
+      ORDER BY COALESCE(ps.adoption_score_daily, ps.daily_rt_earned) DESC, ps.daily_wins DESC
+      LIMIT ?
+    `).all(today, limit);
+    }
+    else if (type === 'weekly') {
+        rows = conn.prepare(`
+      SELECT ps.user_id, u.display_name, u.shelter_color, ps.daily_wins as wins, ps.weekly_score as rt_earned,
+             ps.weekly_score as adoption_score,
+             COALESCE(ps.total_games_played, 0) as games_played, COALESCE(ps.total_losses, 0) as losses
+      FROM player_stats ps
+      JOIN users u ON ps.user_id = u.id
+      WHERE ps.current_week = ?
+      ORDER BY ps.weekly_score DESC
+      LIMIT ?
+    `).all(thisWeek, limit);
+    }
+    else if (type === 'season') {
+        rows = conn.prepare(`
+      SELECT ps.user_id, u.display_name, u.shelter_color, ps.daily_wins as wins, ps.season_score as rt_earned,
+             ps.season_score as adoption_score,
+             COALESCE(ps.total_games_played, 0) as games_played, COALESCE(ps.total_losses, 0) as losses
+      FROM player_stats ps
+      JOIN users u ON ps.user_id = u.id
+      WHERE ps.current_season = ?
+      ORDER BY ps.season_score DESC
+      LIMIT ?
+    `).all(thisSeason, limit);
+    }
+    else {
+        // All-time: support sort = wins | losses | games | score (Formula B: score uses reputation-weighted)
+        const baseScore = 'COALESCE(ps.adoption_score_alltime, ps.total_rt_earned)';
+        const rep = 'COALESCE(ps.reputation, 50)';
+        const weightedScore = `(${baseScore} * (1 + ${rep} / 100.0))`;
+        const orderBy = sort === 'wins'
+            ? 'ORDER BY ps.total_wins DESC, ps.total_rt_earned DESC'
+            : sort === 'losses'
+                ? 'ORDER BY COALESCE(ps.total_losses, 0) DESC, ps.total_wins DESC'
+                : sort === 'games'
+                    ? 'ORDER BY COALESCE(ps.total_games_played, 0) DESC, ps.total_wins DESC'
+                    : `ORDER BY ${weightedScore} DESC, ps.total_wins DESC`;
+        rows = conn.prepare(`
+      SELECT ps.user_id, u.display_name, u.shelter_color, ps.total_wins as wins, ps.total_rt_earned as rt_earned,
+             COALESCE(ps.adoption_score_alltime, ps.total_rt_earned) as adoption_score,
+             COALESCE(ps.total_games_played, 0) as games_played, COALESCE(ps.total_losses, 0) as losses
+      FROM player_stats ps
+      JOIN users u ON ps.user_id = u.id
+      ${orderBy}
+      LIMIT ?
+    `).all(limit);
+    }
     return rows.map((row, index) => ({
         rank: index + 1,
         userId: row.user_id,
         displayName: row.display_name,
         wins: row.wins,
         rtEarned: row.rt_earned,
+        gamesPlayed: row.games_played,
+        losses: row.losses,
+        adoptionScore: row.adoption_score,
         shelterColor: row.shelter_color,
     }));
 }
@@ -116,7 +335,7 @@ function getLeaderboard(type, limit = 10) {
  */
 function getUserRank(userId, type) {
     const conn = db();
-    const today = new Date().toISOString().split('T')[0];
+    const today = getTodayUTC();
     // Get user stats
     const userRow = conn.prepare(`
     SELECT ps.*, u.display_name
@@ -158,9 +377,11 @@ function getUserRank(userId, type) {
  * Top 10 daily winners get a gift chest
  */
 function grantDailyRewards() {
-    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const d = new Date();
+    const yesterdayDate = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - 1));
+    const yesterday = `${yesterdayDate.getUTCFullYear()}-${String(yesterdayDate.getUTCMonth() + 1).padStart(2, '0')}-${String(yesterdayDate.getUTCDate()).padStart(2, '0')}`;
     const conn = db();
-    // Get yesterday's top 10
+    // Get yesterday's top 10 (UTC day)
     const topPlayers = conn.prepare(`
     SELECT ps.user_id, ps.daily_wins
     FROM player_stats ps

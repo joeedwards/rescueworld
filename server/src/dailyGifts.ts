@@ -1,9 +1,12 @@
 /**
  * Daily Gift System
- * 
+ *
  * Only signed-in users can claim daily gifts.
  * 7-day cycle with increasing rewards.
  * Missing a day doesn't reset progress, just skips that day's reward.
+ *
+ * All dates use UTC (GMT/UTC 0). The "day" rolls over at midnight UTC, so e.g.
+ * PST players (UTC-8) can claim the next day's gift at 5pm PST (01:00 UTC next day).
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
@@ -59,8 +62,13 @@ export interface DailyGiftStatus {
   isNewUser?: boolean; // True if this is a new user with registration gift pending
 }
 
-function getTodayDate(): string {
-  return new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+/** Current calendar date in UTC (YYYY-MM-DD). Game server uses UTC for daily reset. */
+function getTodayDateUTC(): string {
+  const d = new Date();
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 export function getDailyGiftStatus(userId: string): DailyGiftStatus {
@@ -71,7 +79,7 @@ export function getDailyGiftStatus(userId: string): DailyGiftStatus {
     'SELECT last_claim_date, current_day, total_claims FROM daily_gifts WHERE user_id = ?'
   ).get(userId) as { last_claim_date: string; current_day: number; total_claims: number } | undefined;
   
-  const today = getTodayDate();
+  const today = getTodayDateUTC();
   
   if (!row) {
     // First time - user can claim day 1
@@ -114,7 +122,7 @@ export function grantRegistrationGift(userId: string): {
   ensureReferralStorage();
   initSqlite();
   
-  const today = getTodayDate();
+  const today = getTodayDateUTC();
   
   // Check if user already has daily gifts (not a new registration)
   const existingRow = db().prepare(
@@ -157,7 +165,7 @@ export function claimDailyGift(userId: string): {
   ensureReferralStorage();
   initSqlite();
   
-  const today = getTodayDate();
+  const today = getTodayDateUTC();
   
   const row = db().prepare(
     'SELECT last_claim_date, current_day, total_claims FROM daily_gifts WHERE user_id = ?'

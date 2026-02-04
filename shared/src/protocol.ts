@@ -3,7 +3,7 @@
  * Snapshot: shelters (players) with size/petsInside, strays (pets), adoption zones.
  */
 
-import type { GameSnapshot, PlayerState, PetState, AdoptionZoneState, PickupState, ShelterState } from './types';
+import type { GameSnapshot, PlayerState, PetState, AdoptionZoneState, PickupState, ShelterState, BreederShelterState } from './types';
 import type { InputFlags } from './types';
 
 export const MSG_INPUT = 0x01;
@@ -52,6 +52,7 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
   const adoptionZones = snap.adoptionZones ?? [];
   const pickups = snap.pickups ?? [];
   const shelters = snap.shelters ?? [];
+  const breederShelters = snap.breederShelters ?? [];
   // msg(1), tick(4), matchEndAt(4), matchEndedEarly(1), winnerId(string), totalMatchAdoptions(4), scarcityLevel(1), matchDurationMs(4), numPlayers(1)
   let size = 1 + 4 + 4 + 1 + 1 + encoder.encode(snap.winnerId ?? '').length + 4 + 1 + 4 + 1;
   for (const p of players) {
@@ -67,7 +68,7 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
   }
   size += 2; // Uint16 for pet count (large maps can have 255+ pets)
   for (const pet of pets) {
-    size += 1 + encoder.encode(pet.id).length + 4 * 4 + 1 + (pet.insideShelterId ? encoder.encode(pet.insideShelterId).length : 0);
+    size += 1 + encoder.encode(pet.id).length + 4 * 4 + 1 + (pet.insideShelterId ? encoder.encode(pet.insideShelterId).length : 0) + 1; // +1 petType
   }
   size += 1;
   for (const z of adoptionZones) {
@@ -77,7 +78,7 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
   for (const u of pickups) {
     size += 1 + encoder.encode(u.id).length + 4 + 4 + 1 + 1; // +1 for level byte
   }
-  // Shelters: count(1), then for each: id, ownerId, x, y, flags(1), numPets, pets, size(4), totalAdoptions(4)
+  // Shelters: count(1), then for each: id, ownerId, x, y, flags(1), numPets, pets, size(4), totalAdoptions(4), tier(1)
   size += 1;
   for (const s of shelters) {
     size += 1 + encoder.encode(s.id).length;
@@ -86,7 +87,12 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
     size += 1; // flags byte (hasAdoptionCenter, hasGravity, hasAdvertising)
     size += 1; // numPets
     for (const pid of s.petsInside) size += 1 + encoder.encode(pid).length;
-    size += 4 + 4; // size(4), totalAdoptions(4)
+    size += 4 + 4 + 1; // size(4), totalAdoptions(4), tier(1)
+  }
+  // Breeder shelters (mills)
+  size += 1;
+  for (const b of breederShelters) {
+    size += 1 + encoder.encode(b.id).length + 4 + 4 + 1 + 4; // id, x, y, level, size
   }
   const buf = new ArrayBuffer(size * 2); // No cap - large games need large buffers
   const view = new DataView(buf);
@@ -151,6 +157,7 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
     off += 4;
     if (pet.insideShelterId) off = writeString(view, off, pet.insideShelterId);
     else view.setUint8(off++, 0);
+    view.setUint8(off++, (pet.petType ?? 0) & 0xff);
   }
   view.setUint8(off++, adoptionZones.length);
   for (const z of adoptionZones) {
@@ -189,6 +196,18 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
     view.setFloat32(off, s.size, true);
     off += 4;
     view.setUint32(off, s.totalAdoptions >>> 0, true);
+    off += 4;
+    view.setUint8(off++, (s.tier ?? 1) & 0xff);
+  }
+  view.setUint8(off++, breederShelters.length);
+  for (const b of breederShelters) {
+    off = writeString(view, off, b.id);
+    view.setFloat32(off, b.x, true);
+    off += 4;
+    view.setFloat32(off, b.y, true);
+    off += 4;
+    view.setUint8(off++, (b.level ?? 1) & 0xff);
+    view.setFloat32(off, b.size, true);
     off += 4;
   }
   return buf.slice(0, off);
@@ -296,7 +315,8 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
     const { s: insideStr, next: inNext } = readString(view, off);
     off = inNext;
     const insideShelterId = insideStr === '' ? null : insideStr;
-    pets.push({ id, x, y, vx, vy, insideShelterId });
+    const petType = off < view.byteLength ? view.getUint8(off++) : 0;
+    pets.push({ id, x, y, vx, vy, insideShelterId, petType });
   }
   const numZones = view.getUint8(off++);
   const adoptionZones: AdoptionZoneState[] = [];
@@ -351,7 +371,22 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
     off += 4;
     const totalAdoptions = view.getUint32(off, true);
     off += 4;
-    shelters.push({ id, ownerId, x, y, hasAdoptionCenter, hasGravity, hasAdvertising, petsInside, size: shelterSize, totalAdoptions });
+    const tier = off < view.byteLength ? view.getUint8(off++) : (shelterSize < 100 ? 1 : shelterSize < 250 ? 2 : shelterSize < 500 ? 3 : shelterSize < 1000 ? 4 : 5);
+    shelters.push({ id, ownerId, x, y, hasAdoptionCenter, hasGravity, hasAdvertising, petsInside, size: shelterSize, totalAdoptions, tier });
+  }
+  const numBreederShelters = off < view.byteLength ? view.getUint8(off++) : 0;
+  const breederShelters: BreederShelterState[] = [];
+  for (let i = 0; i < numBreederShelters; i++) {
+    const { s: bid, next: bn1 } = readString(view, off);
+    off = bn1;
+    const bx = view.getFloat32(off, true);
+    off += 4;
+    const by = view.getFloat32(off, true);
+    off += 4;
+    const level = view.getUint8(off++);
+    const bsize = view.getFloat32(off, true);
+    off += 4;
+    breederShelters.push({ id: bid, x: bx, y: by, level, size: bsize });
   }
   return { 
     tick, 
@@ -366,5 +401,6 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
     adoptionZones, 
     pickups,
     shelters: shelters.length > 0 ? shelters : undefined,
+    breederShelters: breederShelters.length > 0 ? breederShelters : undefined,
   };
 }

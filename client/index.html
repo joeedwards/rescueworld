@@ -25,10 +25,10 @@
       display: flex; align-items: center; justify-content: space-between; padding: 0 16px;
       box-shadow: 0 4px 20px rgba(0,0,0,0.4);
     }
-    .top-bar .score { font: 700 18px/1 Rubik, sans-serif; color: #7bed9f; text-shadow: 0 0 12px rgba(123,237,159,0.4); }
+    .top-bar .score { font: 700 14px/1 Rubik, sans-serif; color: #7bed9f; text-shadow: 0 0 12px rgba(123,237,159,0.4); }
     .top-bar .game-clock { font: 600 14px/1 monospace; color: rgba(255,255,255,0.7); background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px; }
-    .top-bar .game-title { font: 700 16px/1 Rubik, sans-serif; color: rgba(255,255,255,0.9); letter-spacing: 0.12em; }
-    .top-bar .timer { font: 700 18px/1 Rubik, sans-serif; color: #fff; letter-spacing: 0.05em; }
+    .top-bar .game-title { display: none; }
+    .top-bar .timer { font: 700 14px/1 Rubik, sans-serif; color: #fff; letter-spacing: 0.05em; }
     .top-bar #auth-area { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .top-bar #auth-area.hidden { display: none; }
     .top-bar .auth-link { font: 600 12px/1 Rubik, sans-serif; color: rgba(255,255,255,0.85); text-decoration: none; }
@@ -37,7 +37,7 @@
     .top-bar .auth-guest { font: 600 12px/1 Rubik, sans-serif; color: rgba(255,255,255,0.6); margin-left: 4px; }
     .top-bar .settings-btn { background: none; border: none; color: rgba(255,255,255,0.8); font-size: 18px; cursor: pointer; padding: 0 4px; }
     .top-bar .settings-btn:hover { color: #7bed9f; }
-    .top-bar .ping-display { font: 600 11px Rubik, sans-serif; color: rgba(255,255,255,0.7); margin-left: 4px; }
+    .top-bar .ping-display { font: 600 10px Rubik, sans-serif; color: rgba(255,255,255,0.7); margin-left: 4px; }
     .switch-server { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: rgba(35,42,60,0.98); border: 2px solid #ff6b6b; border-radius: 12px; padding: 14px 20px; z-index: 55; text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
     .switch-server.hidden { display: none; }
     .switch-server p { font: 600 14px Rubik, sans-serif; color: #fff; margin-bottom: 10px; }
@@ -57,6 +57,30 @@
     .lobby-gift-btn.has-gift { animation: pulse-gift 1.5s infinite; }
     .fight-ally-overlay { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 70; background: rgba(35,42,60,0.98); border: 2px solid #7bed9f; border-radius: 12px; padding: 20px; text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
     .fight-ally-overlay.hidden { display: none; }
+    .ally-request-popup { position: fixed; top: 80px; left: 50%; transform: translateX(-50%); z-index: 75; background: rgba(35,42,60,0.98); border: 2px solid #7bed9f; border-radius: 10px; padding: 12px 16px; text-align: center; box-shadow: 0 6px 20px rgba(0,0,0,0.5); animation: ally-request-slide 0.3s ease-out; }
+    .ally-request-popup.hidden { display: none; }
+    @keyframes ally-request-slide { from { opacity: 0; transform: translateX(-50%) translateY(-20px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+    .ally-request-text { font: 600 13px Rubik, sans-serif; color: #fff; margin-bottom: 10px; }
+    .ally-request-text .requester { color: #7bed9f; font-weight: 700; }
+    .ally-request-btns { display: flex; gap: 10px; justify-content: center; }
+    .ally-request-btn { padding: 8px 16px; font: 600 12px Rubik, sans-serif; border-radius: 6px; cursor: pointer; border: none; }
+    .ally-request-btn.accept { background: #7bed9f; color: #1a1a2e; }
+    .ally-request-btn.deny { background: #ff6b6b; color: #fff; }
+    .transfer-confirm-popup { position: fixed; top: 80px; left: 50%; transform: translateX(-50%); z-index: 75; background: rgba(35,42,60,0.98); border: 2px solid #3b82f6; border-radius: 10px; padding: 14px 18px; text-align: center; box-shadow: 0 6px 20px rgba(0,0,0,0.5); }
+    .transfer-confirm-popup.hidden { display: none; }
+    .transfer-confirm-text { font: 600 13px Rubik, sans-serif; color: #fff; margin-bottom: 6px; }
+    .transfer-confirm-hint { font: 11px Rubik, sans-serif; color: rgba(255,255,255,0.7); margin-bottom: 12px; }
+    .transfer-confirm-btns { display: flex; gap: 10px; justify-content: center; }
+    .abandon-confirm-popup { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 200; background: rgba(35,42,60,0.98); border: 2px solid #ff9f43; border-radius: 12px; padding: 20px 24px; text-align: center; box-shadow: 0 8px 28px rgba(0,0,0,0.6); animation: abandon-popup-appear 0.2s ease-out; }
+    .abandon-confirm-popup.hidden { display: none; }
+    @keyframes abandon-popup-appear { from { opacity: 0; transform: translate(-50%, -50%) scale(0.9); } to { opacity: 1; transform: translate(-50%, -50%) scale(1); } }
+    .abandon-confirm-title { font: 700 16px Rubik, sans-serif; color: #ff9f43; margin-bottom: 10px; }
+    .abandon-confirm-text { font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); margin-bottom: 16px; line-height: 1.4; }
+    .abandon-confirm-btns { display: flex; gap: 12px; justify-content: center; }
+    .abandon-confirm-btn { padding: 10px 20px; font: 600 13px Rubik, sans-serif; border-radius: 8px; cursor: pointer; border: none; transition: transform 0.1s, opacity 0.1s; }
+    .abandon-confirm-btn:hover { transform: scale(1.03); }
+    .abandon-confirm-btn.confirm { background: #ff6b6b; color: #fff; }
+    .abandon-confirm-btn.cancel { background: rgba(255,255,255,0.15); color: #fff; }
     .fight-ally-title { font: 700 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 8px; }
     .fight-ally-name { font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); margin-bottom: 14px; }
     .fight-ally-btns { display: flex; gap: 12px; justify-content: center; }
@@ -95,6 +119,8 @@
     .settings-panel h3 { margin-bottom: 12px; font: 700 14px Rubik, sans-serif; color: #7bed9f; }
     .settings-panel label { display: block; margin-bottom: 8px; font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); cursor: pointer; }
     .settings-panel input[type="checkbox"] { margin-right: 8px; }
+    .settings-exit-lobby { display: block; width: 100%; margin: 12px 0 8px 0; padding: 8px 12px; font: 600 13px Rubik, sans-serif; background: rgba(231,76,60,0.3); border: 1px solid #e74c3c; border-radius: 8px; color: #ff6b6b; cursor: pointer; }
+    .settings-exit-lobby:hover { background: rgba(231,76,60,0.5); }
     .settings-close { margin-top: 12px; padding: 6px 12px; font: 600 12px Rubik, sans-serif; background: rgba(123,237,159,0.2); border: 1px solid #7bed9f; color: #7bed9f; border-radius: 6px; cursor: pointer; }
     #minimap-wrap {
       position: absolute; top: 56px; right: 12px; width: 132px; height: 132px;
@@ -105,6 +131,18 @@
     }
     #minimap { width: 120px; height: 120px; border-radius: 6px; display: block; background: #2d4a2d; cursor: grab; }
     #minimap:active { cursor: grabbing; }
+    #event-panel {
+      position: absolute; top: 56px; left: 12px; max-width: 200px; max-height: 180px; overflow-y: auto;
+      background: rgba(35,42,60,0.95); border: 2px solid #5eead4; border-radius: 10px; padding: 10px 12px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4); z-index: 50;
+    }
+    #event-panel.hidden { display: none; }
+    #event-panel .event-panel-title { font: 700 12px Rubik, sans-serif; color: #5eead4; margin-bottom: 8px; }
+    #event-panel .event-item { background: rgba(0,0,0,0.25); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+    #event-panel .event-item:last-child { margin-bottom: 0; }
+    #event-panel .event-name { font: 600 11px Rubik, sans-serif; color: #fff; margin-bottom: 4px; }
+    #event-panel .event-reqs { font: 10px Rubik, sans-serif; color: rgba(255,255,255,0.8); margin-bottom: 2px; }
+    #event-panel .event-time { font: 600 10px Rubik, sans-serif; color: #7bed9f; }
     .bottom-bar {
       position: absolute; bottom: 0; left: 0; right: 0; height: 72px;
       background: linear-gradient(0deg, rgba(30,35,50,0.97), rgba(22,26,38,0.97));
@@ -114,23 +152,28 @@
     }
     #carried { font: 600 14px Rubik, sans-serif; color: #ffd93d; }
     #tag-cooldown { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.7); }
-    .ground-btn, .port-btn, .build-shelter-btn {
-      position: absolute; bottom: 90px; padding: 12px 24px; border-radius: 8px;
-      font: 700 14px Rubik, sans-serif; cursor: pointer; border: 2px solid;
+    .ground-btn, .port-btn, .shelter-port-btn, .build-shelter-btn {
+      position: absolute; bottom: 90px; padding: 10px 16px; border-radius: 8px;
+      font: 700 13px Rubik, sans-serif; cursor: pointer; border: 2px solid;
       box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: all 0.15s;
     }
     .ground-btn { right: 16px; background: #7bed9f; color: #1a1a2e; border-color: #5cd98b; }
     .ground-btn:hover { background: #5cd98b; transform: translateY(-2px); }
-    .port-btn { right: 140px; background: #70a3ff; color: #1a1a2e; border-color: #5090f0; }
-    .port-btn:hover { background: #5090f0; transform: translateY(-2px); }
+    .port-btn { right: 230px; background: #c77dff; color: #1a1a2e; border-color: #a855f7; }
+    .port-btn:hover { background: #a855f7; transform: translateY(-2px); }
+    .shelter-port-btn { right: 120px; background: #10b981; color: #fff; border-color: #047857; }
+    .shelter-port-btn:hover { background: #047857; transform: translateY(-2px); }
+    .transfer-btn { right: 450px; background: #3b82f6; color: #fff; border-color: #2563eb; }
+    .transfer-btn:hover { background: #2563eb; transform: translateY(-2px); }
+    .transfer-btn.hidden { display: none; }
     .build-shelter-btn { right: 16px; background: #ffd93d; color: #1a1a2e; border-color: #e6c235; }
     .build-shelter-btn:hover { background: #e6c235; transform: translateY(-2px); }
     .build-shelter-btn:disabled { background: #888; border-color: #666; cursor: not-allowed; opacity: 0.6; }
-    .ground-btn.hidden, .port-btn.hidden, .build-shelter-btn.hidden, .center-van-btn.hidden { display: none; }
-    .center-van-btn, .center-shelter-btn { position: absolute; bottom: 90px; padding: 10px 16px; border-radius: 8px; font: 700 12px Rubik, sans-serif; cursor: pointer; border: 2px solid; box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: all 0.15s; }
-    .center-van-btn { right: 260px; border-color: #888; background: rgba(50,60,80,0.9); color: #fff; }
+    .ground-btn.hidden, .port-btn.hidden, .shelter-port-btn.hidden, .build-shelter-btn.hidden, .center-van-btn.hidden { display: none; }
+    .center-van-btn, .center-shelter-btn { position: absolute; bottom: 90px; padding: 8px 12px; border-radius: 8px; font: 700 11px Rubik, sans-serif; cursor: pointer; border: 2px solid; box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: all 0.15s; }
+    .center-van-btn { right: 340px; border-color: #888; background: rgba(50,60,80,0.9); color: #fff; }
     .center-van-btn:hover { background: rgba(70,80,100,0.95); transform: translateY(-2px); }
-    .center-shelter-btn { right: 340px; border-color: #7bed9f; background: rgba(50,80,60,0.9); color: #7bed9f; }
+    .center-shelter-btn { right: 430px; border-color: #7bed9f; background: rgba(50,80,60,0.9); color: #7bed9f; }
     .center-shelter-btn:hover { background: rgba(60,100,70,0.95); transform: translateY(-2px); }
     .center-shelter-btn.hidden { display: none; }
     .game-tokens { font: 700 14px Rubik, sans-serif; color: #ffd93d; margin-left: 12px; }
@@ -281,7 +324,7 @@
       position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
       background: linear-gradient(145deg, rgba(35,90,80,0.98), rgba(25,60,55,0.98));
       border: 3px solid #7bed9f; border-radius: 16px; padding: 20px 24px;
-      min-width: 340px; max-width: 420px;
+      width: min(520px, 92vw); min-width: 280px; max-width: 92vw; box-sizing: border-box;
       font: 600 14px Rubik, sans-serif; color: #fff;
       box-shadow: 0 12px 40px rgba(0,0,0,0.6);
       z-index: 95; display: none;
@@ -289,15 +332,25 @@
     #leaderboard-modal.show { display: block; }
     .leaderboard-header { text-align: center; margin-bottom: 16px; }
     .leaderboard-title { font: 700 22px Rubik, sans-serif; color: #7bed9f; margin-bottom: 12px; }
-    .leaderboard-tabs { display: flex; gap: 8px; justify-content: center; }
+    .leaderboard-tabs {
+      display: flex; flex-wrap: nowrap; gap: 6px; justify-content: flex-start;
+      overflow-x: auto; padding: 2px 2px 6px; -webkit-overflow-scrolling: touch;
+    }
+    .leaderboard-tabs::-webkit-scrollbar { height: 6px; }
+    .leaderboard-tabs::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.25); border-radius: 6px; }
+    .leaderboard-tabs::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); border-radius: 6px; }
     .leaderboard-tab {
-      padding: 8px 18px; font: 600 13px Rubik, sans-serif; border-radius: 6px;
+      padding: 6px 12px; font: 600 12px Rubik, sans-serif; border-radius: 6px;
       border: 2px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.2);
       color: rgba(255,255,255,0.8); cursor: pointer; transition: all 0.15s;
+      white-space: nowrap; flex: 0 0 auto;
     }
     .leaderboard-tab:hover { border-color: rgba(255,255,255,0.4); }
     .leaderboard-tab.active { border-color: #7bed9f; background: rgba(123,237,159,0.2); color: #7bed9f; }
-    .leaderboard-content { max-height: 300px; overflow-y: auto; margin-bottom: 12px; }
+    .leaderboard-sort { margin-top: 8px; display: flex; align-items: center; gap: 8px; justify-content: center; }
+    .leaderboard-sort label { font-size: 12px; color: rgba(255,255,255,0.8); }
+    .leaderboard-sort select { padding: 4px 8px; font-size: 12px; border-radius: 6px; background: rgba(0,0,0,0.3); color: #fff; border: 1px solid rgba(255,255,255,0.2); }
+    .leaderboard-content { min-height: 140px; max-height: 320px; overflow-y: auto; margin-bottom: 12px; padding-right: 4px; -webkit-overflow-scrolling: touch; }
     .leaderboard-entry {
       display: flex; align-items: center; gap: 12px; padding: 10px 12px;
       background: rgba(255,255,255,0.05); border-radius: 8px; margin-bottom: 6px;
@@ -318,6 +371,20 @@
     }
     .leaderboard-close:hover { color: #fff; }
     .leaderboard-empty { text-align: center; padding: 30px 20px; color: rgba(255,255,255,0.6); }
+    .leaderboard-sort.hidden { display: none; }
+    .match-history-entry {
+      display: grid; grid-template-columns: 80px 1fr auto auto auto auto;
+      gap: 10px; align-items: center; padding: 10px 12px;
+      background: rgba(255,255,255,0.05); border-radius: 8px; margin-bottom: 6px;
+      font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.9);
+    }
+    .match-history-result { font-weight: 700; }
+    .match-history-result.history-win { color: #7bed9f; }
+    .match-history-result.history-loss { color: #ff9f43; }
+    .match-history-result.history-stray { color: #ff6b6b; }
+    .match-history-result.history-quit { color: rgba(255,255,255,0.6); }
+    .match-history-rt { color: #ffd93d; }
+    .match-history-date { color: rgba(255,255,255,0.6); font-size: 11px; }
     
     #connection-overlay {
       position: fixed; inset: 0; background: rgba(26,26,46,0.95); display: flex; flex-direction: column;
@@ -441,6 +508,9 @@
     .landing-center .landing-music-row input[type="checkbox"] { margin: 0; }
     .landing-center .play-btn { padding: 14px 48px; font: 700 18px Rubik, sans-serif; background: #7bed9f; color: #1a1a2e; border: none; border-radius: 10px; cursor: pointer; margin: 16px 0; box-shadow: 0 4px 16px rgba(123,237,159,0.4); }
     .landing-center .play-btn:hover { background: #9bffbf; }
+    .landing-center .resume-btn { background: transparent; color: #7bed9f; border: 2px solid #7bed9f; margin-bottom: 4px; }
+    .landing-center .resume-btn:hover { background: rgba(123,237,159,0.2); }
+    #resume-match-btn.hidden { display: none; }
     .landing-center .auth-buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin: 12px 0; }
     .landing-center .auth-buttons a { font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); text-decoration: none; padding: 8px 16px; border: 2px solid rgba(255,255,255,0.3); border-radius: 8px; }
     .landing-center .auth-buttons a:hover { border-color: #7bed9f; color: #7bed9f; }
@@ -482,6 +552,10 @@
     .landing-shop { margin-top: 16px; }
     .landing-tokens { font: 600 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 8px; }
     .equipment-panel { background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.15); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+    .server-clock-wrap { margin-bottom: 12px; padding: 8px 10px; background: rgba(0,0,0,0.2); border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); font-size: 12px; }
+    .server-clock-label { color: rgba(255,255,255,0.6); margin-bottom: 4px; }
+    .server-clock-time { font: 600 13px Rubik, sans-serif; color: #5eead4; }
+    .server-clock-next-gift { margin-top: 4px; color: rgba(255,255,255,0.8); }
     .equipment-header { font: 700 13px Rubik, sans-serif; color: #ffd93d; margin-bottom: 10px; text-align: center; }
     .equipment-items { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .equipment-item { display: flex; align-items: center; gap: 6px; font: 600 11px Rubik, sans-serif; color: rgba(255,255,255,0.85); }
@@ -541,6 +615,19 @@
       <div class="leaderboard-tabs">
         <button type="button" class="leaderboard-tab active" data-type="alltime">All-Time</button>
         <button type="button" class="leaderboard-tab" data-type="daily">Today</button>
+        <button type="button" class="leaderboard-tab" data-type="weekly">Weekly</button>
+        <button type="button" class="leaderboard-tab" data-type="season">Season</button>
+        <button type="button" class="leaderboard-tab" data-type="games">Games</button>
+        <button type="button" class="leaderboard-tab" data-type="history">Match History</button>
+      </div>
+      <div class="leaderboard-sort">
+        <label for="leaderboard-sort">Sort by:</label>
+        <select id="leaderboard-sort">
+          <option value="score">Score</option>
+          <option value="wins">Wins</option>
+          <option value="losses">Losses</option>
+          <option value="games">Games played</option>
+        </select>
       </div>
     </div>
     <div class="leaderboard-content" id="leaderboard-content">
@@ -597,7 +684,11 @@
             </div>
             <div class="equipment-note" id="equip-note">Sign in to save equipment</div>
           </div>
-          
+          <div id="server-clock-wrap" class="server-clock-wrap">
+            <div class="server-clock-label">Game server (UTC)</div>
+            <div id="server-clock-time" class="server-clock-time">--:--:-- UTC</div>
+            <div id="server-clock-next-gift" class="server-clock-next-gift">Next daily gift: --</div>
+          </div>
           <div style="display:flex;gap:8px;margin-bottom:8px;">
             <button type="button" class="daily-gift-btn hidden" id="daily-gift-btn">🎁 Daily Gift</button>
             <button type="button" class="leaderboard-btn" id="leaderboard-btn">🏆 Leaderboard</button>
@@ -641,6 +732,7 @@
         <div class="landing-music-row">
           <label><input type="checkbox" id="landing-music-toggle" checked /> Music</label>
         </div>
+        <button type="button" id="resume-match-btn" class="play-btn resume-btn hidden">Resume Match</button>
         <button type="button" id="landing-play" class="play-btn">Play</button>
         <div class="auth-buttons" id="landing-auth-buttons">
           <a href="/auth/google">Sign in with Google</a>
@@ -664,7 +756,7 @@
       <aside class="landing-right">
         <h3>How To Play</h3>
         <p class="howto-text">Drive your <strong>van</strong> to rescue strays. Bring them to the <strong>Adoption Center</strong> (green zone) to adopt out, earn <strong>5 RT each</strong>.</p>
-        <p class="howto-text">Drive out <strong>Breeders</strong> by better feeding their pets! <strong>Don't let the breeders setup their own Store</strong>!</p>
+        <p class="howto-text">Drive out <strong>Breeders</strong> by better feeding their pets! <strong>Don't let the breeders setup a Mill</strong>!</p>
         <p class="howto-text">Build a <strong>shelter</strong> (250 RT), then buy an <strong>Adoption Center</strong> (250 RT) to adopt at your shelter for only 2RT each! Add <strong>Advertising and Gravity</strong> (200 and 300 RT) to pull strays!</p>
         <p class="howto-text">Press <span class="key">E</span> for build menu. First to <strong>51%</strong> wins!</p>
         <h4 class="howto-subtitle">Controls</h4>
@@ -687,13 +779,20 @@
     <p>From the project root run: <code>npm run dev</code></p>
     <p>That starts both the server (ports 4000, 4001) and this client (3000).</p>
   </div>
+  <div id="abandon-confirm-popup" class="abandon-confirm-popup hidden">
+    <p class="abandon-confirm-title">Start New Game?</p>
+    <p class="abandon-confirm-text">This will abandon your saved match.<br>Your progress will be lost.</p>
+    <div class="abandon-confirm-btns">
+      <button type="button" id="abandon-confirm-btn" class="abandon-confirm-btn confirm">Abandon &amp; Start New</button>
+      <button type="button" id="abandon-cancel-btn" class="abandon-confirm-btn cancel">Cancel</button>
+    </div>
+  </div>
   <div id="game-wrap">
   <canvas id="game"></canvas>
   <div id="ui">
     <div class="top-bar">
       <span class="score" id="score">Size: 1</span>
       <span class="game-clock" id="game-clock">00:00:00</span>
-      <span class="game-title">Adoptar.io</span>
       <span class="timer" id="timer">5:00</span>
       <span id="ping" class="ping-display"></span>
       <div id="auth-area"></div>
@@ -703,6 +802,7 @@
       <h3>Settings</h3>
       <label><input type="checkbox" id="music-toggle" checked /> Music</label>
       <label><input type="checkbox" id="sfx-toggle" checked /> Sound effects</label>
+      <button type="button" id="exit-to-lobby-btn" class="settings-exit-lobby">Exit to lobby</button>
       <button type="button" id="settings-close" class="settings-close">Close</button>
     </div>
     <div id="switch-server" class="switch-server hidden">
@@ -710,6 +810,10 @@
       <button type="button" id="switch-server-btn" class="switch-server-btn">Switch server</button>
     </div>
     <div id="minimap-wrap"><canvas id="minimap" width="120" height="120"></canvas></div>
+    <div id="event-panel" class="hidden">
+      <div class="event-panel-title">📢 Adoption Events</div>
+      <div id="event-panel-list"></div>
+    </div>
     <div class="bottom-bar">
       <span id="carried"></span>
       <span id="game-tokens" class="game-tokens">0 RT</span>
@@ -785,6 +889,21 @@
         <button type="button" id="fight-ally-ally" class="fight-ally-btn ally-btn">Ally</button>
       </div>
     </div>
+    <div id="ally-request-popup" class="ally-request-popup hidden">
+      <p class="ally-request-text"><span class="requester" id="ally-requester-name">Player</span> wants to ally!</p>
+      <div class="ally-request-btns">
+        <button type="button" id="ally-accept-btn" class="ally-request-btn accept">Accept</button>
+        <button type="button" id="ally-deny-btn" class="ally-request-btn deny">Deny</button>
+      </div>
+    </div>
+    <div id="transfer-confirm-popup" class="transfer-confirm-popup hidden">
+      <p class="transfer-confirm-text">Transfer <span id="transfer-confirm-count">0</span> pets to ally's shelter?</p>
+      <p class="transfer-confirm-hint">You get 30% adoption score, they get 70%.</p>
+      <div class="transfer-confirm-btns">
+        <button type="button" id="transfer-confirm-btn" class="ally-request-btn accept">Transfer</button>
+        <button type="button" id="transfer-cancel-btn" class="ally-request-btn deny">Cancel</button>
+      </div>
+    </div>
     <div id="cpu-warning" class="cpu-warning hidden">CPU attacking!</div>
     <div id="action-menu" class="action-menu hidden">
       <div class="action-menu-header">
@@ -850,7 +969,9 @@
       <div class="action-menu-hint">Press E again or click X to close</div>
     </div>
     <button type="button" id="ground-btn" class="ground-btn hidden">Ground Here</button>
-    <button type="button" id="port-btn" class="port-btn hidden">Port (0)</button>
+    <button type="button" id="port-btn" class="port-btn hidden">Random [P] (0)</button>
+    <button type="button" id="shelter-port-btn" class="shelter-port-btn hidden">Home [H] (0)</button>
+    <button type="button" id="transfer-btn" class="transfer-btn hidden">Transfer [T] 🤝</button>
     <button type="button" id="center-van-btn" class="center-van-btn hidden">📍 Van</button>
     <button type="button" id="center-shelter-btn" class="center-shelter-btn hidden">🏠 Shelter</button>
     <div id="how-to-play" class="hidden">

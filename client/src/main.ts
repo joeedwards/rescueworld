@@ -18,7 +18,8 @@ import {
   SPEED_BOOST_MULTIPLIER,
   COMBAT_MIN_SIZE,
 } from 'shared';
-import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED, PICKUP_TYPE_PORT, PICKUP_TYPE_BREEDER, VAN_MAX_CAPACITY } from 'shared';
+import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED, PICKUP_TYPE_PORT, PICKUP_TYPE_BREEDER, PICKUP_TYPE_SHELTER_PORT, VAN_MAX_CAPACITY } from 'shared';
+import { PET_TYPE_CAT, PET_TYPE_DOG, PET_TYPE_BIRD, PET_TYPE_RABBIT, PET_TYPE_SPECIAL } from 'shared';
 import {
   INPUT_LEFT,
   INPUT_RIGHT,
@@ -29,12 +30,64 @@ import {
   MSG_SNAPSHOT,
 } from 'shared';
 
-// Preload images
+// Preload images - try multiple paths for different deployment scenarios
 const breederMillImage = new Image();
-breederMillImage.src = '/breeder-mill.png';
 let breederMillImageLoaded = false;
-breederMillImage.onload = () => { breederMillImageLoaded = true; };
-import type { GameSnapshot, PlayerState, PetState, AdoptionZoneState, PickupState, ShelterState, BreederShelterState } from 'shared';
+
+// Try loading from root first, fallback to BASE_URL if it fails
+function loadBreederMillImage() {
+  const paths = ['/breeder-mill.png', '/rescueworld/breeder-mill.png'];
+  let pathIndex = 0;
+  
+  const tryNextPath = () => {
+    if (pathIndex >= paths.length) {
+      console.error('Failed to load breeder-mill.png from all paths');
+      return;
+    }
+    breederMillImage.src = paths[pathIndex];
+    pathIndex++;
+  };
+  
+  breederMillImage.onload = () => { 
+    breederMillImageLoaded = true;
+  };
+  breederMillImage.onerror = () => { 
+    console.warn('Failed to load breeder-mill.png from', breederMillImage.src);
+    tryNextPath();
+  };
+  
+  tryNextPath();
+}
+loadBreederMillImage();
+
+const adoptionEventImage = new Image();
+let adoptionEventImageLoaded = false;
+function loadAdoptionEventImage() {
+  const paths = ['/adoption-event.png', '/rescueworld/adoption-event.png'];
+  let pathIndex = 0;
+  const tryNextPath = () => {
+    if (pathIndex >= paths.length) {
+      console.error('[AdoptionEvent] Failed to load adoption-event.png from all paths:', paths);
+      return;
+    }
+    const currentPath = paths[pathIndex];
+    console.log(`[AdoptionEvent] Attempting to load image from: ${currentPath}`);
+    adoptionEventImage.src = currentPath;
+    pathIndex++;
+  };
+  adoptionEventImage.onload = () => {
+    adoptionEventImageLoaded = true;
+    console.log(`[AdoptionEvent] Image loaded successfully from: ${adoptionEventImage.src} (${adoptionEventImage.width}x${adoptionEventImage.height})`);
+  };
+  adoptionEventImage.onerror = (e) => {
+    console.error(`[AdoptionEvent] Failed to load from ${adoptionEventImage.src}:`, e);
+    tryNextPath();
+  };
+  tryNextPath();
+}
+loadAdoptionEventImage();
+
+import type { GameSnapshot, PlayerState, PetState, AdoptionZoneState, PickupState, ShelterState, BreederShelterState, AdoptionEvent } from 'shared';
 import {
   playMusic,
   playWelcome,
@@ -86,6 +139,12 @@ let lastProcessedInputSeq = -1;
 let lastKnownSize = 0;
 let lastTotalAdoptions = 0;
 let lastPetsInsideLength = 0;
+/** Van's pet IDs from previous snapshot (to detect which pets were just adopted) */
+let lastPetsInsideIds: string[] = [];
+/** Our shelter's pet IDs from previous snapshot (for shelter adoptions) */
+let lastShelterPetsInsideIds: string[] = [];
+/** Pet ID -> pet type (from previous snapshot) so we can show correct type in adoption animation */
+const lastPetTypesById = new Map<string, number>();
 let lastSpeedBoostUntil = 0;
 let matchEndPlayed = false;
 let matchEndTokensAwarded = false;
@@ -93,6 +152,8 @@ let growthPopUntil = 0;
 let currentRttMs = 0;
 let highLatencySince = 0;
 let pingIntervalId: ReturnType<typeof setInterval> | null = null;
+let serverClockNextMidnightUtc: string | null = null;
+let serverClockIntervalId: ReturnType<typeof setInterval> | null = null;
 const RTT_HIGH_MS = 200;
 const RTT_HIGH_DURATION_MS = 5000;
 
@@ -102,6 +163,8 @@ const ctx = canvas.getContext('2d')!;
 const minimap = document.getElementById('minimap') as HTMLCanvasElement;
 const minimapCtx = minimap.getContext('2d')!;
 const scoreEl = document.getElementById('score')!;
+const eventPanelEl = document.getElementById('event-panel')!;
+const eventPanelListEl = document.getElementById('event-panel-list')!;
 const carriedEl = document.getElementById('carried')!;
 const tagCooldownEl = document.getElementById('tag-cooldown')!;
 const timerEl = document.getElementById('timer')!;
@@ -111,6 +174,7 @@ const connectionOverlayEl = document.getElementById('connection-overlay')!;
 const howToPlayEl = document.getElementById('how-to-play')!;
 const settingsBtnEl = document.getElementById('settings-btn')!;
 const settingsPanelEl = document.getElementById('settings-panel')!;
+const exitToLobbyBtnEl = document.getElementById('exit-to-lobby-btn')!;
 const musicToggleEl = document.getElementById('music-toggle') as HTMLInputElement;
 const sfxToggleEl = document.getElementById('sfx-toggle') as HTMLInputElement;
 const settingsCloseEl = document.getElementById('settings-close')!;
@@ -160,6 +224,8 @@ const actionAdvertisingBtnEl = document.getElementById('action-advertising-btn')
 const actionVanSpeedBtnEl = document.getElementById('action-van-speed-btn') as HTMLButtonElement;
 const groundBtnEl = document.getElementById('ground-btn')!;
 const portBtnEl = document.getElementById('port-btn')!;
+const shelterPortBtnEl = document.getElementById('shelter-port-btn')!;
+const transferBtnEl = document.getElementById('transfer-btn')!;
 const buildShelterBtnEl = document.getElementById('build-shelter-btn') as HTMLButtonElement;
 const centerVanBtnEl = document.getElementById('center-van-btn')!;
 const centerShelterBtnEl = document.getElementById('center-shelter-btn')!;
@@ -191,6 +257,10 @@ const dailyGiftGridEl = document.getElementById('daily-gift-grid')!;
 const dailyGiftClaimBtnEl = document.getElementById('daily-gift-claim-btn') as HTMLButtonElement;
 const dailyGiftBtnEl = document.getElementById('daily-gift-btn')!;
 
+// Server clock (lobby)
+const serverClockTimeEl = document.getElementById('server-clock-time')!;
+const serverClockNextGiftEl = document.getElementById('server-clock-next-gift')!;
+
 // Leaderboard Elements
 const leaderboardModalEl = document.getElementById('leaderboard-modal')!;
 const leaderboardCloseEl = document.getElementById('leaderboard-close')!;
@@ -216,7 +286,7 @@ interface Inventory {
 let currentInventory: Inventory = { storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, signedIn: false };
 
 // Breeder Mini-Game State
-type PetType = 'dog' | 'cat' | 'horse' | 'bird';
+type PetType = 'dog' | 'cat' | 'horse' | 'bird' | 'rabbit';
 type FoodType = 'apple' | 'carrot' | 'chicken' | 'seeds' | 'water' | 'bowl';
 interface BreederPet {
   type: PetType;
@@ -228,10 +298,12 @@ interface BreederGameState {
   selectedPetIndex: number | null;
   timeLeft: number;
   timerInterval: ReturnType<typeof setInterval> | null;
+  addPetInterval: ReturnType<typeof setInterval> | null;
   totalPets: number;
   rescuedCount: number;
   level: number;
   selectedIngredients: FoodType[];
+  isMill?: boolean;
 }
 const breederGame: BreederGameState = {
   active: false,
@@ -239,6 +311,7 @@ const breederGame: BreederGameState = {
   selectedPetIndex: null,
   timeLeft: 30,
   timerInterval: null,
+  addPetInterval: null,
   totalPets: 0,
   rescuedCount: 0,
   level: 1,
@@ -257,8 +330,8 @@ const FOOD_COSTS: Record<FoodType, number> = {
 
 // Simple food matching for level 1-2 (single ingredient)
 const FOOD_WORKS_ON: Record<FoodType, PetType[]> = {
-  apple: ['horse'],
-  carrot: ['horse', 'bird'],
+  apple: ['horse', 'rabbit'],
+  carrot: ['horse', 'bird', 'rabbit'],
   chicken: ['dog', 'cat'],
   seeds: ['bird'],
   water: [], // Water alone doesn't work - needs combination
@@ -277,19 +350,19 @@ const MEAL_RECIPES: { [ingredientCount: number]: MealRecipe[] } = {
   2: [
     { ingredients: ['chicken', 'carrot'], worksOn: ['dog', 'cat'] },
     { ingredients: ['seeds', 'apple'], worksOn: ['bird'] },
-    { ingredients: ['apple', 'carrot'], worksOn: ['horse'] },
+    { ingredients: ['apple', 'carrot'], worksOn: ['horse', 'rabbit'] },
   ],
   // Level 6-9: 3 ingredients (add water)
   3: [
     { ingredients: ['water', 'chicken', 'carrot'], worksOn: ['dog', 'cat'] },
     { ingredients: ['water', 'seeds', 'apple'], worksOn: ['bird'] },
-    { ingredients: ['water', 'apple', 'carrot'], worksOn: ['horse'] },
+    { ingredients: ['water', 'apple', 'carrot'], worksOn: ['horse', 'rabbit'] },
   ],
   // Level 10+: 4 ingredients (add bowl)
   4: [
     { ingredients: ['bowl', 'water', 'chicken', 'carrot'], worksOn: ['dog', 'cat'] },
     { ingredients: ['bowl', 'water', 'seeds', 'apple'], worksOn: ['bird'] },
-    { ingredients: ['bowl', 'water', 'apple', 'carrot'], worksOn: ['horse'] },
+    { ingredients: ['bowl', 'water', 'apple', 'carrot'], worksOn: ['horse', 'rabbit'] },
   ],
 };
 
@@ -305,6 +378,7 @@ const PET_EMOJIS: Record<PetType, string> = {
   cat: '🐱',
   horse: '🐴',
   bird: '🐦',
+  rabbit: '🐰',
 };
 
 const COOKIE_CONSENT_KEY = 'cookieConsent';
@@ -343,25 +417,29 @@ interface AdoptionAnimation {
   fromY: number;
   toX: number;
   toY: number;
-  petType: 'dog' | 'cat' | 'horse' | 'bird';
+  /** Pet type (PET_TYPE_CAT etc.) so animation shows the actual adopted pet */
+  petType: number;
 }
 const adoptionAnimations: AdoptionAnimation[] = [];
 const ADOPTION_ANIMATION_DURATION = 800; // ms
-const ADOPTION_PET_EMOJIS = { dog: '🐕', cat: '🐈', horse: '🐴', bird: '🐦' };
+/** Emoji per pet type (PET_TYPE_CAT=0, DOG=1, BIRD=2, RABBIT=3, SPECIAL=4) */
+const ADOPTION_PET_EMOJIS: Record<number, string> = {
+  [PET_TYPE_CAT]: '🐈',
+  [PET_TYPE_DOG]: '🐕',
+  [PET_TYPE_BIRD]: '🐦',
+  [PET_TYPE_RABBIT]: '🐰',
+  [PET_TYPE_SPECIAL]: '⭐',
+};
 let adoptionAnimationId = 0;
 
-function triggerAdoptionAnimation(fromX: number, fromY: number, toX: number, toY: number, count: number): void {
-  const petTypes: Array<'dog' | 'cat' | 'horse' | 'bird'> = ['dog', 'cat', 'horse', 'bird'];
+/** Trigger adoption animation with the actual pet types that were adopted (from van or shelter). */
+function triggerAdoptionAnimation(fromX: number, fromY: number, toX: number, toY: number, petTypes: number[]): void {
   const now = Date.now();
-  
-  // Create staggered animations for each adopted pet
-  for (let i = 0; i < count; i++) {
-    const petType = petTypes[Math.floor(Math.random() * petTypes.length)];
-    // Stagger start times and add slight random offset to source position
+  for (let i = 0; i < petTypes.length; i++) {
+    const petType = petTypes[i] ?? PET_TYPE_CAT;
     const delay = i * 100;
     const offsetX = (Math.random() - 0.5) * 30;
     const offsetY = (Math.random() - 0.5) * 30;
-    
     adoptionAnimations.push({
       id: `adopt-${adoptionAnimationId++}`,
       startTime: now + delay,
@@ -398,6 +476,7 @@ type ReferralInfo = {
   tokensBonus: number;
 };
 let selectedMode: 'ffa' | 'teams' | 'solo' = 'ffa';
+let hasSavedMatch = false;
 const pendingBoosts = { sizeBonus: 0, speedBoost: false, adoptSpeed: false };
 let currentDisplayName: string | null = null;
 let isSignedIn = false;
@@ -519,8 +598,24 @@ let announcementEl: HTMLElement | null = null;
 let announcementAnimating = false;
 
 function showAnnouncement(messages: string[]): void {
+  // Limit queue size to prevent announcements from getting too stale
+  // If queue is already backed up, drop older announcements
+  const MAX_QUEUE_SIZE = 3;
   announcementQueue.push(...messages);
+  while (announcementQueue.length > MAX_QUEUE_SIZE) {
+    announcementQueue.shift(); // Drop oldest
+  }
   processAnnouncementQueue();
+}
+
+/** Clear all pending announcements and hide the banner immediately (used when exiting to lobby) */
+function clearAnnouncements(): void {
+  announcementQueue.length = 0;
+  announcementAnimating = false;
+  if (announcementEl) {
+    announcementEl.style.display = 'none';
+    announcementEl.innerHTML = '';
+  }
 }
 
 function processAnnouncementQueue(): void {
@@ -530,17 +625,24 @@ function processAnnouncementQueue(): void {
   announcementAnimating = true;
   
   // Determine if this is a positive (green) or negative (red) announcement
-  // GREEN: rescuing pets, shutting down camps, destroying shelters - GOOD things
-  // RED: breeders arriving, camps appearing, failed attempts, shelters forming - BAD things
-  const positiveKeywords = ['rescued', 'shut down', 'destroyed', 'saved', 'stopped', 'is shutting down'];
-  const negativeKeywords = ['arrived', 'appeared', 'failed', 'formed', 'expanding', 'breeding'];
+  // GREEN: rescuing pets, adoption events, shutting down camps - GOOD things
+  // RED: breeders arriving, stray warnings, failed attempts - BAD things
+  const positiveKeywords = [
+    'rescued', 'shut down', 'destroyed', 'saved', 'stopped', 'is shutting down',
+    'farmers market', 'school fair', 'petco', 'stadium', 'event started', 'partial win',
+    'dropped off', 'instant adoption', 'won '
+  ];
+  const negativeKeywords = [
+    'arrived', 'appeared', 'failed', 'formed', 'expanding', 'breeding',
+    'warning', 'danger', 'urgent', 'critical', 'strays on the map', 'game over at'
+  ];
   
   const msgLower = message.toLowerCase();
   const isPositive = positiveKeywords.some(kw => msgLower.includes(kw));
   const isNegative = negativeKeywords.some(kw => msgLower.includes(kw));
   
-  // If explicitly positive, use green; otherwise use red (default for warnings/bad news)
-  const useGreen = isPositive && !isNegative;
+  // If explicitly positive, use green; if negative (warnings), use red; else green for neutral/event
+  const useGreen = (isPositive && !isNegative) || (!isNegative && (msgLower.includes('event') || msgLower.includes('adoption')));
   
   // Colors based on message type
   const bgColor = useGreen ? 'rgba(46,204,113,' : 'rgba(255,107,107,'; // green or red
@@ -561,7 +663,7 @@ function processAnnouncementQueue(): void {
     left: 0;
     width: 100%;
     height: 40px;
-    background: linear-gradient(90deg, ${bgColor}0) 0%, ${bgColor}0.9) 15%, ${bgColor}0.9) 85%, ${bgColor}0) 100%);
+    background: linear-gradient(90deg, ${bgColor}0) 0%, ${bgColor}0.4) 15%, ${bgColor}0.4) 85%, ${bgColor}0) 100%);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -570,14 +672,14 @@ function processAnnouncementQueue(): void {
     pointer-events: none;
   `;
   
-  // Create scrolling text
+  // Create scrolling text - 8s animation (slower for readability)
   const textEl = document.createElement('div');
   textEl.style.cssText = `
     white-space: nowrap;
     font: bold 18px 'Rubik', sans-serif;
     color: #fff;
     text-shadow: 2px 2px 4px rgba(0,0,0,0.8), 0 0 10px ${glowColor};
-    animation: announcementScroll 9s linear forwards;
+    animation: announcementScroll 8s linear forwards;
   `;
   textEl.textContent = `${icon} ${message} ${icon}`;
   
@@ -588,8 +690,8 @@ function processAnnouncementQueue(): void {
     style.textContent = `
       @keyframes announcementScroll {
         0% { transform: translateX(100vw); opacity: 0; }
-        10% { opacity: 1; }
-        90% { opacity: 1; }
+        5% { opacity: 1; }
+        95% { opacity: 1; }
         100% { transform: translateX(-100vw); opacity: 0; }
       }
     `;
@@ -609,6 +711,110 @@ function processAnnouncementQueue(): void {
     }
     processAnnouncementQueue();
   });
+}
+
+// --- Ally Request Popup ---
+const allyRequestPopupEl = document.getElementById('ally-request-popup') as HTMLElement;
+const allyRequesterNameEl = document.getElementById('ally-requester-name') as HTMLElement;
+const allyAcceptBtnEl = document.getElementById('ally-accept-btn') as HTMLButtonElement;
+const allyDenyBtnEl = document.getElementById('ally-deny-btn') as HTMLButtonElement;
+let pendingAllyRequestFromId: string | null = null;
+let allyRequestTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function showAllyRequestPopup(fromId: string, fromName: string): void {
+  if (!allyRequestPopupEl || !allyRequesterNameEl) return;
+  pendingAllyRequestFromId = fromId;
+  allyRequesterNameEl.textContent = fromName;
+  allyRequestPopupEl.classList.remove('hidden');
+  
+  // Auto-hide after 10 seconds
+  if (allyRequestTimeout) clearTimeout(allyRequestTimeout);
+  allyRequestTimeout = setTimeout(() => {
+    hideAllyRequestPopup();
+  }, 10000);
+}
+
+function hideAllyRequestPopup(): void {
+  if (allyRequestPopupEl) allyRequestPopupEl.classList.add('hidden');
+  pendingAllyRequestFromId = null;
+  if (allyRequestTimeout) {
+    clearTimeout(allyRequestTimeout);
+    allyRequestTimeout = null;
+  }
+}
+
+function respondToAllyRequest(accept: boolean): void {
+  if (!pendingAllyRequestFromId || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  gameWs.send(JSON.stringify({ 
+    type: 'allyResponse', 
+    targetId: pendingAllyRequestFromId, 
+    accept 
+  }));
+  hideAllyRequestPopup();
+}
+
+if (allyAcceptBtnEl) {
+  allyAcceptBtnEl.addEventListener('click', () => respondToAllyRequest(true));
+}
+
+// --- Transfer confirmation popup ---
+const transferConfirmPopupEl = document.getElementById('transfer-confirm-popup') as HTMLElement;
+const transferConfirmCountEl = document.getElementById('transfer-confirm-count') as HTMLElement;
+const transferConfirmBtnEl = document.getElementById('transfer-confirm-btn') as HTMLButtonElement;
+const transferCancelBtnEl = document.getElementById('transfer-cancel-btn') as HTMLButtonElement;
+let pendingTransferShelterId: string | null = null;
+
+function showTransferConfirmPopup(petCount: number, targetShelterId: string): void {
+  if (!transferConfirmPopupEl || !transferConfirmCountEl) return;
+  pendingTransferShelterId = targetShelterId;
+  transferConfirmCountEl.textContent = String(petCount);
+  transferConfirmPopupEl.classList.remove('hidden');
+}
+
+function hideTransferConfirmPopup(): void {
+  if (transferConfirmPopupEl) transferConfirmPopupEl.classList.add('hidden');
+  pendingTransferShelterId = null;
+}
+
+if (transferConfirmBtnEl) {
+  transferConfirmBtnEl.addEventListener('click', () => {
+    if (!gameWs || gameWs.readyState !== WebSocket.OPEN || !pendingTransferShelterId) return;
+    gameWs.send(JSON.stringify({ type: 'transferPets', targetShelterId: pendingTransferShelterId }));
+    hideTransferConfirmPopup();
+  });
+}
+if (transferCancelBtnEl) {
+  transferCancelBtnEl.addEventListener('click', hideTransferConfirmPopup);
+}
+if (allyDenyBtnEl) {
+  allyDenyBtnEl.addEventListener('click', () => respondToAllyRequest(false));
+}
+
+// --- Abandon match confirmation popup ---
+const abandonConfirmPopupEl = document.getElementById('abandon-confirm-popup') as HTMLElement;
+const abandonConfirmBtnEl = document.getElementById('abandon-confirm-btn') as HTMLButtonElement;
+const abandonCancelBtnEl = document.getElementById('abandon-cancel-btn') as HTMLButtonElement;
+let pendingAbandonCallback: (() => void) | null = null;
+
+function showAbandonConfirmPopup(onConfirm: () => void): void {
+  if (!abandonConfirmPopupEl) return;
+  pendingAbandonCallback = onConfirm;
+  abandonConfirmPopupEl.classList.remove('hidden');
+}
+
+function hideAbandonConfirmPopup(): void {
+  if (abandonConfirmPopupEl) abandonConfirmPopupEl.classList.add('hidden');
+  pendingAbandonCallback = null;
+}
+
+if (abandonConfirmBtnEl) {
+  abandonConfirmBtnEl.addEventListener('click', () => {
+    if (pendingAbandonCallback) pendingAbandonCallback();
+    hideAbandonConfirmPopup();
+  });
+}
+if (abandonCancelBtnEl) {
+  abandonCancelBtnEl.addEventListener('click', hideAbandonConfirmPopup);
 }
 
 function getReferralBasePath(): string {
@@ -690,6 +896,35 @@ function updateReferralUI(): void {
   else referralClaimBtn.classList.add('referral-hidden');
 }
 
+async function fetchSavedMatchStatus(): Promise<void> {
+  if (!currentUserId) {
+    hasSavedMatch = false;
+    updateResumeMatchUI();
+    return;
+  }
+  try {
+    const res = await fetch('/api/saved-match', { credentials: 'include' });
+    const data = await res.json();
+    hasSavedMatch = !!data.hasSavedMatch;
+  } catch {
+    hasSavedMatch = false;
+  }
+  updateResumeMatchUI();
+}
+
+function updateResumeMatchUI(): void {
+  const resumeBtn = document.getElementById('resume-match-btn');
+  const playBtn = document.getElementById('landing-play');
+  if (!resumeBtn || !playBtn) return;
+  if (hasSavedMatch && selectedMode === 'solo') {
+    resumeBtn.classList.remove('hidden');
+    playBtn.textContent = 'Start new game';
+  } else {
+    resumeBtn.classList.add('hidden');
+    playBtn.textContent = 'Play';
+  }
+}
+
 async function fetchAndRenderAuth(): Promise<void> {
   try {
     const res = await fetch('/auth/me', { credentials: 'include' });
@@ -745,6 +980,7 @@ async function fetchAndRenderAuth(): Promise<void> {
   await fetchReferralInfo();
   updateReferralUI();
   await fetchDailyGiftStatus();
+  await fetchSavedMatchStatus();
   
   // Check for new registration (from OAuth redirect)
   const urlParams = new URLSearchParams(window.location.search);
@@ -1087,14 +1323,9 @@ canvas.addEventListener('contextmenu', (e) => {
   e.preventDefault();
 });
 
-// --- Click on other shelters to send ally request ---
-canvas.addEventListener('click', (e) => {
+// --- Click/Tap on other shelters to send ally request ---
+function handleAllyRequestAtPosition(screenX: number, screenY: number): void {
   if (!latestSnapshot || !myPlayerId || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const screenX = (e.clientX - rect.left) * scaleX;
-  const screenY = (e.clientY - rect.top) * scaleY;
   const cam = getCamera();
   const worldX = screenX + cam.x;
   const worldY = screenY + cam.y;
@@ -1112,6 +1343,30 @@ canvas.addEventListener('click', (e) => {
       break;
     }
   }
+}
+
+canvas.addEventListener('click', (e) => {
+  if (!latestSnapshot || !myPlayerId || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const screenX = (e.clientX - rect.left) * scaleX;
+  const screenY = (e.clientY - rect.top) * scaleY;
+  handleAllyRequestAtPosition(screenX, screenY);
+});
+
+// Mobile touch support for ally requests
+canvas.addEventListener('touchend', (e) => {
+  if (!latestSnapshot || !myPlayerId || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  // Only process single-finger taps (not joystick gestures)
+  if (e.changedTouches.length !== 1) return;
+  const touch = e.changedTouches[0];
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const screenX = (touch.clientX - rect.left) * scaleX;
+  const screenY = (touch.clientY - rect.top) * scaleY;
+  handleAllyRequestAtPosition(screenX, screenY);
 });
 
 window.addEventListener('keydown', onKeyDown);
@@ -1198,7 +1453,7 @@ let lastPanClientY = 0;
 // --- Local player display position (smoothed so shelter doesn't snap on server updates) ---
 let playerDisplayX: number | null = null;
 let playerDisplayY: number | null = null;
-const PLAYER_DISPLAY_SMOOTH = 0.28; // lerp toward predicted position per frame
+const PLAYER_DISPLAY_SMOOTH = 0.2; // Smoother camera follow (lower = more smoothing, less jitter)
 
 function getCamera(): { x: number; y: number; w: number; h: number } {
   const w = canvas.width;
@@ -1325,7 +1580,7 @@ function showConnectionError(message: string): void {
 }
 
 // --- Connect flow ---
-async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 'solo' }): Promise<void> {
+async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 'solo'; abandon?: boolean }): Promise<void> {
   if (pingIntervalId) {
     clearInterval(pingIntervalId);
     pingIntervalId = null;
@@ -1421,6 +1676,18 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           myPlayerId = msg.playerId;
           playWelcome();
         }
+        if (msg.type === 'savedMatchExpired') {
+          hasSavedMatch = false;
+          updateResumeMatchUI();
+          fetchSavedMatchStatus();
+          const reason = typeof msg.reason === 'string' ? msg.reason : 'Match already ended';
+          showToast(reason, 'info');
+          if (gameWs) {
+            gameWs.close();
+            gameWs = null;
+          }
+          connectionOverlayEl?.classList.add('hidden');
+        }
         if (msg.type === 'matchState' && typeof msg.phase === 'string') {
           matchPhase = msg.phase as MatchPhase;
           countdownRemainingSec = typeof msg.countdownRemainingSec === 'number' ? msg.countdownRemainingSec : 0;
@@ -1468,7 +1735,20 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         // Breeder mini-game messages
         if (msg.type === 'breederStart' && typeof msg.petCount === 'number') {
           const level = typeof msg.level === 'number' ? msg.level : 1;
-          startBreederMiniGame(msg.petCount, level);
+          const isMill = !!msg.isMill;
+          const timeLimitSeconds = typeof msg.timeLimitSeconds === 'number' ? msg.timeLimitSeconds : undefined;
+          const addPetIntervalSeconds = typeof msg.addPetIntervalSeconds === 'number' ? msg.addPetIntervalSeconds : undefined;
+          startBreederMiniGame(msg.petCount, level, { isMill, timeLimitSeconds, addPetIntervalSeconds });
+        }
+        if (msg.type === 'breederAddPet') {
+          if (breederGame.active) {
+            const petTypes: PetType[] = ['dog', 'cat', 'horse', 'bird', 'rabbit'];
+            const type = petTypes[Math.floor(Math.random() * petTypes.length)];
+            breederGame.pets.push({ type, rescued: false });
+            breederGame.totalPets++;
+            renderBreederPets();
+            renderSelectedIngredients();
+          }
         }
         if (msg.type === 'breederRewards') {
           const tokenBonus = typeof msg.tokenBonus === 'number' ? msg.tokenBonus : 0;
@@ -1478,6 +1758,19 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         // Match-wide announcements
         if (msg.type === 'announcement' && Array.isArray(msg.messages)) {
           showAnnouncement(msg.messages);
+        }
+        // Incoming ally request from another player
+        if (msg.type === 'allyRequestReceived' && typeof msg.fromId === 'string' && typeof msg.fromName === 'string') {
+          showAllyRequestPopup(msg.fromId, msg.fromName);
+        }
+        // Pet transfer result
+        if (msg.type === 'transferResult') {
+          hideTransferConfirmPopup();
+          if (msg.success && typeof msg.count === 'number') {
+            showToast(`Transferred ${msg.count} pets! You +${msg.senderScore ?? 0} score, ally +${msg.receiverScore ?? 0}`);
+          } else if (typeof msg.reason === 'string') {
+            showToast(msg.reason);
+          }
         }
       } catch {
         // ignore
@@ -1539,24 +1832,29 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         lastSpeedBoostUntil = me.speedBoostUntil ?? 0;
         if (me.totalAdoptions > lastTotalAdoptions) {
           playAdoption();
-          // Trigger adoption animation
           const adoptionCount = me.totalAdoptions - lastTotalAdoptions;
           const myShelter = latestSnapshot?.shelters?.find(s => s.ownerId === myPlayerId);
-          
+          // Which pet IDs were just adopted? (they were in our van/shelter last frame, now gone)
+          let adoptedIds: string[];
           if (myShelter?.hasAdoptionCenter) {
-            // Pets leaving shelter and being adopted (float up and fade out)
-            triggerAdoptionAnimation(myShelter.x, myShelter.y, myShelter.x, myShelter.y - 100, adoptionCount);
+            adoptedIds = lastShelterPetsInsideIds.filter((id) => !myShelter.petsInside.includes(id)).slice(0, adoptionCount);
+            const types = adoptedIds.map((id) => lastPetTypesById.get(id) ?? PET_TYPE_CAT);
+            triggerAdoptionAnimation(myShelter.x, myShelter.y, myShelter.x, myShelter.y - 100, types);
           } else {
-            // Pets going from van to main adoption center
+            adoptedIds = lastPetsInsideIds.filter((id) => !me.petsInside.includes(id)).slice(0, adoptionCount);
+            const types = adoptedIds.map((id) => lastPetTypesById.get(id) ?? PET_TYPE_CAT);
             const zone = latestSnapshot?.adoptionZones?.[0];
-            if (zone) {
-              triggerAdoptionAnimation(me.x, me.y, zone.x, zone.y, adoptionCount);
-            }
+            if (zone) triggerAdoptionAnimation(me.x, me.y, zone.x, zone.y, types);
           }
         }
         lastTotalAdoptions = me.totalAdoptions;
         if (me.petsInside.length > lastPetsInsideLength) playStrayCollected();
         lastPetsInsideLength = me.petsInside.length;
+        // Track van and shelter pet IDs + all pet types for next frame (so we know types of adopted pets)
+        lastPetsInsideIds = [...me.petsInside];
+        const mySh = latestSnapshot?.shelters?.find((s) => s.ownerId === myPlayerId);
+        lastShelterPetsInsideIds = mySh ? [...mySh.petsInside] : [];
+        for (const p of snap.pets) lastPetTypesById.set(p.id, p.petType ?? PET_TYPE_CAT);
         lastKnownSize = me.size;
         const prevX = predictedPlayer?.x ?? me.x;
         const prevY = predictedPlayer?.y ?? me.y;
@@ -1630,16 +1928,17 @@ function tick(now: number): void {
   const matchOver = latestSnapshot != null && latestSnapshot.matchEndAt > 0 && latestSnapshot.tick >= latestSnapshot.matchEndAt;
   const meForActive = latestSnapshot?.players.find((p) => p.id === myPlayerId);
   const gameActive = matchPhase === 'playing' && !matchOver && !meForActive?.eliminated;
+  const canMove = gameActive && !breederGame.active; // Can't move during breeder minigame
 
-  // Send input at server tick rate (only when match is playing and not over)
-  if (gameActive && gameWs?.readyState === WebSocket.OPEN && now - lastInputSendTime >= TICK_MS) {
+  // Send input at server tick rate (only when match is playing and not over, and not in minigame)
+  if (canMove && gameWs?.readyState === WebSocket.OPEN && now - lastInputSendTime >= TICK_MS) {
     lastInputSendTime = now;
     const buf = encodeInput(inputFlags, inputSeq++);
     gameWs.send(buf);
   }
 
-  // Advance local player prediction every frame (smooth movement and camera) — freeze when lobby/countdown or match over
-  if (gameActive && predictedPlayer && myPlayerId) {
+  // Advance local player prediction every frame (smooth movement and camera) — freeze when lobby/countdown, match over, or in minigame
+  if (canMove && predictedPlayer && myPlayerId) {
     const prevX = predictedPlayer.x;
     const prevY = predictedPlayer.y;
     predictedPlayer = predictPlayerByDt(predictedPlayer, inputFlags, dt);
@@ -1808,7 +2107,8 @@ function drawMapBackground(cam: { x: number; y: number; w: number; h: number }):
 function drawAdoptionZone(z: AdoptionZoneState): void {
   const cx = z.x;
   const cy = z.y;
-  const r = z.radius;
+  const r = z.radius || ADOPTION_ZONE_RADIUS; // Fallback if radius is missing
+  if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(r)) return;
   ctx.save();
   ctx.strokeStyle = 'rgba(123, 237, 159, 0.6)';
   ctx.lineWidth = 4;
@@ -1822,6 +2122,49 @@ function drawAdoptionZone(z: AdoptionZoneState): void {
   ctx.textAlign = 'center';
   ctx.fillText('ADOPTION CENTER', cx, cy - r - 8);
   ctx.fillText('Bring pets here to adopt out', cx, cy);
+  ctx.restore();
+}
+
+const ADOPTION_EVENT_RADIUS = 350;
+
+function drawAdoptionEvent(ev: AdoptionEvent, nowTick: number): void {
+  const cx = ev.x;
+  const cy = ev.y;
+  const r = ADOPTION_EVENT_RADIUS;
+  const remaining = Math.max(0, ev.startTick + ev.durationTicks - nowTick);
+  const secLeft = Math.ceil(remaining / 25);
+  const imgSize = 80;
+
+  ctx.save();
+  if (adoptionEventImageLoaded) {
+    ctx.drawImage(adoptionEventImage, cx - imgSize / 2, cy - imgSize / 2, imgSize, imgSize);
+  } else {
+    ctx.fillStyle = 'rgba(255, 193, 7, 0.4)';
+    ctx.beginPath();
+    ctx.arc(cx, cy, imgSize / 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#ffc107';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(255, 193, 7, 0.8)';
+  ctx.lineWidth = 4;
+  ctx.setLineDash([12, 8]);
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(255, 193, 7, 0.12)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#ffc107';
+  ctx.font = 'bold 14px Rubik, sans-serif';
+  ctx.textAlign = 'center';
+  const typeName = ev.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  ctx.fillText(`📢 ${typeName}`, cx, cy - r - 10);
+  ctx.font = '12px Rubik, sans-serif';
+  ctx.fillText(`${secLeft}s left - bring pets here!`, cx, cy + imgSize / 2 + 14);
   ctx.restore();
 }
 
@@ -2129,8 +2472,9 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
 function drawShelter(shelter: ShelterState, isOwner: boolean, ownerColor?: string): void {
   const cx = shelter.x;
   const cy = shelter.y;
+  // Cap visual size to 400px to prevent overflow (logical size can be larger for win condition)
   const baseSize = SHELTER_BASE_RADIUS + shelter.size * SHELTER_RADIUS_PER_SIZE;
-  const half = Math.max(40, baseSize);
+  const half = Math.min(400, Math.max(40, baseSize));
   
   ctx.save();
   ctx.shadowColor = 'rgba(0,0,0,0.4)';
@@ -2242,6 +2586,35 @@ function drawShelter(shelter: ShelterState, isOwner: boolean, ownerColor?: strin
   const ownerLabel = isOwner ? 'Your Shelter' : `Shelter`;
   ctx.fillText(ownerLabel, cx, buildingT - half * 0.5 - 8);
   
+  // Tier badge - shows tier 1-5 with stars, or level number for higher
+  const tier = shelter.tier ?? 1;
+  const tierColors = ['#888', '#7bed9f', '#70a3ff', '#c77dff', '#ffd700']; // Gray, Green, Blue, Purple, Gold
+  const tierColor = tierColors[Math.min(tier - 1, 4)];
+  
+  // Draw tier badge (top-right corner of shelter)
+  const badgeX = cx + half * 0.8;
+  const badgeY = buildingT - half * 0.3;
+  
+  // Badge background circle
+  ctx.fillStyle = tierColor;
+  ctx.beginPath();
+  ctx.arc(badgeX, badgeY, 14, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  
+  // Tier number or star
+  ctx.fillStyle = tier >= 5 ? '#333' : '#fff';
+  ctx.font = 'bold 12px Rubik, sans-serif';
+  ctx.textBaseline = 'middle';
+  if (tier >= 5) {
+    ctx.fillText('★' + tier, badgeX, badgeY);
+  } else {
+    ctx.fillText(String(tier), badgeX, badgeY);
+  }
+  ctx.textBaseline = 'alphabetic';
+  
   // Pet count
   ctx.fillStyle = '#fff';
   ctx.font = '10px Rubik, sans-serif';
@@ -2303,28 +2676,42 @@ function drawBreederShelter(shelter: BreederShelterState): void {
   ctx.restore();
 }
 
-function drawStray(x: number, y: number): void {
+/** Pet type emojis for map strays (same as adoption drop-off graphic) */
+const STRAY_PET_EMOJIS: Record<number, string> = {
+  [PET_TYPE_CAT]: '🐈',
+  [PET_TYPE_DOG]: '🐕',
+  [PET_TYPE_BIRD]: '🐦',
+  [PET_TYPE_RABBIT]: '🐰',
+  [PET_TYPE_SPECIAL]: '⭐',
+};
+
+/** Draw a stray on the map using the same graphic as adoption drop-off (emoji by type). Only boosts use circles. */
+function drawStray(x: number, y: number, petType: number = PET_TYPE_CAT): void {
   ctx.save();
-  ctx.fillStyle = '#c9a86c';
-  ctx.beginPath();
-  ctx.arc(x, y, PET_RADIUS, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#8B4513';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.font = '10px Rubik, sans-serif';
-  ctx.fillStyle = '#333';
+  ctx.globalAlpha = 1;
+  const emoji = STRAY_PET_EMOJIS[petType] ?? STRAY_PET_EMOJIS[PET_TYPE_CAT];
+  ctx.font = '30px sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText('Stray', x, y + PET_RADIUS + 10);
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0,0,0,0.8)';
+  ctx.shadowBlur = 4;
+  ctx.fillText(emoji, x, y);
+  if (petType === PET_TYPE_SPECIAL) {
+    ctx.shadowColor = '#ffd700';
+    ctx.shadowBlur = 12;
+    ctx.fillText(emoji, x, y);
+  }
+  ctx.shadowBlur = 0;
   ctx.restore();
 }
 
-/** Draw a fortified breeder camp with wooden palisade walls */
+/** Draw a breeder camp: bigger tent, small enclosed pen, random pets breeding inside */
 function drawBreederCamp(x: number, y: number, level: number = 1): void {
   const campRadius = 35;
-  const postCount = 12;
-  const postHeight = 18;
-  const postWidth = 5;
+  const penRadius = 14; // Small enclosed fence (animal pen)
+  const postCount = 10; // Short fence posts around pen
+  const postHeight = 8;
+  const postWidth = 3;
   
   ctx.save();
   ctx.translate(x, y);
@@ -2335,85 +2722,55 @@ function drawBreederCamp(x: number, y: number, level: number = 1): void {
   ctx.fillStyle = '#5a4a3a';
   ctx.fill();
   
-  // Draw wooden palisade posts around the perimeter
-  ctx.fillStyle = '#8B4513'; // Saddle brown
+  // Small enclosed fence (animal pen) - low rails around pen area
+  ctx.fillStyle = '#8B4513';
   ctx.strokeStyle = '#5a3810';
   ctx.lineWidth = 1;
-  
   for (let i = 0; i < postCount; i++) {
     const angle = (i / postCount) * Math.PI * 2;
-    const px = Math.cos(angle) * (campRadius - 2);
-    const py = Math.sin(angle) * (campRadius - 2);
-    
-    ctx.save();
-    ctx.translate(px, py);
-    ctx.rotate(angle + Math.PI / 2);
-    
-    // Draw pointed post
+    const px = Math.cos(angle) * penRadius;
+    const py = Math.sin(angle) * penRadius;
+    ctx.fillRect(px - postWidth / 2, py - postHeight / 2, postWidth, postHeight);
+  }
+  ctx.beginPath();
+  ctx.arc(0, 0, penRadius, 0, Math.PI * 2);
+  ctx.strokeStyle = '#6d4c35';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  
+  // Random pets inside the pen (deterministic from x, y, level)
+  const seed = ((x * 7 + y * 31 + level * 101) | 0) >>> 0;
+  const petColors = ['#ff9f43', '#a17851', '#74b9ff', '#dfe6e9']; // cat, dog, bird, rabbit
+  const nPets = 2 + (seed % 3); // 2-4 pets
+  for (let i = 0; i < nPets; i++) {
+    const s = (seed + i * 17) >>> 0;
+    const px = ((s % 17) - 8) * 0.9;
+    const py = (((s >> 4) % 17) - 8) * 0.9;
     ctx.beginPath();
-    ctx.moveTo(-postWidth / 2, postHeight / 2);
-    ctx.lineTo(-postWidth / 2, -postHeight / 2 + 3);
-    ctx.lineTo(0, -postHeight / 2 - 3); // Pointed top
-    ctx.lineTo(postWidth / 2, -postHeight / 2 + 3);
-    ctx.lineTo(postWidth / 2, postHeight / 2);
-    ctx.closePath();
+    ctx.arc(px, py, 4, 0, Math.PI * 2);
+    ctx.fillStyle = petColors[(s >> 8) % petColors.length];
     ctx.fill();
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 0.8;
     ctx.stroke();
-    ctx.restore();
   }
   
-  // Draw tent (triangle)
+  // Bigger tent (main structure) - larger triangle
   ctx.beginPath();
-  ctx.moveTo(-12, 8);
-  ctx.lineTo(0, -10);
-  ctx.lineTo(12, 8);
+  ctx.moveTo(-20, 12);
+  ctx.lineTo(0, -18);
+  ctx.lineTo(20, 12);
   ctx.closePath();
-  ctx.fillStyle = '#D2B48C'; // Tan
+  ctx.fillStyle = '#D2B48C';
   ctx.fill();
   ctx.strokeStyle = '#8B7355';
   ctx.lineWidth = 1.5;
   ctx.stroke();
-  
-  // Tent entrance
   ctx.beginPath();
-  ctx.moveTo(-4, 8);
-  ctx.lineTo(0, 2);
-  ctx.lineTo(4, 8);
+  ctx.moveTo(-7, 12);
+  ctx.lineTo(0, 4);
+  ctx.lineTo(7, 12);
   ctx.fillStyle = '#4a3a2a';
-  ctx.fill();
-  
-  // Draw campfire (orange glow + flame)
-  const fireX = 16;
-  const fireY = 4;
-  
-  // Glow effect
-  const gradient = ctx.createRadialGradient(fireX, fireY, 0, fireX, fireY, 12);
-  gradient.addColorStop(0, 'rgba(255, 107, 53, 0.6)');
-  gradient.addColorStop(0.5, 'rgba(255, 165, 0, 0.3)');
-  gradient.addColorStop(1, 'rgba(255, 69, 0, 0)');
-  ctx.beginPath();
-  ctx.arc(fireX, fireY, 12, 0, Math.PI * 2);
-  ctx.fillStyle = gradient;
-  ctx.fill();
-  
-  // Fire logs
-  ctx.fillStyle = '#5a4a3a';
-  ctx.fillRect(fireX - 6, fireY + 2, 12, 3);
-  ctx.fillRect(fireX - 4, fireY + 1, 8, 3);
-  
-  // Flame
-  ctx.beginPath();
-  ctx.moveTo(fireX - 4, fireY + 2);
-  ctx.quadraticCurveTo(fireX - 2, fireY - 6, fireX, fireY - 8);
-  ctx.quadraticCurveTo(fireX + 2, fireY - 6, fireX + 4, fireY + 2);
-  ctx.fillStyle = '#FF6B35';
-  ctx.fill();
-  
-  // Inner flame
-  ctx.beginPath();
-  ctx.moveTo(fireX - 2, fireY + 1);
-  ctx.quadraticCurveTo(fireX, fireY - 4, fireX + 2, fireY + 1);
-  ctx.fillStyle = '#FFD700';
   ctx.fill();
   
   ctx.restore();
@@ -2435,23 +2792,21 @@ function drawBreederCamp(x: number, y: number, level: number = 1): void {
   ctx.fillText(`${level}`, badgeX, badgeY);
   
   // Calculate estimated RT cost to beat this camp
-  // Based on: # of pets (3-5 base + 1 per 2 levels, max 8) × ingredients per level × avg food cost
   const basePets = 3 + Math.min(2, Math.floor(level / 2));
   const petCount = Math.min(basePets + Math.floor(level / 2), 8);
   let ingredientCount = 1;
-  let avgIngredientCost = 8; // Average of apple(5), carrot(8), chicken(15), seeds(5)
+  let avgIngredientCost = 8;
   if (level >= 10) {
     ingredientCount = 4;
-    avgIngredientCost = 13; // (5+8+15+5+20+20)/6 = ~12.2, round to 13
+    avgIngredientCost = 13;
   } else if (level >= 6) {
     ingredientCount = 3;
-    avgIngredientCost = 11; // Includes water(20)
+    avgIngredientCost = 11;
   } else if (level >= 3) {
     ingredientCount = 2;
   }
   const estimatedRtCost = petCount * ingredientCount * avgIngredientCost;
   
-  // Label below camp with level and RT cost
   ctx.font = 'bold 10px Rubik, sans-serif';
   ctx.fillStyle = '#ff6b6b';
   ctx.textAlign = 'center';
@@ -2470,7 +2825,7 @@ function drawPickup(u: PickupState): void {
     return;
   }
   
-  // Color by type: green=growth, blue=speed, purple=port
+  // Color by type: green=growth, blue=speed, purple=random port, teal=shelter port
   let fillColor = '#7bed9f';
   let strokeColor = '#2d5a38';
   let label = '+Size';
@@ -2481,7 +2836,11 @@ function drawPickup(u: PickupState): void {
   } else if (u.type === PICKUP_TYPE_PORT) {
     fillColor = '#c77dff';
     strokeColor = '#6a3d7a';
-    label = 'Port';
+    label = 'Random';
+  } else if (u.type === PICKUP_TYPE_SHELTER_PORT) {
+    fillColor = '#10b981';
+    strokeColor = '#047857';
+    label = 'Home';
   }
   ctx.fillStyle = fillColor;
   ctx.fillRect(u.x - h, u.y - h, h * 2, h * 2);
@@ -2506,8 +2865,15 @@ function render(dt: number): void {
     drawMapBackground(safeCam);
 
   if (latestSnapshot) {
-    for (const z of latestSnapshot.adoptionZones) {
+    // Draw adoption zones - fallback to center zone if empty
+    const zones = latestSnapshot.adoptionZones.length > 0 
+      ? latestSnapshot.adoptionZones 
+      : [{ id: 'adopt-fallback', x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2, radius: ADOPTION_ZONE_RADIUS }];
+    for (const z of zones) {
       drawAdoptionZone(z);
+    }
+    for (const ev of latestSnapshot.adoptionEvents ?? []) {
+      drawAdoptionEvent(ev, latestSnapshot.tick);
     }
     for (const u of latestSnapshot.pickups ?? []) {
       drawPickup(u);
@@ -2531,7 +2897,7 @@ function render(dt: number): void {
     if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
     // Skip uninitialized pets at (0,0) - ghost stray fix
     if (p.x === 0 && p.y === 0) continue;
-    drawStray(p.x, p.y);
+    drawStray(p.x, p.y, pet.petType ?? PET_TYPE_CAT);
   }
 
   // Sort players by size so larger ones render on top
@@ -2601,7 +2967,7 @@ function render(dt: number): void {
     ctx.font = 'bold 32px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(ADOPTION_PET_EMOJIS[anim.petType], x, y);
+    ctx.fillText(ADOPTION_PET_EMOJIS[anim.petType] ?? '🐾', x, y);
     ctx.restore();
   }
 
@@ -2633,8 +2999,13 @@ function render(dt: number): void {
     }
   }
   if (latestSnapshot) {
-    for (const z of latestSnapshot.adoptionZones) {
-      const r = (z.radius * scale) | 0;
+    // Draw adoption zones on minimap - fallback to center zone if empty
+    const minimapZones = latestSnapshot.adoptionZones.length > 0 
+      ? latestSnapshot.adoptionZones 
+      : [{ id: 'adopt-fallback', x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2, radius: ADOPTION_ZONE_RADIUS }];
+    for (const z of minimapZones) {
+      const zRadius = z.radius || ADOPTION_ZONE_RADIUS;
+      const r = Math.max(3, (zRadius * scale) | 0); // At least 3 pixels visible
       minimapCtx.fillStyle = 'rgba(123, 237, 159, 0.6)';
       minimapCtx.fillRect(z.x * scale - r, z.y * scale - r, r * 2, r * 2);
     }
@@ -2669,7 +3040,9 @@ function render(dt: number): void {
         minimapCtx.stroke();
         minimapCtx.restore();
       } else {
-        minimapCtx.fillStyle = u.type === PICKUP_TYPE_GROWTH ? '#7bed9f' : u.type === PICKUP_TYPE_PORT ? '#c77dff' : '#70a3ff';
+        minimapCtx.fillStyle = u.type === PICKUP_TYPE_GROWTH ? '#7bed9f' : 
+                               u.type === PICKUP_TYPE_PORT ? '#c77dff' : 
+                               u.type === PICKUP_TYPE_SHELTER_PORT ? '#10b981' : '#70a3ff';
         minimapCtx.fillRect(px - 2, py - 2, 4, 4);
       }
     }
@@ -2677,8 +3050,10 @@ function render(dt: number): void {
     for (const shelter of latestSnapshot.shelters ?? []) {
       const isOwner = shelter.ownerId === myPlayerId;
       minimapCtx.fillStyle = isOwner ? '#e8d5b7' : '#d4c4a8';
-      const shelterSize = (SHELTER_BASE_RADIUS + shelter.size * SHELTER_RADIUS_PER_SIZE) * scale;
-      const half = Math.max(4, shelterSize);
+      // Cap visual size on minimap to prevent overflow
+      const cappedSize = Math.min(shelter.size, 2000);
+      const shelterSize = (SHELTER_BASE_RADIUS + cappedSize * SHELTER_RADIUS_PER_SIZE) * scale;
+      const half = Math.min(60, Math.max(4, shelterSize));
       minimapCtx.fillRect(shelter.x * scale - half, shelter.y * scale - half, half * 2, half * 2);
       // Border
       minimapCtx.strokeStyle = isOwner ? '#7bed9f' : '#8B4513';
@@ -2701,23 +3076,36 @@ function render(dt: number): void {
         minimapCtx.fillRect(sx - 3, sy - half + 1, 6, 5);
       }
     }
-    // Draw breeder shelters on minimap (pulsing red)
+    // Draw breeder shelters (mills) on minimap - prominent so they're easily seen
     for (const breederShelter of latestSnapshot.breederShelters ?? []) {
       const bx = breederShelter.x * scale;
       const by = breederShelter.y * scale;
-      const bHalf = Math.max(6, (40 + breederShelter.size * 0.5) * scale);
-      
-      // Pulsing glow effect
+      const bHalf = Math.max(10, (40 + breederShelter.size * 0.5) * scale); // Min 10px so mill is always visible
       const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
       minimapCtx.save();
-      minimapCtx.shadowColor = '#ff4444';
-      minimapCtx.shadowBlur = 5 + pulse * 5;
-      minimapCtx.fillStyle = '#4a1a1a';
+      minimapCtx.shadowColor = '#ff0000';
+      minimapCtx.shadowBlur = 8 + pulse * 8;
+      minimapCtx.fillStyle = '#cc2222';
       minimapCtx.fillRect(bx - bHalf, by - bHalf, bHalf * 2, bHalf * 2);
-      minimapCtx.strokeStyle = `rgba(255, 68, 68, ${0.7 + pulse * 0.3})`;
-      minimapCtx.lineWidth = 2;
+      minimapCtx.strokeStyle = `rgba(255, 50, 50, ${0.9 + pulse * 0.1})`;
+      minimapCtx.lineWidth = 2.5;
       minimapCtx.strokeRect(bx - bHalf, by - bHalf, bHalf * 2, bHalf * 2);
       minimapCtx.restore();
+    }
+    // Draw adoption events on minimap (teal ring)
+    for (const ev of latestSnapshot.adoptionEvents ?? []) {
+      const ex = ev.x * scale;
+      const ey = ev.y * scale;
+      const r = Math.min(12, ADOPTION_EVENT_RADIUS * scale);
+      minimapCtx.strokeStyle = '#5eead4';
+      minimapCtx.lineWidth = 2;
+      minimapCtx.setLineDash([4, 4]);
+      minimapCtx.beginPath();
+      minimapCtx.arc(ex, ey, r, 0, Math.PI * 2);
+      minimapCtx.stroke();
+      minimapCtx.setLineDash([]);
+      minimapCtx.fillStyle = 'rgba(94, 234, 212, 0.3)';
+      minimapCtx.fill();
     }
     // Sort players by adoption count for leader visibility scaling
     const sortedByAdoptions = [...latestSnapshot.players].sort((a, b) => b.totalAdoptions - a.totalAdoptions);
@@ -2761,6 +3149,135 @@ function render(dt: number): void {
   minimapCtx.strokeStyle = 'rgba(255,255,255,0.2)';
   minimapCtx.lineWidth = 1;
   minimapCtx.strokeRect(0.5, 0.5, 119, 119);
+
+  // Draw shelter locator arrow when player has a shelter and it's off-screen
+  const shelterLocatorMe = latestSnapshot?.players.find(p => p.id === myPlayerId);
+  const myShelterForLocator = shelterLocatorMe?.shelterId 
+    ? (latestSnapshot?.shelters?.find(s => s.id === shelterLocatorMe.shelterId) ?? null) 
+    : null;
+  
+  if (myShelterForLocator && shelterLocatorMe && !shelterLocatorMe.eliminated) {
+    const vanX = predictedPlayer?.x ?? shelterLocatorMe.x;
+    const vanY = predictedPlayer?.y ?? shelterLocatorMe.y;
+    const shelterX = myShelterForLocator.x;
+    const shelterY = myShelterForLocator.y;
+    
+    // Check if shelter is visible on screen
+    const screenLeft = safeCam.x;
+    const screenRight = safeCam.x + safeCam.w;
+    const screenTop = safeCam.y;
+    const screenBottom = safeCam.y + safeCam.h;
+    
+    const isOnScreen = shelterX >= screenLeft && shelterX <= screenRight && 
+                       shelterY >= screenTop && shelterY <= screenBottom;
+    
+    if (!isOnScreen) {
+      // Calculate angle from center of screen to shelter
+      const screenCenterX = safeCam.x + safeCam.w / 2;
+      const screenCenterY = safeCam.y + safeCam.h / 2;
+      const angle = Math.atan2(shelterY - screenCenterY, shelterX - screenCenterX);
+      
+      // Calculate distance to shelter from van
+      const distToShelter = Math.hypot(shelterX - vanX, shelterY - vanY);
+      
+      // Calculate position on screen edge for the indicator
+      const margin = 60; // Distance from edge
+      const halfW = canvas.width / 2 - margin;
+      const halfH = canvas.height / 2 - margin;
+      
+      // Find intersection with screen edge
+      let indicatorX = canvas.width / 2 + Math.cos(angle) * halfW;
+      let indicatorY = canvas.height / 2 + Math.sin(angle) * halfH;
+      
+      // Clamp to screen bounds
+      const aspectRatio = halfW / halfH;
+      if (Math.abs(Math.cos(angle)) > Math.abs(Math.sin(angle)) * aspectRatio) {
+        // Hits left or right edge
+        indicatorX = canvas.width / 2 + Math.sign(Math.cos(angle)) * halfW;
+        indicatorY = canvas.height / 2 + Math.tan(angle) * Math.sign(Math.cos(angle)) * halfW;
+      } else {
+        // Hits top or bottom edge
+        indicatorY = canvas.height / 2 + Math.sign(Math.sin(angle)) * halfH;
+        indicatorX = canvas.width / 2 + (1 / Math.tan(angle)) * Math.sign(Math.sin(angle)) * halfH;
+      }
+      
+      // Clamp final position
+      indicatorX = Math.max(margin, Math.min(canvas.width - margin, indicatorX));
+      indicatorY = Math.max(margin, Math.min(canvas.height - margin, indicatorY));
+      
+      // Draw shelter indicator
+      ctx.save();
+      
+      // Pulsing effect
+      const pulse = 0.7 + 0.3 * Math.sin(Date.now() / 300);
+      
+      // Draw arrow pointing toward shelter
+      ctx.translate(indicatorX, indicatorY);
+      ctx.rotate(angle);
+      
+      // Arrow body
+      ctx.fillStyle = `rgba(123, 237, 159, ${pulse})`;
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+      ctx.lineWidth = 2;
+      
+      // Arrow shape (pointing right, will be rotated)
+      ctx.beginPath();
+      ctx.moveTo(20, 0);      // Arrow tip
+      ctx.lineTo(5, -10);     // Top back
+      ctx.lineTo(5, -5);      // Top notch
+      ctx.lineTo(-15, -5);    // Back top
+      ctx.lineTo(-15, 5);     // Back bottom
+      ctx.lineTo(5, 5);       // Bottom notch
+      ctx.lineTo(5, 10);      // Bottom back
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      
+      ctx.restore();
+      
+      // Draw shelter icon next to arrow
+      ctx.save();
+      const iconOffsetX = -Math.cos(angle) * 35;
+      const iconOffsetY = -Math.sin(angle) * 35;
+      const iconX = indicatorX + iconOffsetX;
+      const iconY = indicatorY + iconOffsetY;
+      
+      // Draw house icon
+      ctx.fillStyle = `rgba(232, 213, 183, ${pulse})`;
+      ctx.strokeStyle = 'rgba(123, 237, 159, 0.9)';
+      ctx.lineWidth = 2;
+      
+      // House body
+      ctx.fillRect(iconX - 12, iconY - 8, 24, 18);
+      ctx.strokeRect(iconX - 12, iconY - 8, 24, 18);
+      
+      // Roof
+      ctx.fillStyle = `rgba(123, 237, 159, ${pulse})`;
+      ctx.beginPath();
+      ctx.moveTo(iconX, iconY - 20);     // Peak
+      ctx.lineTo(iconX - 16, iconY - 8); // Left
+      ctx.lineTo(iconX + 16, iconY - 8); // Right
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      
+      // Door
+      ctx.fillStyle = 'rgba(139, 90, 43, 0.8)';
+      ctx.fillRect(iconX - 4, iconY, 8, 10);
+      
+      // Distance text
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 12px Rubik, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      const distText = distToShelter >= 1000 
+        ? `${(distToShelter / 1000).toFixed(1)}k` 
+        : `${Math.round(distToShelter)}`;
+      ctx.fillText(distText, iconX, iconY + 14);
+      
+      ctx.restore();
+    }
+  }
 
   // Draw virtual joystick on main canvas when active
   if (joystickActive) {
@@ -2846,13 +3363,57 @@ function render(dt: number): void {
   // Hide old ground button (replaced by build shelter)
   groundBtnEl.classList.add('hidden');
   
-  // Port button - show when player has port charges
+  // Random port button - show when player has port charges
   const portCount = me?.portCharges ?? 0;
   if (me && portCount > 0 && !isEliminated && matchPhase === 'playing') {
-    portBtnEl.textContent = `Port [P] (${portCount})`;
+    portBtnEl.textContent = `Random [P] (${portCount})`;
     portBtnEl.classList.remove('hidden');
   } else {
     portBtnEl.classList.add('hidden');
+  }
+  
+  // Shelter port button - show when player has shelter port charges AND a shelter
+  const shelterPortCount = me?.shelterPortCharges ?? 0;
+  if (me && shelterPortCount > 0 && hasShelter && !isEliminated && matchPhase === 'playing') {
+    shelterPortBtnEl.textContent = `Home [H] (${shelterPortCount})`;
+    shelterPortBtnEl.classList.remove('hidden');
+  } else {
+    shelterPortBtnEl.classList.add('hidden');
+  }
+  
+  // Transfer button - show when near allied shelter and carrying pets
+  let nearbyAlliedShelter: ShelterState | null = null;
+  if (me && me.petsInside.length > 0 && !isEliminated && matchPhase === 'playing') {
+    // Check if near any allied shelter
+    for (const shelter of latestSnapshot?.shelters ?? []) {
+      if (shelter.ownerId === myPlayerId) continue; // Skip own shelter
+      // Check if allied (by looking at allies list)
+      const owner = latestSnapshot?.players.find(p => p.id === shelter.ownerId);
+      const isAllied = me.allies?.includes(shelter.ownerId) || false;
+      if (!isAllied) continue;
+      
+      // Check distance
+      const dx = (predictedPlayer?.x ?? me.x) - shelter.x;
+      const dy = (predictedPlayer?.y ?? me.y) - shelter.y;
+      const dist = Math.hypot(dx, dy);
+      const cappedSize = Math.min(shelter.size, 1000); // Match server visual cap
+      const shelterRadius = SHELTER_BASE_RADIUS + cappedSize * SHELTER_RADIUS_PER_SIZE;
+      const transferRange = shelterRadius + 100;
+      
+      if (dist <= transferRange) {
+        nearbyAlliedShelter = shelter;
+        break;
+      }
+    }
+  }
+  
+  if (nearbyAlliedShelter) {
+    transferBtnEl.textContent = `Transfer [T] 🤝`;
+    transferBtnEl.classList.remove('hidden');
+    (transferBtnEl as HTMLButtonElement).dataset.targetShelterId = nearbyAlliedShelter.id;
+  } else {
+    transferBtnEl.classList.add('hidden');
+    delete (transferBtnEl as HTMLButtonElement).dataset.targetShelterId;
   }
   
   // Show "Center Van" and "Center Shelter" buttons when camera is panned away
@@ -2891,16 +3452,16 @@ function render(dt: number): void {
   // Show domination progress - calculate shelter area as % of map area
   const shelters = latestSnapshot?.shelters ?? [];
   const mapArea = MAP_WIDTH * MAP_HEIGHT; // 4800 * 4800 = 23,040,000
-  const leaderShelter = shelters.reduce((best, s) => !best || s.size > best.size ? s : best, null as typeof shelters[0] | null);
+  const leaderShelter = shelters.reduce<ShelterState | null>((best, s) => !best || s.size > best.size ? s : best, null);
   // Calculate shelter area: π * r² where r = SHELTER_BASE_RADIUS + size * SHELTER_RADIUS_PER_SIZE
-  const leaderRadius = leaderShelter ? SHELTER_BASE_RADIUS + leaderShelter.size * SHELTER_RADIUS_PER_SIZE : 0;
+  // Cap size calculation to prevent overflow at very high sizes
+  const cappedSize = Math.min(leaderShelter?.size ?? 0, 10000);
+  const leaderRadius = leaderShelter ? SHELTER_BASE_RADIUS + cappedSize * SHELTER_RADIUS_PER_SIZE : 0;
   const leaderArea = Math.PI * leaderRadius * leaderRadius;
-  const leaderPercent = mapArea > 0 ? Math.floor((leaderArea / mapArea) * 100) : 0;
+  const leaderPercent = mapArea > 0 ? Math.min(100, Math.floor((leaderArea / mapArea) * 100)) : 0;
   const leaderPlayer = latestSnapshot?.players.find(p => p.shelterId === leaderShelter?.id);
-  const leaderName = leaderPlayer?.displayName ?? 'None';
-  const scarcity = latestSnapshot?.scarcityLevel ?? 0;
-  const scarcityText = scarcity > 0 ? ` [Scarcity ${scarcity}]` : '';
-  timerEl.textContent = matchPhase === 'playing' ? `Goal: 51% | ${leaderName}: ${leaderPercent}%${scarcityText}` : '';
+  const points = me?.totalAdoptions ?? 0;
+  timerEl.textContent = matchPhase === 'playing' ? `Points: ${points}` : '';
   
   // Update game clock
   const durationMs = latestSnapshot?.matchDurationMs ?? 0;
@@ -2910,8 +3471,31 @@ function render(dt: number): void {
   const secs = totalSec % 60;
   gameClockEl.textContent = `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   
+  // Adoption events panel
+  const events = latestSnapshot?.adoptionEvents ?? [];
+  const snap = latestSnapshot;
+  if (eventPanelEl && eventPanelListEl) {
+    if (events.length > 0 && matchPhase === 'playing' && snap) {
+      const petTypeNames: Record<number, string> = { [PET_TYPE_CAT]: 'Cats', [PET_TYPE_DOG]: 'Dogs', [PET_TYPE_BIRD]: 'Birds', [PET_TYPE_RABBIT]: 'Rabbits', [PET_TYPE_SPECIAL]: 'Special' };
+      eventPanelListEl.innerHTML = events.map(ev => {
+        const typeName = ev.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const remainingTicks = Math.max(0, ev.startTick + ev.durationTicks - snap.tick);
+        const remainingSec = Math.ceil(remainingTicks / 25);
+        const reqs = ev.requirements.map(r => `${r.count} ${petTypeNames[r.petType] ?? 'Pets'}`).join(', ');
+        return `<div class="event-item"><div class="event-name">${escapeHtml(typeName)}</div><div class="event-reqs">Need: ${escapeHtml(reqs)}</div><div class="event-time">${remainingSec}s left</div></div>`;
+      }).join('');
+      eventPanelEl.classList.remove('hidden');
+    } else {
+      eventPanelEl.classList.add('hidden');
+    }
+  }
+  
   const iAmEliminated = !!(me?.eliminated);
   if ((remainingSec <= 0 || iAmEliminated) && latestSnapshot?.players.length) {
+    // Close any active breeder minigame when match ends
+    if (breederGame.active) {
+      endBreederMiniGame(false);
+    }
     if (!matchEndPlayed) {
       matchEndPlayed = true;
       playMatchEnd();
@@ -2926,30 +3510,33 @@ function render(dt: number): void {
       if (!a.eliminated) return b.size - a.size || b.totalAdoptions - a.totalAdoptions;
       return a.totalAdoptions - b.totalAdoptions;
     });
+    const strayLoss = !!(latestSnapshot?.strayLoss);
     const meResult = sorted.find((p) => p.id === myPlayerId);
     const mySize = meResult && !meResult.eliminated ? Math.floor(meResult.size) : 0;
     const placementBonus = [100, 50, 25];
     const myRank = meResult ? sorted.findIndex((p) => p.id === myPlayerId) + 1 : 0;
-    const bonus = myRank > 0 && myRank <= placementBonus.length && !iAmEliminated ? placementBonus[myRank - 1] : 0;
-    const earned = iAmEliminated ? 0 : mySize + bonus;
+    const bonus = myRank > 0 && myRank <= placementBonus.length && !iAmEliminated && !strayLoss ? placementBonus[myRank - 1] : 0;
+    const earned = strayLoss || iAmEliminated ? 0 : mySize + bonus;
     // Only calculate newTokens once when match ends (matchEndPlayed was just set to true above)
     const newTokens = matchEndPlayed && !matchEndTokensAwarded ? getTokens() + earned : getTokens();
     if (!matchEndTokensAwarded) {
       setTokens(newTokens);
       matchEndTokensAwarded = true;
-      // Deposit RT to inventory for registered users
-      const isWinner = myRank === 1;
-      depositInventory(earned, 0, isWinner);
+      // Server is authoritative for deposits - no client-side deposit call
     }
     const bonusLabel = myRank === 1 ? 'Win bonus' : myRank === 2 ? '2nd place' : myRank === 3 ? '3rd place' : myRank > 0 ? `${myRank}th place` : '';
     const tokenLines = earned > 0
       ? `<br><br><strong>Total: ${newTokens.toLocaleString()} RT</strong>${bonusLabel ? `<br>${bonusLabel}: +${bonus} RT` : ''}`
-      : iAmEliminated
-        ? `<br><br><strong>Total: ${getTokens().toLocaleString()} RT</strong>`
-        : '';
+      : strayLoss
+        ? `<br><br>No RT — too many strays! <strong>Total: ${getTokens().toLocaleString()} RT</strong>`
+        : iAmEliminated
+          ? `<br><br><strong>Total: ${getTokens().toLocaleString()} RT</strong>`
+          : '';
     // Determine win title
     let title = 'Match over';
-    if (iAmEliminated) {
+    if (latestSnapshot?.strayLoss) {
+      title = 'Match lost — too many strays!';
+    } else if (iAmEliminated) {
       title = 'You were consumed';
     } else if (latestSnapshot && latestSnapshot.winnerId) {
       const winnerId = latestSnapshot.winnerId;
@@ -3028,6 +3615,7 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
     authAreaEl.classList.remove('hidden');
     updateLandingTokens();
     restoreModeSelection();
+    startServerClockWhenOnLobby();
   }
 }
 
@@ -3084,6 +3672,7 @@ lobbyBackBtnEl.addEventListener('click', () => {
   authAreaEl.classList.remove('hidden'); // Show auth when returning to lobby
   updateLandingTokens();
   restoreModeSelection(); // Restore sticky mode
+  startServerClockWhenOnLobby();
 });
 
 // --- Fight / Ally ---
@@ -3104,11 +3693,27 @@ groundBtnEl.addEventListener('click', () => {
   groundBtnEl.classList.add('hidden');
 });
 
-// --- Port button ---
+// --- Random Port button ---
 portBtnEl.addEventListener('click', () => {
   if (breederGame.active) return; // Don't allow porting during mini-game
   if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
   gameWs.send(JSON.stringify({ type: 'usePort' }));
+});
+
+// --- Shelter Port button ---
+shelterPortBtnEl.addEventListener('click', () => {
+  if (breederGame.active) return; // Don't allow porting during mini-game
+  if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  gameWs.send(JSON.stringify({ type: 'useShelterPort' }));
+});
+
+// --- Transfer Pets button ---
+transferBtnEl.addEventListener('click', () => {
+  if (breederGame.active) return; // Don't allow during mini-game
+  if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  const targetShelterId = (transferBtnEl as HTMLButtonElement).dataset.targetShelterId;
+  if (!targetShelterId) return;
+  gameWs.send(JSON.stringify({ type: 'transferPets', targetShelterId }));
 });
 
 // --- Center Van button - resets camera pan to follow the van ---
@@ -3243,12 +3848,22 @@ document.addEventListener('keydown', (e) => {
     toggleActionMenu();
   }
   if (e.key === 'p' || e.key === 'P') {
-    // Use port charge (not during breeder mini-game)
-    if (breederGame.active) return; // Don't allow porting during mini-game
+    // Use random port charge (not during breeder mini-game)
+    if (breederGame.active) return;
     if (gameWs && gameWs.readyState === WebSocket.OPEN) {
       const me = latestSnapshot?.players.find((pl) => pl.id === myPlayerId);
       if (me && (me.portCharges ?? 0) > 0 && !me.eliminated && matchPhase === 'playing') {
         gameWs.send(JSON.stringify({ type: 'usePort' }));
+      }
+    }
+  }
+  if (e.key === 'h' || e.key === 'H') {
+    // Use shelter port charge (not during breeder mini-game)
+    if (breederGame.active) return;
+    if (gameWs && gameWs.readyState === WebSocket.OPEN) {
+      const me = latestSnapshot?.players.find((pl) => pl.id === myPlayerId);
+      if (me && (me.shelterPortCharges ?? 0) > 0 && me.shelterId && !me.eliminated && matchPhase === 'playing') {
+        gameWs.send(JSON.stringify({ type: 'useShelterPort' }));
       }
     }
   }
@@ -3296,6 +3911,38 @@ musicToggleEl.addEventListener('change', () => {
 sfxToggleEl.addEventListener('change', () => setSfxEnabled(sfxToggleEl.checked));
 settingsBtnEl.addEventListener('click', () => settingsPanelEl.classList.toggle('hidden'));
 settingsCloseEl.addEventListener('click', () => settingsPanelEl.classList.add('hidden'));
+exitToLobbyBtnEl.addEventListener('click', async () => {
+  if (gameWs?.readyState === WebSocket.OPEN) {
+    if (selectedMode === 'solo') {
+      showToast('Your match has been saved.', 'success');
+    } else if (selectedMode === 'ffa' || selectedMode === 'teams') {
+      showToast('Your van will stop but your shelter continues.', 'info');
+    }
+    settingsPanelEl.classList.add('hidden');
+    gameWs.close();
+    gameWs = null;
+    myPlayerId = null;
+    latestSnapshot = null;
+    leaderboardEl.classList.remove('show');
+    matchEndPlayed = false;
+    matchEndTokensAwarded = false;
+    // Clear any pending announcements/banners immediately
+    clearAnnouncements();
+    gameWrapEl.classList.remove('visible');
+    landingEl.classList.remove('hidden');
+    authAreaEl.classList.remove('hidden');
+    updateLandingTokens();
+    restoreModeSelection();
+    // For solo mode, immediately show Resume button (we know we just saved)
+    if (selectedMode === 'solo') {
+      hasSavedMatch = true;
+      updateResumeMatchUI();
+    }
+    // Also fetch to sync with server (in background)
+    fetchSavedMatchStatus();
+    startServerClockWhenOnLobby();
+  }
+});
 switchServerBtnEl.addEventListener('click', () => {
   if (gameWs) {
     gameWs.close();
@@ -3351,6 +3998,7 @@ document.querySelectorAll('.mode-option').forEach((btn) => {
     selectedMode = (btn as HTMLElement).dataset.mode as 'ffa' | 'teams' | 'solo';
     localStorage.setItem(MODE_KEY, selectedMode);
     updateSoloOptionsVisibility();
+    updateResumeMatchUI();
   });
 });
 
@@ -3394,15 +4042,16 @@ referralClaimBtn.addEventListener('click', async () => {
   }
 });
 
-// --- Landing: Play ---
-landingPlayBtn.addEventListener('click', () => {
-  playMusic(); // Start music on user gesture (required for autoplay)
+function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boolean; resume?: boolean }): void {
+  playMusic();
+  stopServerClock();
   landingEl.classList.add('hidden');
   connectionOverlayEl.classList.remove('hidden');
-  connectionOverlayEl.innerHTML = '<h2>Connecting…</h2><p>Waiting for game server.</p>';
-  // Hide auth buttons during match
+  connectionOverlayEl.innerHTML = options.resume
+    ? '<h2>Resuming…</h2><p>Loading your saved match.</p>'
+    : '<h2>Connecting…</h2><p>Waiting for game server.</p>';
   authAreaEl.classList.add('hidden');
-  connect({ mode: selectedMode })
+  connect({ mode: options.mode, abandon: options.abandon })
     .then(() => {
       connectionOverlayEl.classList.add('hidden');
       gameWrapEl.classList.add('visible');
@@ -3411,8 +4060,33 @@ landingPlayBtn.addEventListener('click', () => {
     })
     .catch((err: Error) => {
       showConnectionError(err.message || 'Connection failed.');
-      authAreaEl.classList.remove('hidden'); // Show auth on error
+      authAreaEl.classList.remove('hidden');
     });
+}
+
+const resumeMatchBtnEl = document.getElementById('resume-match-btn');
+if (resumeMatchBtnEl) {
+  resumeMatchBtnEl.addEventListener('click', () => {
+    if (selectedMode !== 'solo') return;
+    startConnect({ mode: 'solo', resume: true });
+  });
+}
+
+// --- Landing: Play ---
+landingPlayBtn.addEventListener('click', () => {
+  if (selectedMode === 'solo' && hasSavedMatch) {
+    showAbandonConfirmPopup(() => {
+      fetch('/api/saved-match', { method: 'DELETE', credentials: 'include' })
+        .then(() => {
+          hasSavedMatch = false;
+          updateResumeMatchUI();
+          startConnect({ mode: 'solo', abandon: true });
+        })
+        .catch(() => showToast('Failed to abandon saved match.', 'error'));
+    });
+    return;
+  }
+  startConnect({ mode: selectedMode });
 });
 
 // --- Cookie consent banner ---
@@ -3559,47 +4233,67 @@ if (landingMusicToggleEl) {
 if (getMusicEnabled()) playMusic();
 
 // --- Breeder Mini-Game Functions ---
-function startBreederMiniGame(petCount: number, level: number = 1): void {
+/** Time limit in seconds for breeder camp mini-game by level: 1-5 → 15s, 6-9 → 30s, 10-14 → 40s, 15+ → 45s */
+function getBreederTimeLimitSeconds(level: number): number {
+  if (level <= 5) return 15;
+  if (level <= 9) return 30;
+  if (level <= 14) return 40;
+  return 45;
+}
+
+interface BreederStartOptions {
+  isMill?: boolean;
+  timeLimitSeconds?: number;
+  addPetIntervalSeconds?: number;
+}
+
+function startBreederMiniGame(petCount: number, level: number = 1, opts: BreederStartOptions = {}): void {
   breederGame.active = true;
   breederGame.pets = [];
   breederGame.selectedPetIndex = null;
-  breederGame.timeLeft = 30 + level * 5; // More time for higher levels
+  breederGame.timeLeft = typeof opts.timeLimitSeconds === 'number' ? opts.timeLimitSeconds : getBreederTimeLimitSeconds(level);
   breederGame.totalPets = petCount;
   breederGame.rescuedCount = 0;
   breederGame.level = level;
   breederGame.selectedIngredients = [];
-  
+  breederGame.isMill = !!opts.isMill;
+  if (breederGame.addPetInterval) {
+    clearInterval(breederGame.addPetInterval);
+    breederGame.addPetInterval = null;
+  }
+  // Mill: server sends breederAddPet every 10s; no client-side add-pet interval needed
+
   // Generate random pets
-  const petTypes: PetType[] = ['dog', 'cat', 'horse', 'bird'];
+  const petTypes: PetType[] = ['dog', 'cat', 'horse', 'bird', 'rabbit'];
   for (let i = 0; i < petCount; i++) {
     const type = petTypes[Math.floor(Math.random() * petTypes.length)];
     breederGame.pets.push({ type, rescued: false });
   }
-  
+
   // Update UI to show level-appropriate foods
   updateFoodButtonsForLevel(level);
-  
+
   // Render pets
   renderBreederPets();
   updateBreederTokensDisplay();
   renderSelectedIngredients();
-  
+
   // Hide result, show game
   breederResultEl.classList.add('hidden');
   breederFoodsEl.style.display = 'flex';
   breederMinigameEl.classList.add('show');
-  
-  // Update header to show level
+
+  // Update header: mill vs camp
   const titleEl = breederMinigameEl.querySelector('.breeder-title');
   if (titleEl) {
-    titleEl.textContent = `🚨 Stop Level ${level} Breeders!`;
+    titleEl.textContent = breederGame.isMill ? '🛑 Stop the Mill!' : `🚨 Stop Level ${level} Breeders!`;
   }
-  
+
   // Update instructions based on level
   const inst1 = document.getElementById('breeder-instruction-1');
   const inst2 = document.getElementById('breeder-instruction-2');
   const requiredCount = getRequiredIngredients(level);
-  
+
   if (inst1 && inst2) {
     if (requiredCount === 1) {
       inst1.textContent = '1. Click a pet to select it';
@@ -3609,7 +4303,7 @@ function startBreederMiniGame(petCount: number, level: number = 1): void {
       inst2.textContent = '2. Select a pet - if the meal matches, they\'re rescued!';
     }
   }
-  
+
   // Start timer
   breederGame.timerInterval = setInterval(() => {
     breederGame.timeLeft--;
@@ -3885,6 +4579,10 @@ function endBreederMiniGame(completed: boolean): void {
     clearInterval(breederGame.timerInterval);
     breederGame.timerInterval = null;
   }
+  if (breederGame.addPetInterval) {
+    clearInterval(breederGame.addPetInterval);
+    breederGame.addPetInterval = null;
+  }
   
   // Send completion to server
   if (gameWs?.readyState === WebSocket.OPEN) {
@@ -3987,7 +4685,7 @@ function formatGiftReward(reward: DailyGiftReward): string {
   if (reward.tokens > 0) parts.push(`${reward.tokens} RT`);
   if (reward.sizeBonus) parts.push(`+${reward.sizeBonus} Size`);
   if (reward.speedBoost) parts.push('Speed');
-  if (reward.portCharge) parts.push('Port');
+  if (reward.portCharge) parts.push('Random Port');
   return parts.join(' + ');
 }
 
@@ -4212,15 +4910,47 @@ type LeaderboardEntry = {
   displayName: string;
   wins: number;
   rtEarned: number;
+  gamesPlayed?: number;
+  losses?: number;
+  adoptionScore?: number;
   shelterColor: string | null;
 };
 
-type LeaderboardType = 'alltime' | 'daily';
+type LeaderboardType = 'alltime' | 'daily' | 'weekly' | 'season' | 'games' | 'history';
+type LeaderboardSort = 'wins' | 'losses' | 'games' | 'score';
 let currentLeaderboardType: LeaderboardType = 'alltime';
+let currentLeaderboardSort: LeaderboardSort = 'score';
 
-async function fetchLeaderboard(type: LeaderboardType): Promise<LeaderboardEntry[]> {
+interface MatchHistoryEntry {
+  id: number;
+  user_id: string;
+  match_id: string;
+  mode: string;
+  result: string;
+  rt_earned: number;
+  adoptions: number;
+  duration_seconds: number;
+  played_at: number;
+}
+
+const leaderboardSortEl = document.getElementById('leaderboard-sort') as HTMLSelectElement | null;
+
+async function fetchMatchHistory(limit?: number): Promise<MatchHistoryEntry[]> {
   try {
-    const res = await fetch(`/api/leaderboard?type=${type}`, { credentials: 'include' });
+    const limitParam = limit ? `?limit=${limit}` : '';
+    const res = await fetch(`/api/match-history${limitParam}`, { credentials: 'include' });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.matches ?? [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchLeaderboard(type: LeaderboardType, sort?: LeaderboardSort): Promise<LeaderboardEntry[]> {
+  try {
+    const sortParam = (type === 'alltime' || type === 'games') && sort ? `&sort=${sort}` : '';
+    const res = await fetch(`/api/leaderboard?type=${type}${sortParam}`, { credentials: 'include' });
     if (!res.ok) return [];
     const data = await res.json();
     return data.entries ?? [];
@@ -4237,6 +4967,47 @@ async function fetchMyRank(): Promise<{ alltime: { rank: number }; daily: { rank
   } catch {
     return { alltime: { rank: 0 }, daily: { rank: 0 } };
   }
+}
+
+function formatMatchHistoryDate(ts: number): string {
+  const d = new Date(ts);
+  const now = Date.now();
+  const diff = now - ts;
+  if (diff < 60000) return 'Just now';
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: d.getFullYear() !== new Date().getFullYear() ? 'numeric' : undefined });
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s ? `${m}m ${s}s` : `${m}m`;
+}
+
+function renderMatchHistory(matches: MatchHistoryEntry[]): void {
+  if (matches.length === 0) {
+    leaderboardContentEl.innerHTML = '<div class="leaderboard-empty">No match history yet. Play matches to see them here!</div>';
+    leaderboardMyRankEl.innerHTML = isSignedIn ? 'Your recent matches' : 'Sign in to see your match history';
+    return;
+  }
+  const resultLabels: Record<string, string> = { win: 'Win', loss: 'Loss', stray_loss: 'Stray loss', quit: 'Quit' };
+  leaderboardContentEl.innerHTML = matches.map(m => {
+    const resultLabel = resultLabels[m.result] ?? m.result;
+    const resultClass = m.result === 'win' ? 'history-win' : m.result === 'stray_loss' ? 'history-stray' : m.result === 'quit' ? 'history-quit' : 'history-loss';
+    return `
+      <div class="match-history-entry">
+        <span class="match-history-result ${resultClass}">${resultLabel}</span>
+        <span class="match-history-mode">${escapeHtml(m.mode)}</span>
+        <span class="match-history-rt">${m.rt_earned} RT</span>
+        <span class="match-history-adopt">${m.adoptions} adoptions</span>
+        <span class="match-history-dur">${formatDuration(m.duration_seconds)}</span>
+        <span class="match-history-date">${formatMatchHistoryDate(m.played_at)}</span>
+      </div>
+    `;
+  }).join('');
+  leaderboardMyRankEl.innerHTML = `Your last ${matches.length} matches`;
 }
 
 function renderLeaderboard(entries: LeaderboardEntry[], myRank: number): void {
@@ -4258,7 +5029,7 @@ function renderLeaderboard(entries: LeaderboardEntry[], myRank: number): void {
         ${colorBadge}
         <div class="leaderboard-name">${escapeHtml(entry.displayName)}</div>
         <div class="leaderboard-stats">
-          <span class="wins">${entry.wins} wins</span><br>
+          <span class="wins">${entry.wins} wins</span>${typeof entry.gamesPlayed === 'number' ? ` · ${entry.gamesPlayed} games` : ''}${typeof entry.losses === 'number' ? ` · ${entry.losses} losses` : ''}<br>
           ${entry.rtEarned} RT
         </div>
       </div>
@@ -4284,9 +5055,24 @@ function closeLeaderboardModal(): void {
 }
 
 async function refreshLeaderboard(): Promise<void> {
-  const entries = await fetchLeaderboard(currentLeaderboardType);
-  const myRanks = await fetchMyRank();
-  const myRank = currentLeaderboardType === 'alltime' ? myRanks.alltime.rank : myRanks.daily.rank;
+  const sortElParent = leaderboardSortEl?.closest('.leaderboard-sort');
+  if (currentLeaderboardType === 'history') {
+    sortElParent?.classList.add('hidden');
+    const matches = await fetchMatchHistory(50);
+    renderMatchHistory(matches);
+    return;
+  }
+  sortElParent?.classList.remove('hidden');
+  const sort = currentLeaderboardType === 'games' ? (currentLeaderboardSort === 'score' ? 'games' : currentLeaderboardSort) : currentLeaderboardSort;
+  const entries = await fetchLeaderboard(currentLeaderboardType, sort);
+  let myRank: number;
+  if (currentLeaderboardType === 'alltime' || currentLeaderboardType === 'daily') {
+    const myRanks = await fetchMyRank();
+    myRank = currentLeaderboardType === 'alltime' ? myRanks.alltime.rank : myRanks.daily.rank;
+  } else {
+    const me = entries.find(e => e.displayName === currentDisplayName);
+    myRank = me ? me.rank : 0;
+  }
   renderLeaderboard(entries, myRank);
 }
 
@@ -4299,6 +5085,14 @@ document.querySelectorAll('.leaderboard-tab').forEach(tab => {
     await refreshLeaderboard();
   });
 });
+
+// Leaderboard sort (all-time and games)
+if (leaderboardSortEl) {
+  leaderboardSortEl.addEventListener('change', async () => {
+    currentLeaderboardSort = leaderboardSortEl.value as LeaderboardSort;
+    await refreshLeaderboard();
+  });
+}
 
 // Leaderboard Event Listeners
 leaderboardBtnEl.addEventListener('click', openLeaderboardModal);
@@ -4387,9 +5181,58 @@ function updateLobbyGiftButton(): void {
   }
 }
 
+/** Game server clock (UTC). Daily gift resets at 00:00 UTC. */
+async function fetchServerTimeForClock(): Promise<void> {
+  try {
+    const res = await fetch('/api/server-time', { credentials: 'include' });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (typeof data.nextMidnightUtc === 'string') serverClockNextMidnightUtc = data.nextMidnightUtc;
+  } catch {
+    // ignore
+  }
+}
+
+function updateServerClockDisplay(): void {
+  const now = new Date();
+  const h = now.getUTCHours();
+  const m = now.getUTCMinutes();
+  const s = now.getUTCSeconds();
+  serverClockTimeEl.textContent = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')} UTC`;
+  if (serverClockNextMidnightUtc) {
+    const nextMs = new Date(serverClockNextMidnightUtc).getTime();
+    let rem = Math.max(0, nextMs - Date.now());
+    const hours = Math.floor(rem / 3600000);
+    rem %= 3600000;
+    const mins = Math.floor(rem / 60000);
+    serverClockNextGiftEl.textContent = `Next daily gift: in ${hours}h ${mins}m`;
+  } else {
+    serverClockNextGiftEl.textContent = 'Next daily gift: at 00:00 UTC';
+  }
+}
+
+function startServerClockWhenOnLobby(): void {
+  if (serverClockIntervalId) return;
+  fetchServerTimeForClock();
+  updateServerClockDisplay();
+  serverClockIntervalId = setInterval(() => {
+    updateServerClockDisplay();
+  }, 1000);
+  // Refresh next midnight from server every 30s
+  setInterval(() => fetchServerTimeForClock(), 30000);
+}
+
+function stopServerClock(): void {
+  if (serverClockIntervalId) {
+    clearInterval(serverClockIntervalId);
+    serverClockIntervalId = null;
+  }
+}
+
 // --- Start ---
 storeReferralFromUrl();
 fetchAndRenderAuth().then(() => fetchInventory());
 updateLandingTokens();
+startServerClockWhenOnLobby();
 window.addEventListener('resize', resize);
 resize();

@@ -44,6 +44,9 @@ const path_1 = __importDefault(require("path"));
 const dotenv_1 = __importDefault(require("dotenv"));
 // Load .env from repo root so it works regardless of cwd (e.g. systemd, pm2)
 dotenv_1.default.config({ path: path_1.default.resolve(__dirname, '..', '..', '.env') });
+// Game server uses UTC for daily reset (daily gifts, leaderboards). Set TZ so Date logic is consistent.
+if (!process.env.TZ)
+    process.env.TZ = 'UTC';
 async function main() {
     const { ensureStorage } = await Promise.resolve().then(() => __importStar(require('./registry.js')));
     const status = await ensureStorage();

@@ -2,7 +2,7 @@
  * Authoritative world: shelters (players) move, collect strays, adopt at zones to grow.
  */
 
-import type { PlayerState, PetState, AdoptionZoneState, GameSnapshot, PickupState, ShelterState } from 'shared';
+import type { PlayerState, PetState, AdoptionZoneState, GameSnapshot, PickupState, ShelterState, AdoptionEvent } from 'shared';
 
 /** Timestamped log function for server output */
 function log(message: string): void {
@@ -54,10 +54,20 @@ import {
   VAN_MAX_CAPACITY,
 } from 'shared';
 import { INPUT_LEFT, INPUT_RIGHT, INPUT_UP, INPUT_DOWN } from 'shared';
-import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED, PICKUP_TYPE_PORT, PICKUP_TYPE_BREEDER } from 'shared';
+import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED, PICKUP_TYPE_PORT, PICKUP_TYPE_BREEDER, PICKUP_TYPE_SHELTER_PORT } from 'shared';
+import { PET_TYPE_CAT, PET_TYPE_DOG, PET_TYPE_BIRD, PET_TYPE_RABBIT } from 'shared';
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+/** Get random pet type with weighted distribution: 35% cat, 35% dog, 15% bird, 15% rabbit (no special) */
+function randomPetType(): number {
+  const roll = Math.random();
+  if (roll < 0.35) return PET_TYPE_CAT;
+  if (roll < 0.70) return PET_TYPE_DOG;
+  if (roll < 0.85) return PET_TYPE_BIRD;
+  return PET_TYPE_RABBIT;
 }
 
 function dist(ax: number, ay: number, bx: number, by: number): number {
@@ -66,6 +76,21 @@ function dist(ax: number, ay: number, bx: number, by: number): number {
 
 function shelterRadius(size: number): number {
   return SHELTER_BASE_RADIUS + size * SHELTER_RADIUS_PER_SIZE;
+}
+
+/** Calculate shelter tier from size (1-5, capped at 5 for visual purposes) */
+function calculateShelterTier(size: number): number {
+  if (size < 100) return 1;
+  if (size < 250) return 2;
+  if (size < 500) return 3;
+  if (size < 1000) return 4;
+  return 5; // Max tier
+}
+
+/** Visual radius capped at tier 5 (~1000 size) to prevent screen-filling shelters */
+function shelterVisualRadius(size: number): number {
+  const cappedSize = Math.min(size, 1000); // Cap at tier 5
+  return SHELTER_BASE_RADIUS + cappedSize * SHELTER_RADIUS_PER_SIZE;
 }
 
 // Vans always have fixed collision radius - shelters are separate entities now
@@ -97,6 +122,8 @@ export class World {
   private tick = 0;
   private matchStartTick = 0;
   private matchStartTime = Date.now(); // Real-time clock for match duration
+  private pausedDurationMs = 0; // Total time spent paused (for accurate match duration)
+  private frozenAtMs: number | null = null; // When the match was last frozen (null if not frozen)
   private matchEndAt = 0;
   private matchStarted = false;
   private matchEndedEarly = false; // True if match ended due to domination
@@ -111,10 +138,12 @@ export class World {
   private lastAdoptionTick = new Map<string, number>();
   private adoptSpeedPlayerIds = new Set<string>();
   private groundedPlayerIds = new Set<string>(); // Players who chose to ground themselves
-  private portCharges = new Map<string, number>(); // Port charges per player
+  private portCharges = new Map<string, number>(); // Random port charges per player
+  private shelterPortCharges = new Map<string, number>(); // Shelter port charges per player
   private playerColors = new Map<string, string>(); // Player shelter colors
   private playerMoney = new Map<string, number>(); // In-game money per player
   private eliminatedPlayerIds = new Set<string>();
+  private disconnectedPlayerIds = new Set<string>();
   private lastAllyPairs = new Set<string>();
   private combatOverlapTicks = new Map<string, number>();
   
@@ -127,6 +156,7 @@ export class World {
   
   // Timerless game mechanics
   private winnerId: string | null = null;
+  private strayLoss = false; // True when match ended due to >3000 strays (no RT, no bonus)
   private totalMatchAdoptions = 0;
   private lastGlobalAdoptionTick = 0;
   private scarcityLevel = 0;
@@ -148,14 +178,22 @@ export class World {
   private lastBreederWaveTick = 0; // When last wave spawned
   private nextBreederWaveInterval = 0; // Random interval until next wave
   private breederWaveSpawned = false; // Has the wave for current level been spawned?
-  private pendingBreederMiniGames = new Map<string, { petCount: number; startTick: number; level: number }>();
+  private pendingBreederMiniGames = new Map<string, { petCount: number; startTick: number; level: number; isMill?: boolean; breederShelterId?: string }>();
+  /** CPU at breeder: must stay min time before starting simulated mini-game */
+  private cpuAtBreeder = new Map<string, { breederUid: string; level: number; arrivalTick: number }>();
+  /** Delayed CPU breeder completions: resolved at completeAtTick with RT-based win/loss */
+  private pendingCpuBreederCompletions = new Map<string, { level: number; petCount: number; completeAtTick: number }>();
+  /** Only one van can engage a breeder: breederUid -> playerId */
+  private breederClaimedBy = new Map<string, string>();
   
   // Breeder camp tracking for growth mechanic
   private breederCamps = new Map<string, { x: number; y: number; spawnTick: number; level: number }>();
   private static readonly BREEDER_GROWTH_TICKS = 4500; // 3 minutes at 25 ticks/s before growing (3 * 60 * 25)
   private static readonly BREEDER_GROWTH_RADIUS = 80; // Distance to spawn new camp
   private static readonly BREEDER_SHELTER_LEVEL = 4; // Level at which breeders form a shelter
-  private static readonly MAX_BREEDER_LEVEL = 8; // Maximum breeder level
+  private static readonly MAX_BREEDER_LEVEL = 20; // Maximum breeder level; match ends when all level 20+ cleared
+  /** Only spawn random strays during first 5 minutes; after that only breeders spawn strays */
+  private static readonly INITIAL_SPAWN_PERIOD_TICKS = 25 * 60 * 5; // 5 minutes at 25 tps
   
   // Breeder shelters - formed when breeders grow too large
   private breederShelters = new Map<string, { 
@@ -166,8 +204,15 @@ export class World {
     size: number; // Grows over time
   }>();
   private breederShelterId = 0;
+  /** Mills (breeder shelters) currently in van mini-game; cleared when game completes. */
+  private millInCombat = new Set<string>();
+  /** Player ID -> breederShelterId for active mill games (so we know which shelter to remove on 100%). */
+  private activeMillByPlayer = new Map<string, string>();
   private static readonly BREEDER_SHELTER_SPAWN_INTERVAL = 125; // Spawn wild stray every 5 seconds (5 * 25 ticks)
   private static readonly BREEDER_STRAY_SPEED = 1.5; // Wild strays move 1.5x faster
+  /** No strays inside this radius of breeder camps or shelters (clean map). */
+  private static readonly BREEDER_NO_STRAY_RADIUS = 100;
+  private static readonly BREEDER_STRAY_MIN_SPAWN_DIST = 100; // Min distance from breeder shelter when spawning wild strays
   
   // Wild strays (from breeder shelters) - harder to catch, move around
   private wildStrayIds = new Set<string>();
@@ -177,6 +222,18 @@ export class World {
   
   // Match-wide announcements queue
   private pendingAnnouncements: string[] = [];
+  /** Stray count thresholds for which we have already shown a warning (600, 1200, 2500). */
+  private strayWarnings = new Set<number>();
+
+  // Adoption events - timed events with pet type requirements
+  private adoptionEvents = new Map<string, AdoptionEvent>();
+  private adoptionEventIdSeq = 0;
+  private nextAdoptionEventSpawnTick = 0;
+  private static readonly ADOPTION_EVENT_RADIUS = 350;
+  private static readonly ADOPTION_EVENT_DURATION_MIN = 3000;  // 2 min at 25 tps
+  private static readonly ADOPTION_EVENT_DURATION_MAX = 6000;  // 4 min
+  private static readonly ADOPTION_EVENT_SPAWN_DELAY_MIN = 1500; // 1 min before first event
+  private static readonly ADOPTION_EVENT_SPAWN_DELAY_MAX = 3750; // 2.5 min between events
 
   /** Key "a,b" with a < b for ally pair. Both A→B and B→A must be 'ally'. */
   private static allyPairsFromChoices(choices: Map<string, 'fight' | 'ally'>): Set<string> {
@@ -416,6 +473,7 @@ export class World {
       petsInside: [],
       size: 10, // Initial shelter size
       totalAdoptions: 0,
+      tier: 1, // Initial tier
     };
     
     this.shelters.set(shelterId, shelter);
@@ -539,12 +597,102 @@ export class World {
     this.groundedPlayerIds.delete(id);
     return true;
   }
+  
+  /** Use a shelter port charge to teleport to own shelter */
+  useShelterPort(id: string): boolean {
+    const p = this.players.get(id);
+    if (!p || this.eliminatedPlayerIds.has(id)) return false;
+    const charges = this.shelterPortCharges.get(id) ?? 0;
+    if (charges <= 0) return false;
+    
+    // Find player's shelter
+    const shelter = this.getPlayerShelter(id);
+    if (!shelter) return false; // No shelter to port to
+    
+    p.x = shelter.x;
+    p.y = shelter.y;
+    this.shelterPortCharges.set(id, charges - 1);
+    // Porting ungrounds the player (they arrive at shelter but can move)
+    this.groundedPlayerIds.delete(id);
+    return true;
+  }
+  
+  /** Transfer pets from van to allied shelter. Returns count transferred and adoption score earned. */
+  transferPetsToAlliedShelter(vanPlayerId: string, targetShelterId: string): { success: boolean; count: number; senderScore: number; receiverScore: number; reason?: string } {
+    const van = this.players.get(vanPlayerId);
+    if (!van || this.eliminatedPlayerIds.has(vanPlayerId)) {
+      return { success: false, count: 0, senderScore: 0, receiverScore: 0, reason: 'Invalid player' };
+    }
+    
+    const targetShelter = this.shelters.get(targetShelterId);
+    if (!targetShelter) {
+      return { success: false, count: 0, senderScore: 0, receiverScore: 0, reason: 'Shelter not found' };
+    }
+    
+    // Check if target shelter owner is allied
+    if (!this.isAlly(vanPlayerId, targetShelter.ownerId, this.lastAllyPairs)) {
+      return { success: false, count: 0, senderScore: 0, receiverScore: 0, reason: 'Must be allied to transfer' };
+    }
+    
+    // Check if van is near the shelter (within transfer range)
+    const sr = shelterVisualRadius(targetShelter.size);
+    const transferRange = sr + 100; // Can transfer from slightly outside shelter
+    const dx = van.x - targetShelter.x;
+    const dy = van.y - targetShelter.y;
+    if (Math.hypot(dx, dy) > transferRange) {
+      return { success: false, count: 0, senderScore: 0, receiverScore: 0, reason: 'Too far from shelter' };
+    }
+    
+    // Transfer all pets from van to shelter
+    const petsToTransfer = van.petsInside.length;
+    if (petsToTransfer === 0) {
+      return { success: false, count: 0, senderScore: 0, receiverScore: 0, reason: 'No pets to transfer' };
+    }
+    
+    // Move pets to shelter
+    for (const petId of van.petsInside) {
+      targetShelter.petsInside.push(petId);
+      const pet = this.pets.get(petId);
+      if (pet) {
+        pet.insideShelterId = targetShelter.id;
+        pet.x = targetShelter.x;
+        pet.y = targetShelter.y;
+      }
+    }
+    van.petsInside = [];
+    
+    // Calculate adoption scores: 30% to sender, 70% to receiver (per design doc)
+    const baseScore = petsToTransfer * 10; // 10 points per pet
+    const senderScore = Math.floor(baseScore * 0.3);
+    const receiverScore = Math.floor(baseScore * 0.7);
+    
+    log(`Player ${van.displayName} transferred ${petsToTransfer} pets to allied shelter (sender: +${senderScore}, receiver: +${receiverScore})`);
+    
+    return { success: true, count: petsToTransfer, senderScore, receiverScore };
+  }
+  
+  /** Get shelter IDs of allied players that this player can transfer to */
+  getAlliedShelters(playerId: string): string[] {
+    const result: string[] = [];
+    for (const shelter of this.shelters.values()) {
+      if (shelter.ownerId === playerId) continue; // Skip own shelter
+      if (this.isAlly(playerId, shelter.ownerId, this.lastAllyPairs)) {
+        result.push(shelter.id);
+      }
+    }
+    return result;
+  }
 
   setInput(id: string, inputFlags: number, inputSeq: number): void {
     const p = this.players.get(id);
     if (!p) return;
     p.inputSeq = inputSeq;
     (p as PlayerState & { lastInputFlags?: number }).lastInputFlags = inputFlags;
+  }
+
+  setPlayerDisconnected(id: string, disconnected: boolean): void {
+    if (disconnected) this.disconnectedPlayerIds.add(id);
+    else this.disconnectedPlayerIds.delete(id);
   }
 
   applyStartingBoosts(id: string, boosts: { sizeBonus?: number; speedBoost?: boolean; adoptSpeed?: boolean }): void {
@@ -747,7 +895,7 @@ export class World {
 
     // Need new target - look for strays/pickups across the ENTIRE map
     const strayCandidates: { x: number; y: number; d: number }[] = [];
-    const pickupCandidates: { x: number; y: number; d: number }[] = [];
+    const pickupCandidates: { x: number; y: number; d: number; type: number }[] = [];
 
     for (const pet of this.pets.values()) {
       if (pet.insideShelterId !== null) continue;
@@ -760,7 +908,7 @@ export class World {
       // Skip breeder camps if CPU is not allowed to shut them down
       if (u.type === PICKUP_TYPE_BREEDER && !this.cpuCanShutdownBreeders) continue;
       const d = dist(p.x, p.y, u.x, u.y);
-      pickupCandidates.push({ x: u.x, y: u.y, d });
+      pickupCandidates.push({ x: u.x, y: u.y, d, type: u.type });
     }
     pickupCandidates.sort((a, b) => a.d - b.d);
 
@@ -772,6 +920,19 @@ export class World {
       const idx = r < 0.7 ? 0 : r < 0.85 ? 1 : Math.min(2, arr.length - 1);
       return arr[idx] ?? null;
     };
+
+    // PRIORITY: Attack breeders aggressively when allowed
+    if (this.cpuCanShutdownBreeders) {
+      const breederCandidates = pickupCandidates.filter(c => c.type === PICKUP_TYPE_BREEDER);
+      if (breederCandidates.length > 0) {
+        // Always prioritize if 2+ breeders, or 60% chance with 1 breeder
+        if (breederCandidates.length >= 2 || Math.random() < 0.6) {
+          const target = breederCandidates[0]; // Nearest breeder
+          this.cpuTargets.set(p.id, { x: target.x, y: target.y, type: 'pickup' });
+          return this.directionToward(p.x, p.y, target.x, target.y);
+        }
+      }
+    }
 
     const strayTarget = pickWithJitter(strayCandidates);
     const pickupTarget = pickWithJitter(pickupCandidates);
@@ -850,20 +1011,145 @@ export class World {
     this.nextBreederWaveInterval = 0;
     this.breederWaveSpawned = false;
     this.pendingBreederMiniGames.clear();
+    this.cpuAtBreeder.clear();
+    this.pendingCpuBreederCompletions.clear();
+    this.breederClaimedBy.clear();
     this.breederCamps.clear();
     this.breederShelters.clear();
+    this.millInCombat.clear();
+    this.activeMillByPlayer.clear();
     this.wildStrayIds.clear();
     this.pendingAnnouncements = [];
+    this.strayWarnings.clear();
+    this.adoptionEvents.clear();
+    this.nextAdoptionEventSpawnTick = this.tick + World.ADOPTION_EVENT_SPAWN_DELAY_MIN;
+  }
+  
+  private spawnAdoptionEvent(now: number): void {
+    const eventTypes: AdoptionEvent['type'][] = ['school_fair', 'farmers_market', 'petco_weekend', 'stadium_night'];
+    const type = eventTypes[Math.floor(Math.random() * eventTypes.length)];
+    const x = 200 + Math.random() * (MAP_WIDTH - 400);
+    const y = 200 + Math.random() * (MAP_HEIGHT - 400);
+    const numReqs = 1 + Math.floor(Math.random() * 2); // 1-2 requirement types
+    const requirements: { petType: number; count: number }[] = [];
+    const usedTypes = new Set<number>();
+    for (let i = 0; i < numReqs; i++) {
+      let pt = Math.floor(Math.random() * 5); // 0-4
+      while (usedTypes.has(pt)) pt = Math.floor(Math.random() * 5);
+      usedTypes.add(pt);
+      requirements.push({ petType: pt, count: 2 + Math.floor(Math.random() * 4) }); // 2-5 each
+    }
+    const durationTicks = World.ADOPTION_EVENT_DURATION_MIN + Math.floor(Math.random() * (World.ADOPTION_EVENT_DURATION_MAX - World.ADOPTION_EVENT_DURATION_MIN));
+    const eid = `event-${++this.adoptionEventIdSeq}`;
+    const ev: AdoptionEvent = {
+      id: eid,
+      type,
+      x,
+      y,
+      requirements,
+      contributions: {},
+      startTick: now,
+      durationTicks,
+      rewards: { top1: 100, top2: 50, top3: 25, participation: 10 },
+    };
+    this.adoptionEvents.set(eid, ev);
+    const typeName = type.replace(/_/g, ' ');
+    log(`Adoption event started: ${typeName} at (${Math.round(x)}, ${Math.round(y)}) for ${durationTicks / 25}s`);
+    this.pendingAnnouncements.push(`📢 ${typeName.replace(/\b\w/g, c => c.toUpperCase())} - bring pets here!`);
+  }
+  
+  private resolveAdoptionEvent(eid: string, ev: AdoptionEvent): void {
+    const totals: { playerId: string; total: number }[] = [];
+    for (const [playerId, contrib] of Object.entries(ev.contributions)) {
+      let total = 0;
+      for (const count of Object.values(contrib)) total += count;
+      if (total > 0) totals.push({ playerId, total });
+    }
+    totals.sort((a, b) => b.total - a.total);
+    const top1 = this.players.get(totals[0]?.playerId ?? '');
+    const top2 = this.players.get(totals[1]?.playerId ?? '');
+    const top3 = this.players.get(totals[2]?.playerId ?? '');
+    if (top1) this.playerMoney.set(top1.id, (this.playerMoney.get(top1.id) ?? 0) + ev.rewards.top1);
+    if (top2) this.playerMoney.set(top2.id, (this.playerMoney.get(top2.id) ?? 0) + ev.rewards.top2);
+    if (top3) this.playerMoney.set(top3.id, (this.playerMoney.get(top3.id) ?? 0) + ev.rewards.top3);
+    for (let i = 3; i < totals.length; i++) {
+      const p = this.players.get(totals[i].playerId);
+      if (p) this.playerMoney.set(p.id, (this.playerMoney.get(p.id) ?? 0) + ev.rewards.participation);
+    }
+    if (top1) {
+      this.pendingAnnouncements.push(`${top1.displayName} won ${ev.type.replace(/_/g, ' ')} event! +${ev.rewards.top1} RT`);
+      log(`Event ${eid} ended - winner: ${top1.displayName}`);
+    }
+  }
+  
+  private recordEventContribution(playerId: string, petType: number, x: number, y: number): void {
+    for (const ev of this.adoptionEvents.values()) {
+      const d = Math.hypot(ev.x - x, ev.y - y);
+      if (d <= World.ADOPTION_EVENT_RADIUS) {
+        if (!ev.contributions[playerId]) ev.contributions[playerId] = {};
+        ev.contributions[playerId][petType] = (ev.contributions[playerId][petType] ?? 0) + 1;
+      }
+    }
   }
   
   /** Set whether CPU players can attempt to shut down breeders (solo mode option) */
   setCpuBreederBehavior(canShutdown: boolean): void {
     this.cpuCanShutdownBreeders = canShutdown;
   }
+  
+  /** Form an alliance between two players */
+  formAlliance(playerId1: string, playerId2: string): void {
+    if (playerId1 === playerId2) return;
+    const key = playerId1 < playerId2 ? `${playerId1},${playerId2}` : `${playerId2},${playerId1}`;
+    this.lastAllyPairs.add(key);
+    log(`Alliance formed between ${playerId1} and ${playerId2}`);
+  }
 
   private static readonly ELIMINATED_SIZE_THRESHOLD = 10;
 
-  tickWorld(fightAllyChoices?: Map<string, 'fight' | 'ally'>, allyRequests?: Map<string, Set<string>>): void {
+  /** Time limit in seconds for breeder camp mini-game by level (human and CPU). */
+  private static getBreederTimeLimitSeconds(level: number): number {
+    if (level <= 5) return 15;
+    if (level <= 9) return 30;
+    if (level <= 14) return 40;
+    return 45;
+  }
+
+  /** Time limit in seconds for mill (breeder shelter) mini-game: 60 + level*2. */
+  private static getBreederMillTimeLimitSeconds(level: number): number {
+    return 60 + level * 2;
+  }
+
+  /** Min seconds CPU must stay at breeder before starting (5 + level). */
+  private static getBreederMinStaySeconds(level: number): number {
+    return 5 + level;
+  }
+
+  /** True if player is in any breeder state (mini-game or CPU at/during breeder) - van must not move. */
+  private isPlayerInBreederState(playerId: string): boolean {
+    return this.pendingBreederMiniGames.has(playerId)
+      || this.cpuAtBreeder.has(playerId)
+      || this.pendingCpuBreederCompletions.has(playerId);
+  }
+
+  /** Estimated RT cost to complete breeder (petCount meals × ingredients × avg cost). */
+  private static estimatedBreederRtCost(level: number, petCount: number): number {
+    let ingredientCount = 1;
+    let avgCost = 10;
+    if (level >= 10) {
+      ingredientCount = 4;
+      avgCost = 13;
+    } else if (level >= 6) {
+      ingredientCount = 3;
+      avgCost = 11;
+    } else if (level >= 3) {
+      ingredientCount = 2;
+      avgCost = 10;
+    }
+    return petCount * ingredientCount * avgCost;
+  }
+
+  tickWorld(fightAllyChoices?: Map<string, 'fight' | 'ally'>, allyRequests?: Map<string, Set<string>>, cpuIds?: Set<string>): void {
     if (!this.matchStarted) return;
     this.tick++;
     const now = this.tick;
@@ -880,15 +1166,16 @@ export class World {
       return !!(aRequests?.has(bId) && bRequests?.has(aId));
     };
 
-    // Anti-stall: Scarcity escalation when no adoptions for too long
+    // Anti-stall: Scarcity escalation when no adoptions for too long (only during initial 5 min; goal is zero strays after)
+    const ticksSinceStartForScarcity = now - this.matchStartTick;
     const ticksSinceAdoption = now - this.lastGlobalAdoptionTick;
-    if (this.lastGlobalAdoptionTick > 0 && ticksSinceAdoption > SCARCITY_TRIGGER_TICKS) {
+    if (ticksSinceStartForScarcity < World.INITIAL_SPAWN_PERIOD_TICKS && this.lastGlobalAdoptionTick > 0 && ticksSinceAdoption > SCARCITY_TRIGGER_TICKS) {
       const newScarcityLevel = Math.min(3, Math.floor(ticksSinceAdoption / SCARCITY_TRIGGER_TICKS));
       if (newScarcityLevel > this.scarcityLevel) {
         this.scarcityLevel = newScarcityLevel;
         log(`Scarcity level ${this.scarcityLevel} activated at tick ${now}`);
         
-        // Level 2+: Spawn bonus strays outside adoption zone
+        // Level 2+: Spawn bonus strays outside adoption zone (only in initial period)
         if (this.scarcityLevel >= 2) {
           const bonusCount = this.scarcityLevel * 5;
           for (let i = 0; i < bonusCount; i++) {
@@ -902,30 +1189,13 @@ export class World {
                 vx: 0,
                 vy: 0,
                 insideShelterId: null,
+                petType: randomPetType(),
               });
             }
           }
         }
       }
-      
-      // Level 1+: Drift strays toward center (slowly) but stop at adoption zone edge
-      if (this.scarcityLevel >= 1) {
-        const centerX = MAP_WIDTH / 2;
-        const centerY = MAP_HEIGHT / 2;
-        const driftSpeed = this.scarcityLevel * 0.5;
-        const stopDistance = ADOPTION_ZONE_RADIUS + World.SPAWN_MARGIN; // Don't drift into adoption zone
-        for (const pet of this.pets.values()) {
-          if (pet.insideShelterId !== null) continue;
-          if (this.wildStrayIds.has(pet.id)) continue; // Wild strays don't drift
-          const dx = centerX - pet.x;
-          const dy = centerY - pet.y;
-          const d = Math.hypot(dx, dy);
-          if (d > stopDistance) {
-            pet.x += (dx / d) * driftSpeed;
-            pet.y += (dy / d) * driftSpeed;
-          }
-        }
-      }
+      // No gravity toward adoption center — only shelter gravity applies (see shelter hasGravity loop below)
     }
     
     // Wild strays (from breeder shelters) move around randomly - harder to catch!
@@ -953,8 +1223,51 @@ export class World {
       if (pet.x <= 50 || pet.x >= MAP_WIDTH - 50) pet.vx *= -1;
       if (pet.y <= 50 || pet.y >= MAP_HEIGHT - 50) pet.vy *= -1;
     }
+    
+    // Keep strays outside breeder camp/shelter radius (clean map)
+    const R = World.BREEDER_NO_STRAY_RADIUS;
+    for (const pet of this.pets.values()) {
+      if (pet.insideShelterId !== null) continue;
+      for (const pickup of this.pickups.values()) {
+        if (pickup.type !== PICKUP_TYPE_BREEDER) continue;
+        const d = dist(pet.x, pet.y, pickup.x, pickup.y);
+        if (d < R && d > 0) {
+          const dx = (pet.x - pickup.x) / d;
+          const dy = (pet.y - pickup.y) / d;
+          pet.x = pickup.x + dx * R;
+          pet.y = pickup.y + dy * R;
+          break; // one correction per pet per tick
+        }
+      }
+      for (const shelter of this.breederShelters.values()) {
+        const d = dist(pet.x, pet.y, shelter.x, shelter.y);
+        if (d < R && d > 0) {
+          const dx = (pet.x - shelter.x) / d;
+          const dy = (pet.y - shelter.y) / d;
+          pet.x = shelter.x + dx * R;
+          pet.y = shelter.y + dy * R;
+          break;
+        }
+      }
+    }
+    
+    // Adoption events: spawn up to 2 at a time
+    if (now >= this.nextAdoptionEventSpawnTick && this.adoptionEvents.size < 2) {
+      this.spawnAdoptionEvent(now);
+      this.nextAdoptionEventSpawnTick = now + World.ADOPTION_EVENT_SPAWN_DELAY_MIN +
+        Math.floor(Math.random() * (World.ADOPTION_EVENT_SPAWN_DELAY_MAX - World.ADOPTION_EVENT_SPAWN_DELAY_MIN));
+    }
+    const expiredEventIds: string[] = [];
+    for (const [eid, ev] of this.adoptionEvents.entries()) {
+      if (now >= ev.startTick + ev.durationTicks) {
+        this.resolveAdoptionEvent(eid, ev);
+        expiredEventIds.push(eid);
+      }
+    }
+    for (const eid of expiredEventIds) this.adoptionEvents.delete(eid);
 
-    if (now >= this.spawnPetAt) {
+    // Regular stray spawn only during first 5 minutes; after that only breeders spawn strays
+    if ((now - this.matchStartTick) < World.INITIAL_SPAWN_PERIOD_TICKS && now >= this.spawnPetAt) {
       this.spawnPetAt = now + STRAY_SPAWN_TICKS;
       for (let i = 0; i < STRAY_SPAWN_COUNT; i++) {
         const pos = this.randomPosOutsideAdoptionZone();
@@ -967,6 +1280,7 @@ export class World {
             vx: 0,
             vy: 0,
             insideShelterId: null,
+            petType: randomPetType(),
           });
         }
       }
@@ -977,9 +1291,11 @@ export class World {
       const pos = this.randomPosOutsideAdoptionZone();
       if (pos) {
         const uid = `pickup-${++this.pickupIdSeq}`;
-        // Regular pickup: 60% growth, 25% speed, 15% port
+        // Regular pickup: 60% growth, 25% speed, 10% random port, 5% shelter port
         const roll = Math.random();
-        const type = roll < 0.6 ? PICKUP_TYPE_GROWTH : roll < 0.85 ? PICKUP_TYPE_SPEED : PICKUP_TYPE_PORT;
+        const type = roll < 0.6 ? PICKUP_TYPE_GROWTH : 
+                     roll < 0.85 ? PICKUP_TYPE_SPEED : 
+                     roll < 0.95 ? PICKUP_TYPE_PORT : PICKUP_TYPE_SHELTER_PORT;
         this.pickups.set(uid, {
           id: uid,
           x: pos.x,
@@ -999,9 +1315,9 @@ export class World {
                        this.nextBreederWaveInterval > 0 && ticksSinceLastWave >= this.nextBreederWaveInterval;
     
     if (isFirstWave || isNextWave) {
-      // Advance level if this isn't the first wave
+      // Advance level if this isn't the first wave (cap at MAX_BREEDER_LEVEL)
       if (isNextWave) {
-        this.breederCurrentLevel++;
+        this.breederCurrentLevel = Math.min(this.breederCurrentLevel + 1, World.MAX_BREEDER_LEVEL);
         this.breederSpawnCount = 0;
       }
       
@@ -1125,7 +1441,7 @@ export class World {
         const numStrays = 1 + (shelter.level >= 6 ? 1 : 0);
         for (let i = 0; i < numStrays; i++) {
           const angle = Math.random() * Math.PI * 2;
-          const dist = 50 + Math.random() * 100;
+          const dist = World.BREEDER_STRAY_MIN_SPAWN_DIST + Math.random() * 80;
           const sx = clamp(shelter.x + Math.cos(angle) * dist, 50, MAP_WIDTH - 50);
           const sy = clamp(shelter.y + Math.sin(angle) * dist, 50, MAP_HEIGHT - 50);
           
@@ -1137,16 +1453,45 @@ export class World {
             vx: (Math.random() - 0.5) * 2,
             vy: (Math.random() - 0.5) * 2,
             insideShelterId: null,
+            petType: randomPetType(),
           });
           this.wildStrayIds.add(petId); // Mark as wild stray
         }
       }
     }
     
-    // Shelter vs Breeder Shelter combat
-    // Player shelters always win, but lose pets based on breeder level
+    // Van vs breeder shelter (mill): start mill mini-game when van overlaps mill (and mill not in combat)
+    for (const [shelterId, breederShelter] of this.breederShelters.entries()) {
+      if (this.millInCombat.has(shelterId)) continue;
+      const bsr = 40 + breederShelter.size * 0.5;
+      const basePetCount = 5 + Math.floor(breederShelter.level);
+      const petCount = Math.min(basePetCount, 20);
+      for (const p of this.players.values()) {
+        if (this.eliminatedPlayerIds.has(p.id)) continue;
+        if (this.pendingBreederMiniGames.has(p.id)) continue;
+        if (this.cpuAtBreeder.has(p.id) || this.pendingCpuBreederCompletions.has(p.id)) continue;
+        if (p.id.startsWith('cpu-')) continue; // CPUs don't start mill minigame from van (they use camps)
+        const d = dist(p.x, p.y, breederShelter.x, breederShelter.y);
+        if (d > VAN_FIXED_RADIUS + bsr) continue;
+        this.millInCombat.add(shelterId);
+        this.activeMillByPlayer.set(p.id, shelterId);
+        this.pendingBreederMiniGames.set(p.id, {
+          petCount,
+          startTick: now,
+          level: breederShelter.level,
+          isMill: true,
+          breederShelterId: shelterId,
+        });
+        this.pendingAnnouncements.push(`${p.displayName} is attacking the Level ${breederShelter.level} mill!`);
+        log(`Player ${p.displayName} started mill mini-game vs ${shelterId} (lv${breederShelter.level})`);
+        break; // one van per mill
+      }
+    }
+    
+    // Shelter vs Breeder Shelter combat (skip mills currently in van minigame)
     const destroyedBreederShelters: string[] = [];
     for (const [breederShelterId, breederShelter] of this.breederShelters.entries()) {
+      if (this.millInCombat.has(breederShelterId)) continue;
       for (const playerShelter of this.shelters.values()) {
         const bsr = 40 + breederShelter.size * 0.5; // Breeder shelter radius
         const psr = shelterRadius(playerShelter.size);
@@ -1205,7 +1550,7 @@ export class World {
             }
           }
         } else if (milestone === 100) {
-          // Celebrity Pet: high-value strays spawn outside adoption zone
+          // Celebrity Pet: bonus strays spawn outside adoption zone (random types, no special)
           for (let i = 0; i < 8; i++) {
             const pos = this.randomPosOutsideAdoptionZone();
             if (pos) {
@@ -1217,6 +1562,7 @@ export class World {
                 vx: 0,
                 vy: 0,
                 insideShelterId: null,
+                petType: randomPetType(),
               });
             }
           }
@@ -1233,6 +1579,7 @@ export class World {
                 vx: 0,
                 vy: 0,
                 insideShelterId: null,
+                petType: randomPetType(),
               });
             }
           }
@@ -1242,7 +1589,7 @@ export class World {
             const pos = this.randomPosOutsideAdoptionZone();
             if (pos) {
               const pid = `pet-${++this.petIdSeq}`;
-              this.pets.set(pid, { id: pid, x: pos.x, y: pos.y, vx: 0, vy: 0, insideShelterId: null });
+              this.pets.set(pid, { id: pid, x: pos.x, y: pos.y, vx: 0, vy: 0, insideShelterId: null, petType: randomPetType() });
             }
           }
           for (let i = 0; i < 8; i++) {
@@ -1272,12 +1619,15 @@ export class World {
         continue;
       }
       let inputFlags = (p as PlayerState & { lastInputFlags?: number }).lastInputFlags ?? 0;
-      if (p.id.startsWith('cpu-')) inputFlags = this.cpuAI(p);
+      if (this.disconnectedPlayerIds.has(p.id)) inputFlags = 0;
+      else if (p.id.startsWith('cpu-')) inputFlags = this.cpuAI(p);
       const grounded = this.isGrounded(p);
-      if (grounded) {
+      const inBreeder = this.isPlayerInBreederState(p.id);
+      if (grounded || inBreeder) {
         p.vx = 0;
         p.vy = 0;
-      } else {
+      }
+      if (!grounded && !inBreeder) {
         this.applyInput(p, inputFlags);
       }
       let nx = p.x + p.vx;
@@ -1318,7 +1668,7 @@ export class World {
 
     // Combat: overlapping shelters can fight after sustained overlap time
     const playerList = Array.from(this.players.values());
-    const strayCount = Array.from(this.pets.values()).filter((p) => p.insideShelterId === null).length;
+    const strayCountForCombat = Array.from(this.pets.values()).filter((p) => p.insideShelterId === null).length;
     for (let i = 0; i < playerList.length; i++) {
       const a = playerList[i];
       if (this.eliminatedPlayerIds.has(a.id)) continue;
@@ -1396,7 +1746,7 @@ export class World {
         const strengthA = (a.size + a.petsInside.length * COMBAT_PET_WEIGHT) * (ADOPTION_TICKS_INTERVAL / intervalA);
         const strengthB = (b.size + b.petsInside.length * COMBAT_PET_WEIGHT) * (ADOPTION_TICKS_INTERVAL / intervalB);
         const baseChanceA = 0.5 + (strengthA - strengthB) * COMBAT_STRENGTH_WEIGHT;
-        const variance = Math.min(COMBAT_MAX_VARIANCE, strayCount * COMBAT_STRAY_VARIANCE);
+        const variance = Math.min(COMBAT_MAX_VARIANCE, strayCountForCombat * COMBAT_STRAY_VARIANCE);
         const jitter = (Math.random() - 0.5) * 2 * variance;
         const chanceA = clamp(baseChanceA + jitter, 0.1, 0.9);
         const winner = Math.random() < chanceA ? a : b;
@@ -1455,123 +1805,42 @@ export class World {
       }
     }
     
-    // Van-vs-Shelter combat: track attacking vans per shelter
-    const attackersPerShelter = new Map<string, string[]>(); // shelterId -> [vanIds]
+    // Shelters are protected - no van-vs-shelter combat (removed for cooperative gameplay)
+    // Vans can push each other away from shelters but cannot attack
     
-    for (const p of this.players.values()) {
-      if (this.eliminatedPlayerIds.has(p.id)) continue;
-      
-      for (const shelter of this.shelters.values()) {
-        if (shelter.ownerId === p.id) continue;
-        if (this.isAlly(p.id, shelter.ownerId, this.lastAllyPairs)) continue;
-        
-        const sr = shelterRadius(shelter.size);
-        const vanR = VAN_FIXED_RADIUS;
-        // Van is attacking if within shelter radius
-        if (!aabbOverlap(p.x, p.y, vanR, shelter.x, shelter.y, sr)) continue;
-        
-        const attackers = attackersPerShelter.get(shelter.id) ?? [];
-        attackers.push(p.id);
-        attackersPerShelter.set(shelter.id, attackers);
+    // Stray count for loss and warnings
+    const strayCountVictory = Array.from(this.pets.values()).filter((p) => p.insideShelterId === null).length;
+    if (!this.matchEndedEarly) {
+      if (strayCountVictory >= 600 && !this.strayWarnings.has(600)) {
+        this.strayWarnings.add(600);
+        this.pendingAnnouncements.push('Warning: 600 strays on the map! Rescue more pets!');
+      }
+      if (strayCountVictory >= 1200 && !this.strayWarnings.has(1200)) {
+        this.strayWarnings.add(1200);
+        this.pendingAnnouncements.push('Danger: 1200 strays! The situation is getting critical!');
+      }
+      if (strayCountVictory >= 2500 && !this.strayWarnings.has(2500)) {
+        this.strayWarnings.add(2500);
+        this.pendingAnnouncements.push('URGENT: 2500 strays! Hurry and rescue more - game over at 3,000!');
       }
     }
-    
-    // Resolve van-vs-shelter combat
-    for (const [shelterId, attackerIds] of attackersPerShelter.entries()) {
-      const shelter = this.shelters.get(shelterId);
-      if (!shelter) continue;
-      
-      const owner = this.players.get(shelter.ownerId);
-      if (!owner) continue;
-      
-      const sr = shelterRadius(shelter.size);
-      
-      // Single attacker always loses against shelter
-      if (attackerIds.length === 1) {
-        const attacker = this.players.get(attackerIds[0]);
-        if (attacker) {
-          // Attacker takes damage: lose 5 size, drop all pets near shelter
-          attacker.size = Math.max(1, attacker.size - 5);
-          while (attacker.petsInside.length > 0) {
-            const petId = attacker.petsInside.pop()!;
-            const pet = this.pets.get(petId);
-            if (pet) {
-              pet.insideShelterId = null;
-              pet.x = shelter.x + (Math.random() - 0.5) * sr;
-              pet.y = shelter.y + (Math.random() - 0.5) * sr;
-            }
-          }
-          log(`Van ${attacker.displayName} attacked shelter alone and lost!`);
-        }
-      } else {
-        // 2+ attackers: can steal shelter's pets
-        // Combined attack strength (each van contributes 50 + pets carried)
-        let attackStrength = 0;
-        for (const id of attackerIds) {
-          const att = this.players.get(id);
-          if (att) attackStrength += 50 + att.petsInside.length;
-        }
-        
-        const shelterStrength = shelter.size + shelter.petsInside.length;
-        
-        // If attackers combined are stronger, steal pets
-        if (attackStrength > shelterStrength) {
-          const stealCount = Math.min(shelter.petsInside.length, attackerIds.length * 5);
-          for (let i = 0; i < stealCount; i++) {
-            const petId = shelter.petsInside.pop();
-            if (!petId) break;
-            // Give to random attacker (if they have space)
-            const randomAttId = attackerIds[Math.floor(Math.random() * attackerIds.length)];
-            const att = this.players.get(randomAttId);
-            if (att && att.petsInside.length < VAN_MAX_CAPACITY) {
-              att.petsInside.push(petId);
-              const pet = this.pets.get(petId);
-              if (pet) pet.insideShelterId = att.id;
-            } else {
-              // Attacker full, drop pet nearby
-              const pet = this.pets.get(petId);
-              if (pet) {
-                pet.insideShelterId = null;
-                pet.x = shelter.x + (Math.random() - 0.5) * sr * 2;
-                pet.y = shelter.y + (Math.random() - 0.5) * sr * 2;
-              }
-            }
-          }
-          log(`${attackerIds.length} vans raided shelter and stole ${stealCount} pets!`);
-        } else {
-          // Attackers not strong enough, they all take damage
-          for (const id of attackerIds) {
-            const att = this.players.get(id);
-            if (att) {
-              att.size = Math.max(1, att.size - 3);
-            }
-          }
-          log(`${attackerIds.length} vans attacked shelter but failed!`);
-        }
-      }
+    // Loss check: >3000 strays = match over, no RT, no bonus
+    if (!this.matchEndedEarly && strayCountVictory > 3000) {
+      this.matchEndedEarly = true;
+      this.matchEndAt = this.tick;
+      this.winnerId = null;
+      this.strayLoss = true;
+      log(`Match end: too many strays (${strayCountVictory}) - loss for all, no RT`);
     }
-    
-    // Domination check: game ends when 1 shelter covers 51% of the actual MAP AREA
-    // This is a huge challenge - shelters must grow large through combat and adoptions
+    // Victory check: zero strays AND all breeders cleared (no camps, no shelters)
     if (!this.matchEndedEarly && this.shelters.size > 0) {
-      const mapArea = MAP_WIDTH * MAP_HEIGHT; // 4800 * 4800 = 23,040,000
-      const dominationThreshold = 0.51; // 51% of map
-      
-      for (const shelter of this.shelters.values()) {
-        if (!shelter.hasAdoptionCenter) continue; // Must have adoption center to win
-        
-        const r = shelterRadius(shelter.size);
-        const shelterArea = Math.PI * r * r;
-        const percent = shelterArea / mapArea;
-        
-        if (percent >= dominationThreshold) {
-          this.matchEndedEarly = true;
-          this.matchEndAt = this.tick;
-          this.winnerId = shelter.ownerId;
-          const p = this.players.get(shelter.ownerId);
-          log(`Map domination by ${p?.displayName ?? shelter.ownerId} - shelter covers ${(percent * 100).toFixed(1)}% of map (radius ${Math.round(r)}, size ${shelter.size}) at tick ${this.tick}`);
-          break;
-        }
+      const allBreedersCleared = this.breederShelters.size === 0 && this.breederCamps.size === 0;
+      if (strayCountVictory === 0 && allBreedersCleared) {
+        this.matchEndedEarly = true;
+        this.matchEndAt = this.tick;
+        const firstShelter = this.shelters.values().next().value;
+        this.winnerId = firstShelter?.ownerId ?? null;
+        log(`Match end: zero strays and all breeders cleared at tick ${this.tick}. Winner: ${this.winnerId ?? 'co-op'}`);
       }
     }
     
@@ -1663,12 +1932,75 @@ export class World {
       }
     }
 
+    // Resolve delayed CPU breeder completions (simulated puzzle finished)
+    for (const [playerId, data] of Array.from(this.pendingCpuBreederCompletions.entries())) {
+      if (now < data.completeAtTick) continue;
+      this.pendingCpuBreederCompletions.delete(playerId);
+      const cost = World.estimatedBreederRtCost(data.level, data.petCount);
+      const currentRt = this.playerMoney.get(playerId) ?? 0;
+      const rescuedCount = currentRt >= cost ? data.petCount : 0;
+      if (rescuedCount > 0) {
+        this.playerMoney.set(playerId, currentRt - cost);
+      }
+      this.completeBreederMiniGame(playerId, rescuedCount, data.petCount, data.level);
+    }
+
+    // Advance CPU-at-breeder: remove if out of range; if stayed min time, start delayed completion
+    for (const [playerId, data] of Array.from(this.cpuAtBreeder.entries())) {
+      const u = this.pickups.get(data.breederUid);
+      const player = this.players.get(playerId);
+      if (!u || !player || u.type !== PICKUP_TYPE_BREEDER) {
+        this.cpuAtBreeder.delete(playerId);
+        this.breederClaimedBy.delete(data.breederUid);
+        continue;
+      }
+      const radius = effectiveRadius(player);
+      if (dist(player.x, player.y, u.x, u.y) > radius + GROWTH_ORB_RADIUS) {
+        this.cpuAtBreeder.delete(playerId);
+        this.breederClaimedBy.delete(data.breederUid);
+        continue;
+      }
+      const minStayTicks = World.getBreederMinStaySeconds(data.level) * TICK_RATE;
+      if (now - data.arrivalTick < minStayTicks) continue;
+      const camp = this.breederCamps.get(data.breederUid);
+      const level = camp?.level ?? data.level;
+      const basePets = 3 + Math.floor(Math.random() * 3);
+      const levelBonus = Math.floor((level - 1) / 2);
+      const petCount = Math.min(basePets + levelBonus, 15); // Cap 15 for high-level breeders
+      this.pickups.delete(data.breederUid);
+      this.breederCamps.delete(data.breederUid);
+      this.breederClaimedBy.delete(data.breederUid);
+      this.cpuAtBreeder.delete(playerId);
+      this.pendingCpuBreederCompletions.set(playerId, {
+        level,
+        petCount,
+        completeAtTick: now + World.getBreederTimeLimitSeconds(level) * TICK_RATE,
+      });
+      this.pendingAnnouncements.push(`${player.displayName} is shutting down a Level ${level} breeder camp!`);
+      log(`CPU ${player.displayName} started level ${level} breeder mini-game (resolves in ${World.getBreederTimeLimitSeconds(level)}s)`);
+    }
+
     for (const p of this.players.values()) {
       if (this.eliminatedPlayerIds.has(p.id)) continue;
       const radius = effectiveRadius(p);
       for (const [uid, u] of Array.from(this.pickups.entries())) {
         if (dist(p.x, p.y, u.x, u.y) > radius + GROWTH_ORB_RADIUS) continue;
+        if (u.type === PICKUP_TYPE_BREEDER) {
+          const isCpu = cpuIds?.has(p.id);
+          if (isCpu) {
+            // Skip if this CPU is already processing a breeder
+            if (this.cpuAtBreeder.has(p.id) || this.pendingCpuBreederCompletions.has(p.id)) continue;
+            const existingClaim = this.breederClaimedBy.get(uid);
+            if (existingClaim !== undefined && existingClaim !== p.id) continue; // Another van already attacking
+            const camp = this.breederCamps.get(uid);
+            const level = camp?.level ?? 1;
+            this.breederClaimedBy.set(uid, p.id);
+            this.cpuAtBreeder.set(p.id, { breederUid: uid, level, arrivalTick: now });
+            continue;
+          }
+        }
         this.pickups.delete(uid);
+        if (u.type === PICKUP_TYPE_BREEDER) this.breederClaimedBy.delete(uid);
         
         if (u.type === PICKUP_TYPE_BREEDER) {
           // Get level before removing from camps tracking
@@ -1677,7 +2009,7 @@ export class World {
           // Higher level = more pets to rescue
           const basePets = 3 + Math.floor(Math.random() * 3); // 3-5 base
           const levelBonus = Math.floor((level - 1) / 2); // +1 pet every 2 levels
-          const petCount = Math.min(basePets + levelBonus, 8); // Cap at 8 pets
+          const petCount = Math.min(basePets + levelBonus, 15); // Cap 15 for high-level breeders
           
           // Breeder mini-game - track for this player with level
           this.pendingBreederMiniGames.set(p.id, {
@@ -1699,6 +2031,9 @@ export class World {
           } else if (u.type === PICKUP_TYPE_PORT) {
             const current = this.portCharges.get(p.id) ?? 0;
             this.portCharges.set(p.id, current + 1);
+          } else if (u.type === PICKUP_TYPE_SHELTER_PORT) {
+            const current = this.shelterPortCharges.get(p.id) ?? 0;
+            this.shelterPortCharges.set(p.id, current + 1);
           }
         }
       }
@@ -1738,6 +2073,7 @@ export class World {
       const pid = p.petsInside.pop()!;
       const pet = this.pets.get(pid);
       if (pet) {
+        this.recordEventContribution(p.id, pet.petType, zoneX, zoneY);
         pet.insideShelterId = null;
         pet.x = zoneX;
         pet.y = zoneY;
@@ -1766,6 +2102,7 @@ export class World {
       const pid = shelter.petsInside.pop()!;
       const pet = this.pets.get(pid);
       if (pet) {
+        this.recordEventContribution(playerId, pet.petType, shelter.x, shelter.y);
         pet.insideShelterId = null;
         pet.x = shelter.x;
         pet.y = shelter.y;
@@ -1773,6 +2110,7 @@ export class World {
       this.pets.delete(pid);
       shelter.totalAdoptions++;
       shelter.size += GROWTH_PER_ADOPTION;
+      shelter.tier = calculateShelterTier(shelter.size); // Update tier
       
       // Player also gets credit for adoptions
       const p = this.players.get(playerId);
@@ -1807,6 +2145,35 @@ export class World {
       }
     }
 
+    // Instant adoption at adoption events: van in event radius = drop all van pets for instant adoption
+    for (const ev of this.adoptionEvents.values()) {
+      if (now >= ev.startTick + ev.durationTicks) continue;
+      const eventRadius = World.ADOPTION_EVENT_RADIUS;
+      for (const p of this.players.values()) {
+        if (this.eliminatedPlayerIds.has(p.id)) continue;
+        if (p.petsInside.length === 0) continue;
+        const d = dist(p.x, p.y, ev.x, ev.y);
+        if (d > eventRadius) continue;
+        while (p.petsInside.length > 0) {
+          const pid = p.petsInside.pop()!;
+          const pet = this.pets.get(pid);
+          if (pet) {
+            this.recordEventContribution(p.id, pet.petType, ev.x, ev.y);
+            this.pets.delete(pid);
+          }
+          p.totalAdoptions++;
+          p.size += GROWTH_PER_ADOPTION;
+          const currentMoney = this.playerMoney.get(p.id) ?? 0;
+          this.playerMoney.set(p.id, currentMoney + TOKENS_PER_ADOPTION);
+          this.totalMatchAdoptions++;
+          this.lastGlobalAdoptionTick = now;
+          this.scarcityLevel = 0;
+        }
+        this.pendingAnnouncements.push(`${p.displayName} dropped off pets at the ${ev.type.replace(/_/g, ' ')} for instant adoption!`);
+        break; // One van per event per tick
+      }
+    }
+
     for (const p of this.players.values()) {
       for (const pid of p.petsInside) {
         const pet = this.pets.get(pid);
@@ -1820,19 +2187,25 @@ export class World {
     }
   }
 
+  isStrayLoss(): boolean {
+    return this.strayLoss;
+  }
+
   getSnapshot(): GameSnapshot {
     return {
       tick: this.tick,
       matchEndAt: this.matchEndAt,
       matchEndedEarly: this.matchEndedEarly || undefined,
       winnerId: this.winnerId || undefined,
+      strayLoss: this.strayLoss || undefined,
       totalMatchAdoptions: this.totalMatchAdoptions,
       scarcityLevel: this.scarcityLevel > 0 ? this.scarcityLevel : undefined,
-      matchDurationMs: this.matchStarted ? Date.now() - this.matchStartTime : 0,
+      matchDurationMs: this.matchStarted ? Date.now() - this.matchStartTime - this.pausedDurationMs : 0,
       players: Array.from(this.players.values()).map((p) => {
         const eliminated = this.eliminatedPlayerIds.has(p.id);
         const hasShelter = this.hasShelter(p.id);
         const portCount = this.portCharges.get(p.id) ?? 0;
+        const shelterPortCount = this.shelterPortCharges.get(p.id) ?? 0;
         const color = this.playerColors.get(p.id);
         const allies: string[] = [];
         for (const other of this.players.values()) {
@@ -1841,6 +2214,7 @@ export class World {
         const money = this.playerMoney.get(p.id) ?? 0;
         const shelterId = this.playerShelterIds.get(p.id);
         const hasVanSpeed = this.vanSpeedUpgrades.has(p.id);
+        const disconnected = this.disconnectedPlayerIds.has(p.id);
         return {
           ...p,
           size: eliminated ? 0 : p.size,
@@ -1848,7 +2222,9 @@ export class World {
           allies: allies.length ? allies : undefined,
           eliminated: eliminated || undefined,
           grounded: hasShelter || undefined, // Legacy: grounded means has shelter
+          disconnected: disconnected || undefined,
           portCharges: portCount > 0 ? portCount : undefined,
+          shelterPortCharges: shelterPortCount > 0 ? shelterPortCount : undefined,
           shelterColor: color || undefined,
           money: money > 0 ? money : undefined,
           shelterId: shelterId || undefined,
@@ -1868,11 +2244,27 @@ export class World {
             size: s.size,
           }))
         : undefined,
+      adoptionEvents: this.adoptionEvents.size > 0 ? Array.from(this.adoptionEvents.values()) : undefined,
     };
   }
 
   isMatchOver(): boolean {
     return this.tick >= this.matchEndAt;
+  }
+
+  /** Record that the match is being paused (frozen). Call before serializing. */
+  recordPause(): void {
+    if (this.frozenAtMs === null) {
+      this.frozenAtMs = Date.now();
+    }
+  }
+
+  /** Record that the match is being resumed. Call when unfreezing. */
+  recordResume(): void {
+    if (this.frozenAtMs !== null) {
+      this.pausedDurationMs += Date.now() - this.frozenAtMs;
+      this.frozenAtMs = null;
+    }
   }
   
   /** Deduct tokens from a player (for breeder mini-game food purchases) */
@@ -1884,8 +2276,13 @@ export class World {
   }
   
   /** Check if a player has a pending breeder mini-game */
-  getPendingBreederMiniGame(playerId: string): { petCount: number; startTick: number; level: number } | null {
+  getPendingBreederMiniGame(playerId: string): { petCount: number; startTick: number; level: number; isMill?: boolean; breederShelterId?: string } | null {
     return this.pendingBreederMiniGames.get(playerId) ?? null;
+  }
+
+  /** Mill time limit in seconds: 60 + level*2. */
+  getBreederMillTimeLimitSeconds(level: number): number {
+    return World.getBreederMillTimeLimitSeconds(level);
   }
   
   /** Clear a player's pending breeder mini-game (after they acknowledge it) */
@@ -1909,9 +2306,12 @@ export class World {
     rewards: Array<{ type: 'size' | 'speed' | 'port' | 'penalty'; amount: number }> 
   } {
     this.pendingBreederMiniGames.delete(playerId);
+    const millShelterId = this.activeMillByPlayer.get(playerId);
+    const isMill = !!millShelterId;
+    if (isMill) this.activeMillByPlayer.delete(playerId);
     const player = this.players.get(playerId);
     if (!player) return { tokenBonus: 0, rewards: [] };
-    
+
     const unrescuedCount = totalPets - rescuedCount;
     const rewards: Array<{ type: 'size' | 'speed' | 'port' | 'penalty'; amount: number }> = [];
     
@@ -1931,49 +2331,48 @@ export class World {
       return { tokenBonus: 0, rewards };
     }
     
-    // Calculate rewards based on performance AND level
-    // RT scales with level: base + (level * 15)
-    // Lv1: 30-80, Lv2: 45-95, Lv3: 60-110, ... Lv7: 120-170, Lv10: 165-215
     const successRate = rescuedCount / totalPets;
+    const isFullWin = successRate >= 1;
+    // 51% ≤ rate < 100%: smaller boost (half level scaling); 100%: full level-scaled rewards
     const levelBonus = (level - 1) * 15;
-    const baseTokens = 30 + levelBonus + Math.floor(successRate * 50);
-    const tokenBonus = baseTokens;
+    const fullTokens = 30 + levelBonus + 50; // 100% = 80 + levelBonus
+    const smallTokens = 30 + Math.floor(levelBonus * 0.5) + Math.floor(successRate * 25); // smaller tier
+    const tokenBonus = isFullWin ? fullTokens : Math.max(15, smallTokens);
     
-    // Award tokens
     const currentTokens = this.playerMoney.get(playerId) ?? 0;
     this.playerMoney.set(playerId, currentTokens + tokenBonus);
     
-    // Random item rewards scale with level:
-    // Lv1-2: 2 boosts, Lv3-6: 2 boosts, Lv7+: 3 boosts
-    const numItems = level >= 7 ? 3 : 2;
-    
+    // Item rewards: full win = level-based count; 51% tier = 1 item
+    const numItems = isFullWin ? (level >= 7 ? 3 : 2) : 1;
+    const sizeAmount = 5 + Math.floor(level / 2);
     for (let i = 0; i < numItems; i++) {
       const roll = Math.random();
-      // Size bonus scales with level
-      const sizeAmount = 5 + Math.floor(level / 2); // 5 at lv1, 6 at lv2-3, 7 at lv4-5, etc.
       if (roll < 0.4) {
-        // Size bonus
         player.size += sizeAmount;
         rewards.push({ type: 'size', amount: sizeAmount });
       } else if (roll < 0.7) {
-        // Speed boost
         player.speedBoostUntil = this.tick + SPEED_BOOST_DURATION_TICKS * 2;
         rewards.push({ type: 'speed', amount: 1 });
       } else {
-        // Port charge
         const current = this.portCharges.get(playerId) ?? 0;
         this.portCharges.set(playerId, current + 1);
         rewards.push({ type: 'port', amount: 1 });
       }
     }
     
-    // Announce breeder defeat
     if (rescuedCount > 0) {
-      this.pendingAnnouncements.push(`${player.displayName} rescued ${rescuedCount} pets from level ${level} breeders!`);
-    } else if (unrescuedCount > 0) {
-      this.pendingAnnouncements.push(`${player.displayName} failed to rescue any pets from breeders!`);
+      this.pendingAnnouncements.push(isFullWin
+        ? `${player.displayName} rescued all ${rescuedCount} pets from level ${level} breeders!`
+        : `${player.displayName} rescued ${rescuedCount}/${totalPets} pets from level ${level} breeders (partial win)!`);
     }
-    
+    // Mill: clear "in combat" so mill can be attacked again; only remove shelter on 100% rescue
+    if (isMill && millShelterId) {
+      this.millInCombat.delete(millShelterId);
+      if (rescuedCount === totalPets) {
+        this.breederShelters.delete(millShelterId);
+        log(`Mill ${millShelterId} shut down by ${player.displayName}`);
+      }
+    }
     log(`Player ${player.displayName} completed lv${level} breeder: ${rescuedCount}/${totalPets} rescued, +${tokenBonus} RT, ${numItems} boosts`);
     return { tokenBonus, rewards };
   }
@@ -1993,8 +2392,168 @@ export class World {
     return this.portCharges.get(playerId) ?? 0;
   }
   
+  /** Get a player's current shelter port charges */
+  getShelterPortCharges(playerId: string): number {
+    return this.shelterPortCharges.get(playerId) ?? 0;
+  }
+  
   /** Get a player's current money/RT */
   getPlayerMoney(playerId: string): number {
     return this.playerMoney.get(playerId) ?? 0;
+  }
+
+  /** Serialize world state for persistence (solo save/resume). */
+  serialize(): string {
+    const state = {
+      tick: this.tick,
+      matchStartTick: this.matchStartTick,
+      matchStartTime: this.matchStartTime,
+      pausedDurationMs: this.pausedDurationMs,
+      frozenAtMs: this.frozenAtMs,
+      matchEndAt: this.matchEndAt,
+      matchStarted: this.matchStarted,
+      matchEndedEarly: this.matchEndedEarly,
+      winnerId: this.winnerId,
+      strayLoss: this.strayLoss,
+      players: Array.from(this.players.entries()),
+      pets: Array.from(this.pets.entries()),
+      adoptionZones: this.adoptionZones,
+      pickups: Array.from(this.pickups.entries()),
+      petIdSeq: this.petIdSeq,
+      pickupIdSeq: this.pickupIdSeq,
+      spawnPetAt: this.spawnPetAt,
+      spawnPickupAt: this.spawnPickupAt,
+      lastAdoptionTick: Array.from(this.lastAdoptionTick.entries()),
+      adoptSpeedPlayerIds: Array.from(this.adoptSpeedPlayerIds),
+      groundedPlayerIds: Array.from(this.groundedPlayerIds),
+      portCharges: Array.from(this.portCharges.entries()),
+      shelterPortCharges: Array.from(this.shelterPortCharges.entries()),
+      playerColors: Array.from(this.playerColors.entries()),
+      playerMoney: Array.from(this.playerMoney.entries()),
+      eliminatedPlayerIds: Array.from(this.eliminatedPlayerIds),
+      lastAllyPairs: Array.from(this.lastAllyPairs),
+      combatOverlapTicks: Array.from(this.combatOverlapTicks.entries()),
+      shelters: Array.from(this.shelters.entries()),
+      shelterIdSeq: this.shelterIdSeq,
+      playerShelterIds: Array.from(this.playerShelterIds.entries()),
+      vanSpeedUpgrades: Array.from(this.vanSpeedUpgrades),
+      lastShelterAdoptTick: Array.from(this.lastShelterAdoptTick.entries()),
+      totalMatchAdoptions: this.totalMatchAdoptions,
+      lastGlobalAdoptionTick: this.lastGlobalAdoptionTick,
+      scarcityLevel: this.scarcityLevel,
+      triggeredEvents: Array.from(this.triggeredEvents),
+      satelliteZonesSpawned: this.satelliteZonesSpawned,
+      matchProcessed: this.matchProcessed,
+      breederSpawnCount: this.breederSpawnCount,
+      breederCurrentLevel: this.breederCurrentLevel,
+      lastBreederWaveTick: this.lastBreederWaveTick,
+      nextBreederWaveInterval: this.nextBreederWaveInterval,
+      breederWaveSpawned: this.breederWaveSpawned,
+      pendingBreederMiniGames: Array.from(this.pendingBreederMiniGames.entries()),
+      cpuAtBreeder: Array.from(this.cpuAtBreeder.entries()),
+      pendingCpuBreederCompletions: Array.from(this.pendingCpuBreederCompletions.entries()),
+      breederClaimedBy: Array.from(this.breederClaimedBy.entries()),
+      breederCamps: Array.from(this.breederCamps.entries()),
+      breederShelters: Array.from(this.breederShelters.entries()),
+      breederShelterId: this.breederShelterId,
+      wildStrayIds: Array.from(this.wildStrayIds),
+      cpuCanShutdownBreeders: this.cpuCanShutdownBreeders,
+      pendingAnnouncements: [...this.pendingAnnouncements],
+      adoptionEvents: Array.from(this.adoptionEvents.entries()),
+      adoptionEventIdSeq: this.adoptionEventIdSeq,
+      nextAdoptionEventSpawnTick: this.nextAdoptionEventSpawnTick,
+    };
+    return JSON.stringify(state);
+  }
+
+  /** Restore world from serialized state (for solo resume). */
+  static deserialize(json: string): World {
+    const w = new World();
+    const state = JSON.parse(json) as {
+      tick: number; matchStartTick: number; matchStartTime: number; matchEndAt: number;
+      pausedDurationMs?: number; frozenAtMs?: number | null;
+      matchStarted: boolean; matchEndedEarly: boolean; winnerId: string | null;
+      players: [string, PlayerState][]; pets: [string, PetState][]; adoptionZones: AdoptionZoneState[];
+      pickups: [string, PickupState][]; petIdSeq: number; pickupIdSeq: number;
+      spawnPetAt: number; spawnPickupAt: number; lastAdoptionTick: [string, number][];
+      adoptSpeedPlayerIds: string[]; groundedPlayerIds: string[];
+      portCharges: [string, number][]; shelterPortCharges: [string, number][];
+      playerColors: [string, string][]; playerMoney: [string, number][];
+      eliminatedPlayerIds: string[]; lastAllyPairs: string[]; combatOverlapTicks: [string, number][];
+      shelters: [string, ShelterState][]; shelterIdSeq: number; playerShelterIds: [string, string][];
+      vanSpeedUpgrades: string[]; lastShelterAdoptTick: [string, number][];
+      totalMatchAdoptions: number; lastGlobalAdoptionTick: number; scarcityLevel: number;
+      triggeredEvents: number[]; satelliteZonesSpawned: boolean; matchProcessed: boolean;
+      breederSpawnCount: number; breederCurrentLevel: number; lastBreederWaveTick: number;
+      nextBreederWaveInterval: number; breederWaveSpawned: boolean;
+      pendingBreederMiniGames: [string, { petCount: number; startTick: number; level: number }][];
+      cpuAtBreeder: [string, { breederUid: string; level: number; arrivalTick: number }][];
+      pendingCpuBreederCompletions: [string, { level: number; petCount: number; completeAtTick: number }][];
+      breederClaimedBy: [string, string][];
+      breederCamps: [string, { x: number; y: number; spawnTick: number; level: number }][];
+      breederShelters: [string, { x: number; y: number; level: number; lastSpawnTick: number; size: number }][];
+      breederShelterId: number; wildStrayIds: string[]; cpuCanShutdownBreeders: boolean;
+      pendingAnnouncements: string[]; adoptionEvents: [string, AdoptionEvent][];
+      adoptionEventIdSeq: number; nextAdoptionEventSpawnTick: number;
+      strayLoss?: boolean;
+    };
+    w.tick = state.tick;
+    w.matchStartTick = state.matchStartTick;
+    w.matchStartTime = state.matchStartTime;
+    w.pausedDurationMs = state.pausedDurationMs ?? 0;
+    w.frozenAtMs = state.frozenAtMs ?? null;
+    w.matchEndAt = state.matchEndAt;
+    w.matchStarted = state.matchStarted;
+    w.matchEndedEarly = state.matchEndedEarly;
+    w.winnerId = state.winnerId ?? null;
+    w.strayLoss = state.strayLoss ?? false;
+    w.players = new Map(state.players);
+    w.pets = new Map(state.pets);
+    w.adoptionZones = state.adoptionZones;
+    w.pickups = new Map(state.pickups);
+    w.petIdSeq = state.petIdSeq;
+    w.pickupIdSeq = state.pickupIdSeq;
+    w.spawnPetAt = state.spawnPetAt;
+    w.spawnPickupAt = state.spawnPickupAt;
+    w.lastAdoptionTick = new Map(state.lastAdoptionTick);
+    w.adoptSpeedPlayerIds = new Set(state.adoptSpeedPlayerIds);
+    w.groundedPlayerIds = new Set(state.groundedPlayerIds);
+    w.portCharges = new Map(state.portCharges);
+    w.shelterPortCharges = new Map(state.shelterPortCharges);
+    w.playerColors = new Map(state.playerColors);
+    w.playerMoney = new Map(state.playerMoney);
+    w.eliminatedPlayerIds = new Set(state.eliminatedPlayerIds);
+    w.lastAllyPairs = new Set(state.lastAllyPairs);
+    w.combatOverlapTicks = new Map(state.combatOverlapTicks);
+    w.shelters = new Map(state.shelters);
+    w.shelterIdSeq = state.shelterIdSeq;
+    w.playerShelterIds = new Map(state.playerShelterIds);
+    w.vanSpeedUpgrades = new Set(state.vanSpeedUpgrades);
+    w.lastShelterAdoptTick = new Map(state.lastShelterAdoptTick);
+    w.totalMatchAdoptions = state.totalMatchAdoptions;
+    w.lastGlobalAdoptionTick = state.lastGlobalAdoptionTick;
+    w.scarcityLevel = state.scarcityLevel;
+    w.triggeredEvents = new Set(state.triggeredEvents);
+    w.satelliteZonesSpawned = state.satelliteZonesSpawned;
+    w.matchProcessed = state.matchProcessed;
+    w.breederSpawnCount = state.breederSpawnCount;
+    w.breederCurrentLevel = state.breederCurrentLevel;
+    w.lastBreederWaveTick = state.lastBreederWaveTick;
+    w.nextBreederWaveInterval = state.nextBreederWaveInterval;
+    w.breederWaveSpawned = state.breederWaveSpawned;
+    w.pendingBreederMiniGames = new Map(state.pendingBreederMiniGames);
+    w.cpuAtBreeder = new Map(state.cpuAtBreeder);
+    w.pendingCpuBreederCompletions = new Map(state.pendingCpuBreederCompletions);
+    w.breederClaimedBy = new Map(state.breederClaimedBy);
+    w.breederCamps = new Map(state.breederCamps);
+    w.breederShelters = new Map(state.breederShelters);
+    w.breederShelterId = state.breederShelterId;
+    w.wildStrayIds = new Set(state.wildStrayIds);
+    w.cpuCanShutdownBreeders = state.cpuCanShutdownBreeders;
+    w.pendingAnnouncements = state.pendingAnnouncements;
+    w.adoptionEvents = new Map(state.adoptionEvents);
+    w.adoptionEventIdSeq = state.adoptionEventIdSeq;
+    w.nextAdoptionEventSpawnTick = state.nextAdoptionEventSpawnTick;
+    return w;
   }
 }

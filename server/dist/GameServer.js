@@ -12,6 +12,7 @@ const shared_2 = require("shared");
 const registry_js_1 = require("./registry.js");
 const inventory_js_1 = require("./inventory.js");
 const leaderboard_js_1 = require("./leaderboard.js");
+const referrals_js_1 = require("./referrals.js");
 /** Timestamped log function for server output */
 function log(message) {
     const now = new Date();
@@ -22,11 +23,22 @@ const GAME_WS_PORT = Number(process.env.GAME_WS_PORT) || 4001;
 const GAME_WS_URL = process.env.GAME_WS_URL || `ws://localhost:${GAME_WS_PORT}`;
 const SERVER_ID = process.env.SERVER_ID || `game-${GAME_WS_PORT}`;
 const FFA_COUNTDOWN_MS = 10000;
+// Food costs for breeder mini-game - must match client FOOD_COSTS
+const FOOD_COSTS = {
+    apple: 5,
+    carrot: 8,
+    chicken: 15,
+    seeds: 5,
+    water: 20,
+    bowl: 20,
+};
 const wss = new ws_1.WebSocketServer({ port: GAME_WS_PORT });
 // All active matches
 const matches = new Map();
 // Map player ID -> match ID for quick lookup
 const playerToMatch = new Map();
+// Solo: userId -> matchId for frozen matches (resume from memory)
+const userIdToSoloMatchId = new Map();
 // FFA lobby match (waiting for players)
 let ffaLobbyMatchId = null;
 let matchIdCounter = 0;
@@ -61,7 +73,11 @@ function destroyMatch(matchId) {
     const match = matches.get(matchId);
     if (!match)
         return;
-    // Remove player mappings
+    if (match.frozen && match.soloPlayerId) {
+        match.world.removePlayer(match.soloPlayerId);
+        if (match.soloUserId)
+            userIdToSoloMatchId.delete(match.soloUserId);
+    }
     for (const playerId of match.players.keys()) {
         playerToMatch.delete(playerId);
     }
@@ -69,6 +85,32 @@ function destroyMatch(matchId) {
     if (ffaLobbyMatchId === matchId)
         ffaLobbyMatchId = null;
     log(`match destroyed id=${matchId}`);
+}
+function destroySoloMatchForUser(userId) {
+    const matchId = userIdToSoloMatchId.get(userId);
+    if (!matchId)
+        return;
+    const match = matches.get(matchId);
+    if (match?.frozen)
+        destroyMatch(matchId);
+    userIdToSoloMatchId.delete(userId);
+}
+/** Get human player id from serialized world state (first non-cpu player). */
+function getHumanPlayerIdFromState(worldStateJson) {
+    try {
+        const state = JSON.parse(worldStateJson);
+        const players = state.players;
+        if (!Array.isArray(players))
+            return null;
+        for (const [id] of players) {
+            if (typeof id === 'string' && !id.startsWith('cpu-'))
+                return id;
+        }
+    }
+    catch {
+        // ignore
+    }
+    return null;
 }
 function ensureCpusForMatch(match) {
     if (match.mode === 'solo') {
@@ -124,29 +166,77 @@ function removePlayerFromMatch(playerId, matchId) {
     const match = matches.get(matchId);
     if (!match)
         return;
-    // Save inventory for registered users who disconnect mid-match
     const userId = match.playerUserIds.get(playerId);
-    if (userId && match.phase === 'playing') {
-        const playerMoney = match.world.getPlayerMoney(playerId);
-        const portCharges = match.world.getPortCharges(playerId);
-        if (playerMoney > 0 || portCharges > 0) {
-            (0, inventory_js_1.depositAfterMatch)(userId, playerMoney, portCharges, 0, 0);
-            log(`Player ${playerId} disconnected - deposited ${playerMoney} RT, ${portCharges} ports for ${userId}`);
+    // Solo: save match and freeze instead of removing/destroying (no deposit, no quit penalty)
+    // But DON'T save if the match is already over (stray loss, win, or time expired)
+    const matchOver = match.world.isMatchOver() || match.world.isStrayLoss();
+    if (match.mode === 'solo' && userId && match.phase === 'playing' && !matchOver) {
+        try {
+            match.world.recordPause(); // Record pause time for accurate match duration
+            const worldState = match.world.serialize();
+            (0, referrals_js_1.saveSavedMatch)(userId, 'solo', worldState, match.id);
+            match.frozen = true;
+            match.soloUserId = userId;
+            match.soloPlayerId = playerId;
+            const snap = match.world.getSnapshot();
+            const p = snap.players.find((x) => x.id === playerId);
+            match.soloDisplayName = p?.displayName ?? 'Player';
+            userIdToSoloMatchId.set(userId, match.id);
+            match.players.delete(playerId);
+            match.readySet.delete(playerId);
+            playerToMatch.delete(playerId);
+            // Keep playerUserIds/playerStartingInventory so resume can reattach
+            log(`Solo match saved for ${userId}, frozen matchId=${match.id}`);
+        }
+        catch (e) {
+            log(`Solo save failed: ${e}`);
+            // Fall through to normal remove
         }
     }
-    match.playerUserIds.delete(playerId);
-    match.playerStartingInventory.delete(playerId);
-    match.world.removePlayer(playerId);
-    match.players.delete(playerId);
-    match.readySet.delete(playerId);
-    playerToMatch.delete(playerId);
-    // Destroy match if no human players left
-    if (match.players.size === 0) {
-        destroyMatch(matchId);
+    // FFA/Teams: van stops, shelter continues; do not remove from world or deposit
+    if ((match.mode === 'ffa' || match.mode === 'teams') && match.phase === 'playing') {
+        match.world.setPlayerDisconnected(playerId, true);
+        match.players.delete(playerId);
+        match.readySet.delete(playerId);
+        playerToMatch.delete(playerId);
+        log(`FFA/Teams player ${playerId} disconnected - van stopped, shelter continues`);
+        return;
+    }
+    if (!match.frozen) {
+        // Solo save failed or other mode: full remove
+        // Don't deposit again if match end was already processed (prevents duplicate RT)
+        if (userId && match.phase === 'playing' && !match.world.isMatchProcessed()) {
+            const playerMoney = match.world.getPlayerMoney(playerId);
+            const portCharges = match.world.getPortCharges(playerId);
+            const shelterPortCharges = match.world.getShelterPortCharges(playerId);
+            const snap = match.world.getSnapshot();
+            const quitPlayerState = snap.players.find(p => p.id === playerId);
+            const adoptions = quitPlayerState?.totalAdoptions ?? 0;
+            const durationSeconds = Math.floor((snap.matchDurationMs ?? 0) / 1000);
+            if (playerMoney > 0 || portCharges > 0 || shelterPortCharges > 0) {
+                (0, inventory_js_1.depositAfterMatch)(userId, playerMoney, portCharges, shelterPortCharges, 0, 0);
+                log(`Player ${playerId} disconnected - deposited ${playerMoney} RT, ${portCharges} ports, ${shelterPortCharges} home ports for ${userId}`);
+            }
+            if (playerMoney > 0) {
+                (0, leaderboard_js_1.recordMatchLoss)(userId, playerMoney);
+            }
+            (0, leaderboard_js_1.updateReputationOnQuit)(userId);
+            (0, referrals_js_1.insertMatchHistory)(userId, matchId, match.mode, 'quit', playerMoney, adoptions, durationSeconds);
+        }
+        match.playerUserIds.delete(playerId);
+        match.playerStartingInventory.delete(playerId);
+        match.world.removePlayer(playerId);
+        match.players.delete(playerId);
+        match.readySet.delete(playerId);
+        playerToMatch.delete(playerId);
+        if (match.players.size === 0) {
+            destroyMatch(matchId);
+        }
     }
 }
 wss.on('connection', async (ws) => {
     const playerId = `p-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    let effectivePlayerId = playerId; // May be set to soloPlayerId on resume
     let displayName = null;
     let playerAdded = false;
     let currentMatchId = null;
@@ -159,19 +249,46 @@ wss.on('connection', async (ws) => {
             return;
         displayName = name;
         playerAdded = true;
-        // If we have a userId, track it for match-end deposit
         if (playerUserId) {
-            match.playerUserIds.set(playerId, playerUserId);
+            match.playerUserIds.set(effectivePlayerId, playerUserId);
             if (startingInventory) {
-                match.playerStartingInventory.set(playerId, startingInventory);
+                match.playerStartingInventory.set(effectivePlayerId, startingInventory);
             }
         }
-        log(`player joined match id=${match.id} playerId=${playerId} displayName=${name} startingRT=${startingRT}`);
-        match.world.addPlayer(playerId, name, startingRT, startingPorts);
-        match.players.set(playerId, ws);
-        playerToMatch.set(playerId, match.id);
+        log(`player joined match id=${match.id} playerId=${effectivePlayerId} displayName=${name} startingRT=${startingRT}`);
+        match.world.addPlayer(effectivePlayerId, name, startingRT, startingPorts);
+        match.players.set(effectivePlayerId, ws);
+        playerToMatch.set(effectivePlayerId, match.id);
         currentMatchId = match.id;
-        ws.send(JSON.stringify({ type: 'welcome', playerId, displayName, matchId: match.id, startingRT, startingPorts }));
+        ws.send(JSON.stringify({ type: 'welcome', playerId: effectivePlayerId, displayName, matchId: match.id, startingRT, startingPorts }));
+    };
+    const resumeSoloMatch = (match) => {
+        if (playerAdded || !match.soloPlayerId)
+            return;
+        effectivePlayerId = match.soloPlayerId;
+        displayName = match.soloDisplayName ?? displayName ?? 'Player';
+        playerAdded = true;
+        match.players.set(effectivePlayerId, ws);
+        playerToMatch.set(effectivePlayerId, match.id);
+        currentMatchId = match.id;
+        match.frozen = false;
+        match.world.recordResume(); // Account for paused time in match duration
+        const snap = match.world.getSnapshot();
+        const p = snap.players.find((x) => x.id === effectivePlayerId);
+        const rt = p?.money ?? 0;
+        const ports = match.world.getPortCharges(effectivePlayerId);
+        const shelterPorts = match.world.getShelterPortCharges(effectivePlayerId);
+        ws.send(JSON.stringify({
+            type: 'welcome',
+            playerId: effectivePlayerId,
+            displayName,
+            matchId: match.id,
+            startingRT: rt,
+            startingPorts: ports,
+            shelterPortCharges: shelterPorts,
+            resumed: true,
+        }));
+        log(`Solo match resumed for ${match.soloUserId} playerId=${effectivePlayerId}`);
     };
     // Timeout: if client doesn't send mode in 5s, use FFA
     const timeout = setTimeout(async () => {
@@ -226,7 +343,82 @@ wss.on('connection', async (ws) => {
                     (async () => {
                         const displayNameToUse = name || await (0, registry_js_1.getNextGuestName)();
                         if (mode === 'solo') {
-                            // Solo: create a new isolated match for this player
+                            const abandon = !!msg.abandon && !!playerUserId;
+                            if (abandon && playerUserId) {
+                                (0, referrals_js_1.deleteSavedMatch)(playerUserId);
+                                destroySoloMatchForUser(playerUserId);
+                            }
+                            if (playerUserId && !abandon) {
+                                const frozenMatchId = userIdToSoloMatchId.get(playerUserId);
+                                const frozenMatch = frozenMatchId ? matches.get(frozenMatchId) : null;
+                                if (frozenMatch?.frozen) {
+                                    resumeSoloMatch(frozenMatch);
+                                    return;
+                                }
+                                const saved = (0, referrals_js_1.getSavedMatch)(playerUserId);
+                                if (saved) {
+                                    try {
+                                        const world = World_js_1.World.deserialize(saved.world_state);
+                                        world.recordResume(); // Account for paused time in match duration
+                                        // Match already ended - delete stale save and don't resume
+                                        if (world.isMatchOver() || world.isStrayLoss()) {
+                                            (0, referrals_js_1.deleteSavedMatch)(playerUserId);
+                                            ws.send(JSON.stringify({ type: 'savedMatchExpired', reason: 'Match already ended' }));
+                                            log(`Solo saved match expired for ${playerUserId} - match already ended, deleted from DB`);
+                                            return;
+                                        }
+                                        const humanId = getHumanPlayerIdFromState(saved.world_state);
+                                        if (humanId) {
+                                            const match = {
+                                                id: saved.id,
+                                                world,
+                                                phase: 'playing',
+                                                mode: 'solo',
+                                                countdownEndAt: 0,
+                                                players: new Map(),
+                                                cpuIds: new Set(world.getSnapshot().players.filter((pl) => pl.id.startsWith('cpu-')).map((pl) => pl.id)),
+                                                readySet: new Set(),
+                                                fightAllyChoices: new Map(),
+                                                allyRequests: new Map(),
+                                                lastReplayTick: 0,
+                                                playerUserIds: new Map([[humanId, playerUserId]]),
+                                                playerStartingInventory: new Map(),
+                                                soloUserId: playerUserId,
+                                                soloPlayerId: humanId,
+                                                soloDisplayName: world.getSnapshot().players.find((pl) => pl.id === humanId)?.displayName ?? displayNameToUse,
+                                            };
+                                            match.players.set(humanId, ws);
+                                            playerToMatch.set(humanId, match.id);
+                                            matches.set(match.id, match);
+                                            userIdToSoloMatchId.set(playerUserId, match.id);
+                                            effectivePlayerId = humanId;
+                                            displayName = match.soloDisplayName ?? displayNameToUse;
+                                            playerAdded = true;
+                                            currentMatchId = match.id;
+                                            const snap = match.world.getSnapshot();
+                                            const p = snap.players.find((x) => x.id === humanId);
+                                            const rt = p?.money ?? 0;
+                                            const ports = match.world.getPortCharges(humanId);
+                                            const shelterPorts = match.world.getShelterPortCharges(humanId);
+                                            ws.send(JSON.stringify({
+                                                type: 'welcome',
+                                                playerId: humanId,
+                                                displayName: match.soloDisplayName,
+                                                matchId: match.id,
+                                                startingRT: rt,
+                                                startingPorts: ports,
+                                                shelterPortCharges: shelterPorts,
+                                                resumed: true,
+                                            }));
+                                            log(`Solo match loaded from DB for ${playerUserId} matchId=${match.id}`);
+                                            return;
+                                        }
+                                    }
+                                    catch (e) {
+                                        log(`Solo load from DB failed: ${e}`);
+                                    }
+                                }
+                            }
                             const match = createMatch('solo');
                             addPlayerToMatch(match, displayNameToUse);
                             ensureCpusForMatch(match);
@@ -284,6 +476,47 @@ wss.on('connection', async (ws) => {
                         match.allyRequests.set(playerId, requests);
                     }
                     requests.add(msg.targetId);
+                    // Notify the target player about the ally request
+                    const snapshot = match.world.getSnapshot();
+                    const requesterPlayer = snapshot.players.find(p => p.id === playerId);
+                    const requesterName = requesterPlayer?.displayName ?? 'Player';
+                    for (const [otherId, otherWs] of match.players.entries()) {
+                        if (otherId === msg.targetId) {
+                            otherWs.send(JSON.stringify({
+                                type: 'allyRequestReceived',
+                                fromId: effectivePlayerId,
+                                fromName: requesterName
+                            }));
+                            break;
+                        }
+                    }
+                    return;
+                }
+                // Handle ally response (accept/deny)
+                if (msg.type === 'allyResponse' && typeof msg.targetId === 'string' && typeof msg.accept === 'boolean') {
+                    if (msg.accept) {
+                        // Check if the target also requested to ally with us (mutual)
+                        const targetRequests = match.allyRequests.get(msg.targetId);
+                        if (targetRequests?.has(playerId)) {
+                            // Mutual ally request - form alliance
+                            match.world.formAlliance(playerId, msg.targetId);
+                        }
+                        else {
+                            // We accepted their request - store our acceptance
+                            let requests = match.allyRequests.get(playerId);
+                            if (!requests) {
+                                requests = new Set();
+                                match.allyRequests.set(playerId, requests);
+                            }
+                            requests.add(msg.targetId);
+                            // Check if they already requested us
+                            const theirRequests = match.allyRequests.get(msg.targetId);
+                            if (theirRequests?.has(playerId)) {
+                                // Both have requested each other - form alliance
+                                match.world.formAlliance(playerId, msg.targetId);
+                            }
+                        }
+                    }
                     return;
                 }
                 if (msg.type === 'ground') {
@@ -295,49 +528,64 @@ wss.on('connection', async (ws) => {
                     return;
                 }
                 if (msg.type === 'buildShelter') {
-                    const result = match.world.buildShelter(playerId);
+                    const result = match.world.buildShelter(effectivePlayerId);
                     if (!result.success && result.reason) {
                         ws.send(JSON.stringify({ type: 'buildFailed', reason: result.reason }));
                     }
                     return;
                 }
                 if (msg.type === 'buyAdoptionCenter') {
-                    const result = match.world.buyAdoptionCenter(playerId);
+                    const result = match.world.buyAdoptionCenter(effectivePlayerId);
                     if (!result.success && result.reason) {
                         ws.send(JSON.stringify({ type: 'upgradeFailed', upgrade: 'adoptionCenter', reason: result.reason }));
                     }
                     return;
                 }
                 if (msg.type === 'buyGravity') {
-                    const result = match.world.buyGravity(playerId);
+                    const result = match.world.buyGravity(effectivePlayerId);
                     if (!result.success && result.reason) {
                         ws.send(JSON.stringify({ type: 'upgradeFailed', upgrade: 'gravity', reason: result.reason }));
                     }
                     return;
                 }
                 if (msg.type === 'buyAdvertising') {
-                    const result = match.world.buyAdvertising(playerId);
+                    const result = match.world.buyAdvertising(effectivePlayerId);
                     if (!result.success && result.reason) {
                         ws.send(JSON.stringify({ type: 'upgradeFailed', upgrade: 'advertising', reason: result.reason }));
                     }
                     return;
                 }
                 if (msg.type === 'buyVanSpeed') {
-                    const result = match.world.buyVanSpeed(playerId);
+                    const result = match.world.buyVanSpeed(effectivePlayerId);
                     if (!result.success && result.reason) {
                         ws.send(JSON.stringify({ type: 'upgradeFailed', upgrade: 'vanSpeed', reason: result.reason }));
                     }
                     return;
                 }
                 if (msg.type === 'usePort') {
-                    match.world.usePort(playerId);
+                    match.world.usePort(effectivePlayerId);
+                    return;
+                }
+                if (msg.type === 'useShelterPort') {
+                    match.world.useShelterPort(effectivePlayerId);
+                    return;
+                }
+                if (msg.type === 'transferPets' && typeof msg.targetShelterId === 'string') {
+                    const result = match.world.transferPetsToAlliedShelter(effectivePlayerId, msg.targetShelterId);
+                    ws.send(JSON.stringify({
+                        type: 'transferResult',
+                        success: result.success,
+                        count: result.count,
+                        senderScore: result.senderScore,
+                        receiverScore: result.receiverScore,
+                        reason: result.reason
+                    }));
                     return;
                 }
                 if (msg.type === 'setColor' && typeof msg.color === 'string') {
-                    match.world.setPlayerColor(playerId, msg.color);
+                    match.world.setPlayerColor(effectivePlayerId, msg.color);
                     return;
                 }
-                // Solo mode option: CPU breeder shutdown behavior
                 if (msg.type === 'setCpuBreederBehavior' && typeof msg.canShutdown === 'boolean') {
                     if (match.mode === 'solo') {
                         match.world.setCpuBreederBehavior(msg.canShutdown);
@@ -345,23 +593,25 @@ wss.on('connection', async (ws) => {
                     return;
                 }
                 if (msg.type === 'startingBoosts' && (typeof msg.sizeBonus === 'number' || msg.speedBoost || msg.adoptSpeed)) {
-                    match.world.applyStartingBoosts(playerId, {
+                    match.world.applyStartingBoosts(effectivePlayerId, {
                         sizeBonus: typeof msg.sizeBonus === 'number' ? msg.sizeBonus : 0,
                         speedBoost: !!msg.speedBoost,
                         adoptSpeed: !!msg.adoptSpeed,
                     });
                     return;
                 }
-                // Breeder mini-game messages
-                // NOTE: Food costs are NOT deducted when used - the only penalty for wrong meals is wasted time
-                // Tokens are only deducted for successful rescues (via breederComplete)
+                // Breeder mini-game messages - deduct RT for food used
                 if (msg.type === 'breederUseFood' && typeof msg.food === 'string') {
-                    // No token deduction - wrong meals only waste time
+                    const cost = FOOD_COSTS[msg.food];
+                    if (cost && cost > 0) {
+                        match.world.deductTokens(effectivePlayerId, cost);
+                    }
                     return;
                 }
                 if (msg.type === 'breederComplete' && typeof msg.rescuedCount === 'number' && typeof msg.totalPets === 'number') {
                     const level = typeof msg.level === 'number' ? msg.level : 1;
-                    const result = match.world.completeBreederMiniGame(playerId, msg.rescuedCount, msg.totalPets, level);
+                    const result = match.world.completeBreederMiniGame(effectivePlayerId, msg.rescuedCount, msg.totalPets, level);
+                    match.activeMillGames?.delete(effectivePlayerId);
                     ws.send(JSON.stringify({
                         type: 'breederRewards',
                         tokenBonus: result.tokenBonus,
@@ -385,21 +635,21 @@ wss.on('connection', async (ws) => {
         const view = new DataView(buf);
         if (view.getUint8(0) === shared_2.MSG_INPUT) {
             const { inputFlags, inputSeq } = (0, shared_2.decodeInput)(buf);
-            match.world.setInput(playerId, inputFlags, inputSeq);
+            match.world.setInput(effectivePlayerId, inputFlags, inputSeq);
         }
     });
     ws.on('close', () => {
         clearTimeout(timeout);
-        log(`player disconnected playerId=${playerId} displayName=${displayName}`);
+        log(`player disconnected playerId=${effectivePlayerId} displayName=${displayName}`);
         if (currentMatchId) {
-            removePlayerFromMatch(playerId, currentMatchId);
+            removePlayerFromMatch(effectivePlayerId, currentMatchId);
         }
     });
     ws.on('error', () => {
         clearTimeout(timeout);
-        log(`player error playerId=${playerId} displayName=${displayName}`);
+        log(`player error playerId=${effectivePlayerId} displayName=${displayName}`);
         if (currentMatchId) {
-            removePlayerFromMatch(playerId, currentMatchId);
+            removePlayerFromMatch(effectivePlayerId, currentMatchId);
         }
     });
 });
@@ -424,24 +674,95 @@ setInterval(() => {
                         ws.send(JSON.stringify(matchState));
                 }
             }
+            else if (match.frozen) {
+                // Solo saved match: do not tick until resumed
+            }
             else if (match.phase === 'playing') {
-                match.world.tickWorld(match.fightAllyChoices, match.allyRequests);
+                match.world.tickWorld(match.fightAllyChoices, match.allyRequests, match.cpuIds);
                 const snapshot = match.world.getSnapshot();
+                // CPU ally offers: randomly offer to ally with nearby human players
+                for (const cpuId of match.cpuIds) {
+                    if (Math.random() < 0.002) { // ~12% per second at 60 ticks
+                        const cpuPlayer = snapshot.players.find(p => p.id === cpuId);
+                        if (!cpuPlayer || cpuPlayer.eliminated)
+                            continue;
+                        // Find nearby human players
+                        for (const [humanId, humanWs] of match.players.entries()) {
+                            if (humanId.startsWith('cpu-'))
+                                continue;
+                            const humanPlayer = snapshot.players.find(p => p.id === humanId);
+                            if (!humanPlayer || humanPlayer.eliminated)
+                                continue;
+                            // Check if already allied
+                            if (humanPlayer.allies?.includes(cpuId))
+                                continue;
+                            // Check distance (within 400 units)
+                            const dx = cpuPlayer.x - humanPlayer.x;
+                            const dy = cpuPlayer.y - humanPlayer.y;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+                            if (dist > 400)
+                                continue;
+                            // Add ally request from CPU
+                            let requests = match.allyRequests.get(cpuId);
+                            if (!requests) {
+                                requests = new Set();
+                                match.allyRequests.set(cpuId, requests);
+                            }
+                            if (!requests.has(humanId)) {
+                                requests.add(humanId);
+                                // Notify the human player
+                                if (humanWs.readyState === 1) {
+                                    humanWs.send(JSON.stringify({
+                                        type: 'allyRequestReceived',
+                                        fromId: cpuId,
+                                        fromName: cpuPlayer.displayName ?? 'CPU'
+                                    }));
+                                }
+                            }
+                            break; // Only offer to one player per tick
+                        }
+                    }
+                }
                 if (snapshot.tick - match.lastReplayTick >= 50) {
                     match.lastReplayTick = snapshot.tick;
                     const hash = snapshot.stateHash ?? String(snapshot.tick);
                     (0, registry_js_1.appendReplay)(matchId, snapshot.tick, hash).catch(() => { });
                 }
                 // Check for pending breeder mini-games and send start messages
+                const ADD_PET_INTERVAL_TICKS = 25 * 10; // 10 seconds at 25 tps
                 for (const [playerId, ws] of match.players.entries()) {
                     const pending = match.world.getPendingBreederMiniGame(playerId);
                     if (pending && ws.readyState === 1) {
+                        const isMill = !!pending.isMill;
+                        const timeLimitSeconds = isMill
+                            ? match.world.getBreederMillTimeLimitSeconds(pending.level)
+                            : undefined; // client uses camp time limit for non-mill
                         ws.send(JSON.stringify({
                             type: 'breederStart',
                             petCount: pending.petCount,
                             level: pending.level,
+                            isMill: isMill || undefined,
+                            timeLimitSeconds: timeLimitSeconds ?? undefined,
+                            addPetIntervalSeconds: isMill ? 10 : undefined,
                         }));
+                        if (isMill) {
+                            if (!match.activeMillGames)
+                                match.activeMillGames = new Map();
+                            match.activeMillGames.set(playerId, { lastAddPetTick: snapshot.tick });
+                        }
                         match.world.clearPendingBreederMiniGame(playerId);
+                    }
+                }
+                // Server-authoritative: every 10s during mill game, tell client to add one pet
+                if (match.activeMillGames) {
+                    for (const [playerId, state] of match.activeMillGames.entries()) {
+                        if (snapshot.tick - state.lastAddPetTick >= ADD_PET_INTERVAL_TICKS) {
+                            const ws = match.players.get(playerId);
+                            if (ws?.readyState === 1) {
+                                ws.send(JSON.stringify({ type: 'breederAddPet' }));
+                                state.lastAddPetTick = snapshot.tick;
+                            }
+                        }
                     }
                 }
                 // Broadcast match-wide announcements
@@ -459,39 +780,54 @@ setInterval(() => {
                     if (ws.readyState === 1)
                         ws.send(buf);
                 }
-                // Check for match end and process inventory/leaderboard
-                if (snapshot.winnerId && !match.world.isMatchProcessed()) {
+                // Check for match end and process inventory/leaderboard (victory or stray loss)
+                const matchEnded = (snapshot.winnerId != null || snapshot.strayLoss) && !match.world.isMatchProcessed();
+                if (matchEnded) {
                     match.world.markMatchProcessed();
-                    log(`Match ${matchId} ended - winner: ${snapshot.winnerId}`);
-                    // Process all registered players
+                    const isStrayLoss = !!snapshot.strayLoss;
+                    if (isStrayLoss) {
+                        log(`Match ${matchId} ended - too many strays (loss for all, no RT)`);
+                    }
+                    else {
+                        log(`Match ${matchId} ended - winner: ${snapshot.winnerId}`);
+                    }
+                    if (match.mode === 'solo' && match.soloUserId) {
+                        (0, referrals_js_1.deleteSavedMatch)(match.soloUserId);
+                        userIdToSoloMatchId.delete(match.soloUserId);
+                    }
+                    const durationSeconds = Math.floor((snapshot.matchDurationMs ?? 0) / 1000);
                     for (const [pid, userId] of match.playerUserIds.entries()) {
                         const playerState = snapshot.players.find(p => p.id === pid);
                         if (!playerState)
                             continue;
-                        // Get player's final RT
-                        const finalRT = playerState.money ?? 0;
-                        const portCharges = match.world.getPortCharges(pid);
-                        // Deposit to inventory
-                        if (finalRT > 0 || portCharges > 0) {
-                            (0, inventory_js_1.depositAfterMatch)(userId, finalRT, portCharges, 0, 0);
-                            log(`Deposited for ${userId}: ${finalRT} RT, ${portCharges} ports`);
+                        const finalRT = isStrayLoss ? 0 : (playerState.money ?? 0);
+                        const portCharges = isStrayLoss ? 0 : match.world.getPortCharges(pid);
+                        const shelterPortCharges = isStrayLoss ? 0 : match.world.getShelterPortCharges(pid);
+                        if (finalRT > 0 || portCharges > 0 || shelterPortCharges > 0) {
+                            (0, inventory_js_1.depositAfterMatch)(userId, finalRT, portCharges, shelterPortCharges, 0, 0);
+                            log(`Deposited for ${userId}: ${finalRT} RT, ${portCharges} ports, ${shelterPortCharges} home ports`);
                         }
-                        // Record win/stats for leaderboard
-                        const isWinner = snapshot.winnerId === pid;
-                        if (isWinner) {
-                            (0, leaderboard_js_1.recordMatchWin)(userId, finalRT);
-                            log(`Recorded win for ${userId}`);
+                        const isWinner = !isStrayLoss && snapshot.winnerId === pid;
+                        if (isStrayLoss) {
+                            (0, leaderboard_js_1.recordMatchLoss)(userId, 0);
                         }
                         else {
-                            (0, leaderboard_js_1.recordRtEarned)(userId, finalRT);
+                            if (isWinner) {
+                                (0, leaderboard_js_1.recordMatchWin)(userId, finalRT);
+                                log(`Recorded win for ${userId}`);
+                            }
+                            else {
+                                (0, leaderboard_js_1.recordMatchLoss)(userId, finalRT);
+                            }
                         }
-                        // Send deposit confirmation to player
+                        (0, referrals_js_1.insertMatchHistory)(userId, matchId, match.mode, isStrayLoss ? 'stray_loss' : isWinner ? 'win' : 'loss', finalRT, playerState.totalAdoptions ?? 0, durationSeconds);
                         const ws = match.players.get(pid);
                         if (ws?.readyState === 1) {
                             ws.send(JSON.stringify({
                                 type: 'matchEndInventory',
                                 deposited: { rt: finalRT, portCharges },
-                                isWinner,
+                                isWinner: !isStrayLoss && snapshot.winnerId === pid,
+                                strayLoss: isStrayLoss,
                             }));
                         }
                     }

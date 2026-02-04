@@ -9,6 +9,9 @@ import dotenv from 'dotenv';
 // Load .env from repo root so it works regardless of cwd (e.g. systemd, pm2)
 dotenv.config({ path: path.resolve(__dirname, '..', '..', '.env') });
 
+// Game server uses UTC for daily reset (daily gifts, leaderboards). Set TZ so Date logic is consistent.
+if (!process.env.TZ) process.env.TZ = 'UTC';
+
 async function main(): Promise<void> {
   const { ensureStorage } = await import('./registry.js');
   const status = await ensureStorage();

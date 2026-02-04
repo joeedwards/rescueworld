@@ -31,8 +31,12 @@ export interface PlayerState {
   eliminated?: boolean;
   /** True if player has grounded themselves at a location. */
   grounded?: boolean;
-  /** Number of port charges the player has (teleport ability). */
+  /** True if player disconnected (van stops, shelter continues). */
+  disconnected?: boolean;
+  /** Number of random port charges the player has (teleport ability). */
   portCharges?: number;
+  /** Number of shelter port charges (teleport to own shelter). */
+  shelterPortCharges?: number;
   /** Shelter color (hex like #ff9f43 or gradient like gradient:#color1:#color2). */
   shelterColor?: string;
   /** In-game money earned from adoptions. */
@@ -45,8 +49,16 @@ export interface PlayerState {
 
 export const PICKUP_TYPE_GROWTH = 0;
 export const PICKUP_TYPE_SPEED = 1;
-export const PICKUP_TYPE_PORT = 2;
+export const PICKUP_TYPE_PORT = 2; // Random port
 export const PICKUP_TYPE_BREEDER = 3;
+export const PICKUP_TYPE_SHELTER_PORT = 4; // Teleport to shelter
+
+// Pet types for variety system
+export const PET_TYPE_CAT = 0;
+export const PET_TYPE_DOG = 1;
+export const PET_TYPE_BIRD = 2;
+export const PET_TYPE_RABBIT = 3;
+export const PET_TYPE_SPECIAL = 4; // Rare golden pet
 
 export interface PickupState {
   id: string;
@@ -65,6 +77,8 @@ export interface PetState {
   vy: number;
   /** Which shelter holds this pet, or null if stray in world. */
   insideShelterId: string | null;
+  /** Pet type (0=cat, 1=dog, 2=bird, 3=rabbit, 4=special). */
+  petType: number;
 }
 
 /** Fixed adoption zone: shelter enters with pets → adopt out → grow. */
@@ -93,6 +107,8 @@ export interface ShelterState {
   size: number;
   /** Total adoptions at this shelter. */
   totalAdoptions: number;
+  /** Shelter tier (1-5) - determines visual size cap. Tier 5 is max visual. */
+  tier: number;
 }
 
 /** Breeder shelter - formed when breeders grow too large, spawns wild strays */
@@ -104,6 +120,25 @@ export interface BreederShelterState {
   size: number;
 }
 
+/** Adoption event - timed event with specific pet requirements */
+export interface AdoptionEvent {
+  id: string;
+  /** Event type determines name and icon */
+  type: 'school_fair' | 'farmers_market' | 'petco_weekend' | 'stadium_night';
+  x: number;
+  y: number;
+  /** Required pets to complete event */
+  requirements: { petType: number; count: number }[];
+  /** Current progress per player: playerId -> pet type contributions */
+  contributions: { [playerId: string]: { [petType: number]: number } };
+  /** Tick when event started */
+  startTick: number;
+  /** Duration in ticks (2-4 minutes at 25 ticks/sec = 3000-6000 ticks) */
+  durationTicks: number;
+  /** Score rewards for top contributors */
+  rewards: { top1: number; top2: number; top3: number; participation: number };
+}
+
 export interface GameSnapshot {
   tick: number;
   matchEndAt: number;
@@ -111,6 +146,8 @@ export interface GameSnapshot {
   matchEndedEarly?: boolean;
   /** ID of the winner (reached adoption milestone). */
   winnerId?: string;
+  /** True if match ended due to >3000 strays (loss for all, no RT). */
+  strayLoss?: boolean;
   /** Total adoptions across all players in this match. */
   totalMatchAdoptions?: number;
   /** Current scarcity level (0-3). */
@@ -125,5 +162,7 @@ export interface GameSnapshot {
   shelters?: ShelterState[];
   /** Breeder shelters - enemy structures that spawn wild strays */
   breederShelters?: BreederShelterState[];
+  /** Active adoption events */
+  adoptionEvents?: AdoptionEvent[];
   stateHash?: string;
 }
