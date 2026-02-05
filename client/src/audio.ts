@@ -89,8 +89,24 @@ export function playAdoption(): void {
   setTimeout(() => playTone(659, 0.15, 'sine', 0.2), 140);
 }
 
+export function playDropOff(): void {
+  // Happy "cha-ching" sound for dropping off pets at adoption center
+  playTone(523, 0.08, 'sine', 0.22);
+  setTimeout(() => playTone(659, 0.08, 'sine', 0.2), 60);
+  setTimeout(() => playTone(784, 0.1, 'sine', 0.22), 120);
+  setTimeout(() => playTone(1047, 0.12, 'sine', 0.18), 180);
+}
+
 export function playStrayCollected(): void {
+  // Soft "boop" when picking up a stray
   playTone(330, 0.06, 'sine', 0.18);
+}
+
+export function playPickupBoost(): void {
+  // Energetic "power-up" sound for boosts (growth, speed, port)
+  playTone(440, 0.06, 'square', 0.15);
+  setTimeout(() => playTone(554, 0.06, 'square', 0.12), 40);
+  setTimeout(() => playTone(659, 0.08, 'triangle', 0.18), 80);
 }
 
 export function playMatchEnd(): void {
@@ -110,6 +126,43 @@ export function playAttackWarning(): void {
   playTone(220, 0.15, 'sawtooth', 0.35);
   setTimeout(() => playTone(180, 0.12, 'sawtooth', 0.3), 100);
   setTimeout(() => playTone(220, 0.1, 'sawtooth', 0.25), 200);
+}
+
+export function playPort(): void {
+  // Teleport/warp sound - rising frequency sweep
+  if (!getSfxEnabled()) return;
+  const ctx = getContext();
+  if (!ctx) return;
+  try {
+    // Create a frequency sweep from low to high
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sine';
+    // Sweep from 200Hz to 800Hz over 0.15s
+    osc.frequency.setValueAtTime(200, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(800, ctx.currentTime + 0.15);
+    gain.gain.setValueAtTime(0.25, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.2);
+    
+    // Add a second harmonic for richer sound
+    const osc2 = ctx.createOscillator();
+    const gain2 = ctx.createGain();
+    osc2.connect(gain2);
+    gain2.connect(ctx.destination);
+    osc2.type = 'triangle';
+    osc2.frequency.setValueAtTime(400, ctx.currentTime);
+    osc2.frequency.exponentialRampToValueAtTime(1200, ctx.currentTime + 0.12);
+    gain2.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+    osc2.start(ctx.currentTime);
+    osc2.stop(ctx.currentTime + 0.15);
+  } catch {
+    // ignore
+  }
 }
 
 let musicAudio: HTMLAudioElement | null = null;

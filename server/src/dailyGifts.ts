@@ -10,6 +10,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
+import path from 'path';
 import { ensureReferralStorage } from './referrals.js';
 import { addRt, addSpeedBoosts, addSizeBoosts, addPortCharges, initializeInventory } from './inventory.js';
 
@@ -20,7 +21,8 @@ function log(message: string): void {
   console.log(`[${timestamp}] [rescue] ${message}`);
 }
 
-const SQLITE_DB_PATH = process.env.SQLITE_DB_PATH || './rescueworld.db';
+// Use same path resolution as referrals.ts for consistency
+const SQLITE_DB_PATH = process.env.SQLITE_DB_PATH || path.join(__dirname, '..', 'rescueworld.db');
 
 let sqlite: import('better-sqlite3').Database | null = null;
 
@@ -28,6 +30,15 @@ function initSqlite(): void {
   if (sqlite) return;
   const Database = require('better-sqlite3') as new (path: string) => import('better-sqlite3').Database;
   sqlite = new Database(SQLITE_DB_PATH);
+  // Ensure daily_gifts table exists (in case this module loads before referrals)
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS daily_gifts (
+      user_id TEXT PRIMARY KEY,
+      last_claim_date TEXT NOT NULL,
+      current_day INTEGER NOT NULL DEFAULT 1,
+      total_claims INTEGER NOT NULL DEFAULT 0
+    )
+  `);
 }
 
 function db(): import('better-sqlite3').Database {

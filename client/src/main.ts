@@ -91,12 +91,12 @@ import type { GameSnapshot, PlayerState, PetState, AdoptionZoneState, PickupStat
 import {
   playMusic,
   playWelcome,
-  playPickupGrowth,
-  playPickupSpeed,
-  playAdoption,
+  playPickupBoost,
+  playDropOff,
   playStrayCollected,
   playMatchEnd,
   playAttackWarning,
+  playPort,
   getMusicEnabled,
   setMusicEnabled,
   getSfxEnabled,
@@ -113,6 +113,68 @@ const SIGNALING_URL = (() => {
 let inputFlags = 0;
 let inputSeq = 0;
 const keys: Record<string, boolean> = {};
+
+// --- Mobile detection and fullscreen ---
+const isMobileBrowser = (() => {
+  const ua = navigator.userAgent || navigator.vendor || '';
+  return /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(ua.toLowerCase()) ||
+    ('ontouchstart' in window && window.innerWidth < 1024);
+})();
+
+// iOS doesn't support Fullscreen API for web pages (only for video elements)
+const isIOS = (() => {
+  const ua = navigator.userAgent || navigator.vendor || '';
+  return /iphone|ipad|ipod/i.test(ua) || 
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); // iPad on iOS 13+
+})();
+
+/** Request fullscreen on mobile browsers when entering a match */
+function enterMobileFullscreen(): void {
+  // Skip on desktop or iOS (iOS doesn't support Fullscreen API for web pages)
+  if (!isMobileBrowser || isIOS) return;
+  
+  const docEl = document.documentElement;
+  try {
+    // Try standard API first, then vendor prefixes
+    if (docEl.requestFullscreen) {
+      docEl.requestFullscreen({ navigationUI: 'hide' }).catch(() => { /* user denied or not supported */ });
+    } else if ((docEl as any).webkitRequestFullscreen) {
+      // Chrome, Safari, Edge on Android
+      (docEl as any).webkitRequestFullscreen();
+    } else if ((docEl as any).webkitEnterFullscreen) {
+      // Older webkit
+      (docEl as any).webkitEnterFullscreen();
+    } else if ((docEl as any).mozRequestFullScreen) {
+      // Firefox
+      (docEl as any).mozRequestFullScreen();
+    } else if ((docEl as any).msRequestFullscreen) {
+      // IE/Edge legacy
+      (docEl as any).msRequestFullscreen();
+    }
+  } catch {
+    // Fullscreen not supported or denied
+  }
+}
+
+/** Exit fullscreen when returning to lobby on mobile */
+function exitMobileFullscreen(): void {
+  if (!isMobileBrowser || isIOS) return;
+  try {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => { /* ignore */ });
+    } else if ((document as any).webkitFullscreenElement) {
+      (document as any).webkitExitFullscreen?.();
+    } else if ((document as any).webkitExitFullscreen) {
+      (document as any).webkitExitFullscreen();
+    } else if ((document as any).mozFullScreenElement) {
+      (document as any).mozCancelFullScreen?.();
+    } else if ((document as any).msFullscreenElement) {
+      (document as any).msExitFullscreen?.();
+    }
+  } catch {
+    // Fullscreen exit failed
+  }
+}
 
 // --- Virtual joystick state ---
 let joystickActive = false;
@@ -178,6 +240,7 @@ const settingsPanelEl = document.getElementById('settings-panel')!;
 const exitToLobbyBtnEl = document.getElementById('exit-to-lobby-btn')!;
 const musicToggleEl = document.getElementById('music-toggle') as HTMLInputElement;
 const sfxToggleEl = document.getElementById('sfx-toggle') as HTMLInputElement;
+const hideStraysToggleEl = document.getElementById('hide-strays-toggle') as HTMLInputElement;
 const settingsCloseEl = document.getElementById('settings-close')!;
 const fpsSelectEl = document.getElementById('fps-select') as HTMLSelectElement | null;
 const pingEl = document.getElementById('ping')!;
@@ -245,6 +308,12 @@ const breederMinigameEl = document.getElementById('breeder-minigame')!;
 const breederTimerEl = document.getElementById('breeder-timer')!;
 const breederTokensEl = document.getElementById('breeder-tokens')!;
 const breederPetsEl = document.getElementById('breeder-pets')!;
+// Breeder Warning Popup Elements
+const breederWarningPopupEl = document.getElementById('breeder-warning-popup')!;
+const breederWarningTextEl = document.getElementById('breeder-warning-text')!;
+const breederWarningStatsEl = document.getElementById('breeder-warning-stats')!;
+const breederWarningContinueEl = document.getElementById('breeder-warning-continue')!;
+const breederWarningRetreatEl = document.getElementById('breeder-warning-retreat')!;
 const breederFoodsEl = document.getElementById('breeder-foods')!;
 const breederResultEl = document.getElementById('breeder-result')!;
 const breederResultTitleEl = document.getElementById('breeder-result-title')!;
@@ -334,6 +403,15 @@ const breederGame: BreederGameState = {
   selectedIngredients: [],
 };
 
+// Pending breeder game state (for when warning popup is shown)
+interface PendingBreederGame {
+  petCount: number;
+  level: number;
+  opts: { isMill?: boolean; timeLimitSeconds?: number; addPetIntervalSeconds?: number };
+}
+let pendingBreederGame: PendingBreederGame | null = null;
+let breederWarningVisible = false; // Track when warning popup is visible (blocks movement)
+
 // Food costs and pet matching
 const FOOD_COSTS: Record<FoodType, number> = {
   apple: 5,
@@ -389,6 +467,25 @@ function getRequiredIngredients(level: number): number {
   if (level <= 9) return 3;
   return 4; // level 10+
 }
+
+/** Calculate minimum RT needed to rescue all pets in a breeder camp/mill
+ * Based on cheapest possible recipes per level:
+ * - Level 1-2: 5 RT (seeds or apple for single ingredient)
+ * - Level 3-5: 10 RT (seeds + apple = 10)
+ * - Level 6-9: 30 RT (water + seeds + apple = 20+5+5)
+ * - Level 10+: 50 RT (bowl + water + seeds + apple = 20+20+5+5)
+ */
+function getMinimumRTPerPet(level: number): number {
+  if (level <= 2) return 5;   // Single cheapest ingredient
+  if (level <= 5) return 10;  // seeds + apple
+  if (level <= 9) return 30;  // water + seeds + apple
+  return 50; // bowl + water + seeds + apple
+}
+
+function calculateMinimumRTNeeded(petCount: number, level: number): number {
+  return petCount * getMinimumRTPerPet(level);
+}
+
 const PET_EMOJIS: Record<PetType, string> = {
   dog: '🐕',
   cat: '🐱',
@@ -478,7 +575,19 @@ let iAmReady = false;
 const TOKENS_KEY = 'rescueworld_tokens';
 const COLOR_KEY = 'rescueworld_color';
 const UNLOCKED_COLORS_KEY = 'rescueworld_unlocked_colors';
-const BOOST_PRICES = { size: 50, speed: 30, adoptSpeed: 40 } as const;
+// Base prices for speed and adopt speed boosts
+const BOOST_PRICES = { speed: 30, adoptSpeed: 40 } as const;
+
+// Scaling prices for size boosts based on current pending size bonus
+function getSizeBoostPrice(currentSizeBonus: number): number {
+  if (currentSizeBonus < 5) return 50;
+  if (currentSizeBonus < 10) return 80;
+  if (currentSizeBonus < 15) return 120;
+  if (currentSizeBonus < 20) return 160;
+  if (currentSizeBonus < 30) return 250;
+  if (currentSizeBonus < 40) return 350;
+  return 1000; // 40-50
+}
 const COLOR_PRICES = { preset: 50, custom: 200, gradient: 500 } as const;
 const FREE_COLORS = ['#7bed9f', '#70a3ff', '#ff9f43'];
 const PRESET_COLORS = ['#e74c3c', '#9b59b6', '#f1c40f', '#1abc9c', '#e91e63', '#00bcd4'];
@@ -505,30 +614,190 @@ let currentShelterColor: string | null = null;
 interface ActiveMultiplayerMatch {
   matchId: string;
   mode: 'ffa' | 'teams';
+  durationMs: number;
+  isPaused: boolean;
+  fetchedAt: number;
 }
-let activeMultiplayerMatch: ActiveMultiplayerMatch | null = null;
-const ACTIVE_MP_MATCH_KEY = 'rescueworld_active_mp_match';
+let activeMultiplayerMatches: ActiveMultiplayerMatch[] = [];
+const ACTIVE_MP_MATCHES_KEY = 'rescueworld_active_mp_matches';
+const MAX_SIMULTANEOUS_MATCHES = 5;
 
-function getActiveMultiplayerMatch(): ActiveMultiplayerMatch | null {
+// Clock update interval for real-time display
+let matchClockInterval: number | null = null;
+// Polling interval for match status sync
+let matchPollInterval: number | null = null;
+
+function getActiveMultiplayerMatches(): ActiveMultiplayerMatch[] {
   try {
-    const stored = localStorage.getItem(ACTIVE_MP_MATCH_KEY);
+    const stored = localStorage.getItem(ACTIVE_MP_MATCHES_KEY);
     if (stored) {
       const parsed = JSON.parse(stored);
-      if (parsed.matchId && (parsed.mode === 'ffa' || parsed.mode === 'teams')) {
-        return parsed;
+      if (Array.isArray(parsed)) {
+        return parsed.filter((m: ActiveMultiplayerMatch) => m.matchId && (m.mode === 'ffa' || m.mode === 'teams'));
       }
     }
   } catch { /* ignore */ }
-  return null;
+  return [];
 }
 
-function setActiveMultiplayerMatch(match: ActiveMultiplayerMatch | null): void {
-  activeMultiplayerMatch = match;
-  if (match) {
-    localStorage.setItem(ACTIVE_MP_MATCH_KEY, JSON.stringify(match));
+function setActiveMultiplayerMatches(matches: ActiveMultiplayerMatch[]): void {
+  activeMultiplayerMatches = matches;
+  if (matches.length > 0) {
+    localStorage.setItem(ACTIVE_MP_MATCHES_KEY, JSON.stringify(matches));
   } else {
-    localStorage.removeItem(ACTIVE_MP_MATCH_KEY);
+    localStorage.removeItem(ACTIVE_MP_MATCHES_KEY);
   }
+}
+
+/** Add a match to the active matches list (when exiting to lobby) */
+function addActiveMultiplayerMatch(match: Omit<ActiveMultiplayerMatch, 'fetchedAt'>): void {
+  const existing = activeMultiplayerMatches.filter(m => m.matchId !== match.matchId);
+  existing.push({ ...match, fetchedAt: Date.now() });
+  setActiveMultiplayerMatches(existing);
+}
+
+/** Remove a match from the active matches list */
+function removeActiveMultiplayerMatch(matchId: string): void {
+  const filtered = activeMultiplayerMatches.filter(m => m.matchId !== matchId);
+  setActiveMultiplayerMatches(filtered);
+}
+
+/** Clear all active matches (backward compatibility) */
+function setActiveMultiplayerMatch(match: { matchId: string; mode: 'ffa' | 'teams' } | null): void {
+  if (match) {
+    addActiveMultiplayerMatch({ matchId: match.matchId, mode: match.mode, durationMs: 0, isPaused: false });
+  } else {
+    setActiveMultiplayerMatches([]);
+  }
+}
+
+/** Fetch all active matches from server and update UI */
+async function fetchActiveMatchesInfo(): Promise<void> {
+  if (!currentUserId) {
+    setActiveMultiplayerMatches([]);
+    return;
+  }
+  try {
+    const res = await fetch('/api/active-matches', { credentials: 'include' });
+    const data = await res.json();
+    if (data.matches && Array.isArray(data.matches)) {
+      const now = Date.now();
+      const matches: ActiveMultiplayerMatch[] = data.matches.map((m: { matchId: string; mode: 'ffa' | 'teams'; durationMs: number; isPaused: boolean }) => ({
+        matchId: m.matchId,
+        mode: m.mode,
+        durationMs: m.durationMs,
+        isPaused: m.isPaused,
+        fetchedAt: now,
+      }));
+      setActiveMultiplayerMatches(matches);
+    } else {
+      setActiveMultiplayerMatches([]);
+    }
+  } catch { /* ignore */ }
+  updateMatchListDisplay();
+  updateResumeMatchUI();
+}
+
+/** Backward compatibility alias */
+async function fetchActiveMatchInfo(): Promise<void> {
+  return fetchActiveMatchesInfo();
+}
+
+/** Start real-time clock updates (every second) */
+function startMatchClockUpdates(): void {
+  if (matchClockInterval) return;
+  matchClockInterval = window.setInterval(() => {
+    updateMatchListDisplay();
+  }, 1000);
+}
+
+/** Stop real-time clock updates */
+function stopMatchClockUpdates(): void {
+  if (matchClockInterval) {
+    clearInterval(matchClockInterval);
+    matchClockInterval = null;
+  }
+}
+
+/** Start polling for match status updates (every 30 seconds) */
+function startMatchPolling(): void {
+  if (matchPollInterval) return;
+  matchPollInterval = window.setInterval(() => {
+    fetchActiveMatchesInfo();
+  }, 30000);
+}
+
+/** Stop polling for match status */
+function stopMatchPolling(): void {
+  if (matchPollInterval) {
+    clearInterval(matchPollInterval);
+    matchPollInterval = null;
+  }
+}
+
+/** Format duration in mm:ss */
+function formatMatchDuration(ms: number): string {
+  const totalSecs = Math.floor(ms / 1000);
+  const mins = Math.floor(totalSecs / 60);
+  const secs = totalSecs % 60;
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+/** Update the match list display with current times */
+function updateMatchListDisplay(): void {
+  const container = document.getElementById('active-matches-container');
+  const list = document.getElementById('active-matches-list');
+  if (!container || !list) return;
+  
+  // Filter matches for current selected mode (or show all)
+  const matchesToShow = activeMultiplayerMatches;
+  
+  if (matchesToShow.length === 0) {
+    container.classList.add('hidden');
+    return;
+  }
+  
+  container.classList.remove('hidden');
+  
+  // Build HTML for each match
+  const now = Date.now();
+  const html = matchesToShow.map(match => {
+    // Calculate current duration
+    let currentDurationMs = match.durationMs;
+    if (!match.isPaused && match.fetchedAt) {
+      currentDurationMs += now - match.fetchedAt;
+    }
+    const timeStr = formatMatchDuration(currentDurationMs);
+    const shortId = getShortMatchId(match.matchId);
+    const pausedBadge = match.isPaused ? '<span class="match-paused">PAUSED</span>' : '';
+    
+    return `<div class="active-match-item" data-match-id="${match.matchId}" data-mode="${match.mode}">
+      <div class="match-info">
+        <span class="match-mode">${match.mode.toUpperCase()}</span>
+        <span class="match-id">${shortId}</span>
+        ${pausedBadge}
+      </div>
+      <span class="match-time">${timeStr}</span>
+    </div>`;
+  }).join('');
+  
+  list.innerHTML = html;
+  
+  // Add click handlers
+  list.querySelectorAll('.active-match-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const matchId = (item as HTMLElement).dataset.matchId;
+      const mode = (item as HTMLElement).dataset.mode as 'ffa' | 'teams';
+      if (matchId && mode) {
+        rejoinMatch(matchId, mode);
+      }
+    });
+  });
+}
+
+/** Rejoin a specific match */
+function rejoinMatch(matchId: string, mode: 'ffa' | 'teams'): void {
+  startConnect({ mode, rejoinMatchId: matchId });
 }
 
 /** Get short match ID for display (last 6 chars of hash) */
@@ -544,6 +813,17 @@ function getShortMatchId(matchId: string): string {
 // Track current matchId for FFA/Teams
 let currentMatchId: string | null = null;
 
+/** Format number for human-readable display (1K, 1.1K, 252.2K, 3M, etc.) */
+function formatNumber(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1000000) {
+    const k = n / 1000;
+    return k >= 100 ? `${Math.round(k)}K` : k >= 10 ? `${k.toFixed(1).replace(/\.0$/, '')}K` : `${k.toFixed(2).replace(/\.?0+$/, '')}K`;
+  }
+  const m = n / 1000000;
+  return m >= 100 ? `${Math.round(m)}M` : m >= 10 ? `${m.toFixed(1).replace(/\.0$/, '')}M` : `${m.toFixed(2).replace(/\.?0+$/, '')}M`;
+}
+
 function getTokens(): number {
   return parseInt(localStorage.getItem(TOKENS_KEY) || '0', 10);
 }
@@ -551,14 +831,33 @@ function setTokens(n: number): void {
   localStorage.setItem(TOKENS_KEY, String(Math.max(0, n)));
 }
 function updateLandingTokens(): void {
-  const el = document.getElementById('landing-tokens');
-  if (el) el.textContent = `Tokens: ${getTokens()} RT`;
-  const m = getTokens();
+  const tokens = getTokens();
+  
+  // Update equipment panel RT display with human-readable format
+  const equipRt = document.getElementById('equip-rt');
+  if (equipRt) equipRt.textContent = formatNumber(tokens);
+  
+  // Update pending size boost display
+  const equipSize = document.getElementById('equip-size');
+  if (equipSize) equipSize.textContent = pendingBoosts.sizeBonus > 0 ? `+${pendingBoosts.sizeBonus}` : '0';
+  
+  // Update size boost button with dynamic price
+  const sizeBtn = document.getElementById('buy-size-btn') as HTMLButtonElement | null;
+  if (sizeBtn) {
+    const sizePrice = getSizeBoostPrice(pendingBoosts.sizeBonus);
+    sizeBtn.textContent = `Buy +1 Size (${sizePrice} RT)`;
+    sizeBtn.disabled = tokens < sizePrice || pendingBoosts.sizeBonus >= 50;
+  }
+  
+  // Update other boost buttons
   document.querySelectorAll('.landing-buy').forEach((btn) => {
-    const b = (btn as HTMLElement).dataset.boost as keyof typeof BOOST_PRICES;
-    if (!b || !(b in BOOST_PRICES)) return;
-    const price = BOOST_PRICES[b as keyof typeof BOOST_PRICES];
-    (btn as HTMLButtonElement).disabled = m < price || (b === 'speed' && pendingBoosts.speedBoost) || (b === 'adoptSpeed' && pendingBoosts.adoptSpeed);
+    const b = (btn as HTMLElement).dataset.boost;
+    if (b === 'size') return; // Handled above
+    if (b === 'speed') {
+      (btn as HTMLButtonElement).disabled = tokens < BOOST_PRICES.speed || pendingBoosts.speedBoost;
+    } else if (b === 'adoptSpeed') {
+      (btn as HTMLButtonElement).disabled = tokens < BOOST_PRICES.adoptSpeed || pendingBoosts.adoptSpeed;
+    }
   });
 }
 
@@ -990,27 +1289,39 @@ function updateResumeMatchUI(): void {
     resumeBtn.classList.remove('hidden');
     resumeBtn.textContent = 'Resume Match';
     playBtn.textContent = 'Start new game';
+    // Hide match list for solo
+    const container = document.getElementById('active-matches-container');
+    if (container) container.classList.add('hidden');
     return;
   }
   
-  // Check for active FFA/Teams match (load from storage if needed)
-  if (!activeMultiplayerMatch) {
-    activeMultiplayerMatch = getActiveMultiplayerMatch();
+  // Load matches from storage if needed
+  if (activeMultiplayerMatches.length === 0) {
+    activeMultiplayerMatches = getActiveMultiplayerMatches();
   }
   
-  // Show return button for FFA/Teams if there's an active match AND the selected mode matches
-  if (activeMultiplayerMatch && isSignedIn && selectedMode === activeMultiplayerMatch.mode) {
-    const shortId = getShortMatchId(activeMultiplayerMatch.matchId);
-    resumeBtn.classList.remove('hidden');
-    resumeBtn.textContent = `Return to Match '${shortId}'`;
-    playBtn.textContent = 'Abandon & New Match';
-    return;
-  }
+  // Update the match list display
+  updateMatchListDisplay();
   
-  // No active match to resume
+  // Check if user has active FFA/Teams matches
+  const matchesForMode = activeMultiplayerMatches.filter(m => m.mode === selectedMode);
+  const hasActiveMatches = matchesForMode.length > 0;
+  const atMaxMatches = activeMultiplayerMatches.length >= MAX_SIMULTANEOUS_MATCHES;
+  
+  // Hide the single resume button - we now use the match list
   resumeBtn.classList.add('hidden');
-  resumeBtn.textContent = 'Resume Match';
-  playBtn.textContent = 'Play';
+  
+  // Update play button text
+  if (atMaxMatches) {
+    playBtn.textContent = 'Max Matches (5)';
+    (playBtn as HTMLButtonElement).disabled = true;
+  } else if (hasActiveMatches) {
+    playBtn.textContent = 'Start New Match';
+    (playBtn as HTMLButtonElement).disabled = false;
+  } else {
+    playBtn.textContent = 'Play';
+    (playBtn as HTMLButtonElement).disabled = false;
+  }
 }
 
 async function fetchAndRenderAuth(): Promise<void> {
@@ -1070,6 +1381,11 @@ async function fetchAndRenderAuth(): Promise<void> {
   updateReferralUI();
   await fetchDailyGiftStatus();
   await fetchSavedMatchStatus();
+  await fetchActiveMatchesInfo();
+  
+  // Start real-time clock updates and polling for active matches
+  startMatchClockUpdates();
+  startMatchPolling();
   
   // Check for new registration (from OAuth redirect)
   const urlParams = new URLSearchParams(window.location.search);
@@ -1239,8 +1555,8 @@ function onKeyDown(e: KeyboardEvent): void {
   
   keys[e.code] = true;
   
-  // Block movement during breeder mini-game
-  if (breederGame.active) {
+  // Block movement during breeder mini-game or warning popup
+  if (breederGame.active || breederWarningVisible) {
     e.preventDefault();
     return;
   }
@@ -1261,8 +1577,8 @@ function onKeyDown(e: KeyboardEvent): void {
 function onKeyUp(e: KeyboardEvent): void {
   keys[e.code] = false;
   
-  // Block movement during breeder mini-game
-  if (breederGame.active) {
+  // Block movement during breeder mini-game or warning popup
+  if (breederGame.active || breederWarningVisible) {
     e.preventDefault();
     return;
   }
@@ -1288,8 +1604,8 @@ function hasMovementKeyDown(): boolean {
 function applyJoystickToInput(): void {
   if (hasMovementKeyDown()) return;
   
-  // Block joystick movement during breeder mini-game
-  if (breederGame.active) {
+  // Block joystick movement during breeder mini-game or warning popup
+  if (breederGame.active || breederWarningVisible) {
     setInputFlag(INPUT_LEFT, false);
     setInputFlag(INPUT_RIGHT, false);
     setInputFlag(INPUT_UP, false);
@@ -1669,7 +1985,7 @@ function showConnectionError(message: string): void {
 }
 
 // --- Connect flow ---
-async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 'solo'; abandon?: boolean }): Promise<void> {
+async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 'solo'; abandon?: boolean; rejoinMatchId?: string }): Promise<void> {
   disconnectLobbyLeaderboard();
   stopGameStatsPolling();
   if (pingIntervalId) {
@@ -1734,6 +2050,8 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
       startingRT,
       startingPorts,
       userId: currentUserId, // For inventory tracking
+      abandon: options?.abandon,
+      rejoinMatchId: options?.rejoinMatchId,
     }));
     if (pendingBoosts.sizeBonus > 0 || pendingBoosts.speedBoost || pendingBoosts.adoptSpeed) {
       gameWs.send(JSON.stringify({
@@ -1767,9 +2085,9 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           myPlayerId = msg.playerId;
           // Track current matchId for FFA/Teams rejoin capability
           if (msg.matchId && (selectedMode === 'ffa' || selectedMode === 'teams')) {
-            // If resumed, clear the stored match (we're back in it)
+            // If resumed, remove this match from pending list (we're back in it)
             if (msg.resumed) {
-              setActiveMultiplayerMatch(null);
+              removeActiveMultiplayerMatch(msg.matchId);
               showToast(`Rejoined match ${getShortMatchId(msg.matchId)}!`, 'success');
             }
             // Store current match info for potential rejoin later
@@ -1781,6 +2099,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           hasSavedMatch = false;
           updateResumeMatchUI();
           fetchSavedMatchStatus();
+          fetchActiveMatchesInfo(); // Will refresh the match list from server
           const reason = typeof msg.reason === 'string' ? msg.reason : 'Match already ended';
           showToast(reason, 'info');
           if (gameWs) {
@@ -1791,7 +2110,6 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           myPlayerId = null;
           latestSnapshot = null;
           currentMatchId = null;
-          setActiveMultiplayerMatch(null);
           leaderboardEl.classList.remove('show');
           matchEndPlayed = false;
           matchEndTokensAwarded = false;
@@ -1799,6 +2117,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           gameWrapEl.classList.remove('visible');
           landingEl.classList.remove('hidden');
           authAreaEl.classList.remove('hidden');
+          exitMobileFullscreen();
           updateLandingTokens();
           restoreModeSelection();
           connectionOverlayEl?.classList.add('hidden');
@@ -1807,8 +2126,23 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           startGameStatsPolling();
         }
         if (msg.type === 'serverShutdown') {
-          const message = typeof msg.message === 'string' ? msg.message : 'Server is updating. Your progress has been saved.';
-          showToast(message, 'info', true); // Allow HTML for clickable link
+          const baseMessage = typeof msg.message === 'string' ? msg.message : 'Server is updating. Your progress has been saved.';
+          // Show countdown message with reload button
+          let countdown = 7;
+          const updateShutdownToast = () => {
+            const reloadBtn = `<button onclick="location.reload()" style="margin-left:8px;padding:4px 12px;background:#3b82f6;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:600;">Reload Now</button>`;
+            showToast(`${baseMessage}<br><span style="font-size:12px;opacity:0.8;">Auto-reloading in ${countdown}s...</span>${reloadBtn}`, 'info', true);
+          };
+          updateShutdownToast();
+          const shutdownInterval = setInterval(() => {
+            countdown--;
+            if (countdown <= 0) {
+              clearInterval(shutdownInterval);
+              location.reload();
+            } else {
+              updateShutdownToast();
+            }
+          }, 1000);
           if (gameWs) {
             gameWs.close();
             gameWs = null;
@@ -1816,7 +2150,6 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           myPlayerId = null;
           latestSnapshot = null;
           currentMatchId = null;
-          setActiveMultiplayerMatch(null);
           leaderboardEl.classList.remove('show');
           matchEndPlayed = false;
           matchEndTokensAwarded = false;
@@ -1824,10 +2157,14 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           gameWrapEl.classList.remove('visible');
           landingEl.classList.remove('hidden');
           authAreaEl.classList.remove('hidden');
+          exitMobileFullscreen();
           updateLandingTokens();
           restoreModeSelection();
           updateResumeMatchUI();
           fetchSavedMatchStatus();
+          fetchActiveMatchesInfo(); // Refresh match list from server
+          startMatchClockUpdates();
+          startMatchPolling();
           connectionOverlayEl?.classList.add('hidden');
           startServerClockWhenOnLobby();
           connectLobbyLeaderboard();
@@ -1902,9 +2239,14 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         // Match end inventory notification - match has ended, saved match cleared
         if (msg.type === 'matchEndInventory') {
           hasSavedMatch = false;
+          // Remove current match from pending list (it has ended)
+          if (currentMatchId) {
+            removeActiveMultiplayerMatch(currentMatchId);
+          }
           updateResumeMatchUI();
           // Refresh inventory display if we're showing lobby soon
           fetchSavedMatchStatus();
+          fetchActiveMatchesInfo();
           // Show karma notification if awarded
           if (typeof msg.karmaAwarded === 'number' && msg.karmaAwarded > 0) {
             showToast(`+${msg.karmaAwarded} Karma Point!`, 'success');
@@ -1963,6 +2305,10 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
               toY: p.y,
               phase: 'fadeIn', // Start appearing at new location
             });
+            // Play teleport sound for local player
+            if (p.id === myPlayerId) {
+              playPort();
+            }
           }
         }
         prevPlayerPositions.set(p.id, { x: p.x, y: p.y });
@@ -1990,24 +2336,26 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         const hasShelter = !!me.shelterId;
         if (me.size > lastKnownSize && !hasShelter && me.size < 50) {
           growthPopUntil = Date.now() + 1500;
-          playPickupGrowth();
+          playPickupBoost();
         } else if (me.size > lastKnownSize) {
           // Still play sound but don't show popup
-          playPickupGrowth();
+          playPickupBoost();
         }
-        if ((me.speedBoostUntil ?? 0) > lastSpeedBoostUntil) playPickupSpeed();
+        if ((me.speedBoostUntil ?? 0) > lastSpeedBoostUntil) playPickupBoost();
         lastSpeedBoostUntil = me.speedBoostUntil ?? 0;
         if (me.totalAdoptions > lastTotalAdoptions) {
-          playAdoption();
           const adoptionCount = me.totalAdoptions - lastTotalAdoptions;
           const myShelter = latestSnapshot?.shelters?.find(s => s.ownerId === myPlayerId);
           // Which pet IDs were just adopted? (they were in our van/shelter last frame, now gone)
           let adoptedIds: string[];
           if (myShelter?.hasAdoptionCenter) {
+            // Shelter auto-adoption - no sound, just visual
             adoptedIds = lastShelterPetsInsideIds.filter((id) => !myShelter.petsInside.includes(id)).slice(0, adoptionCount);
             const types = adoptedIds.map((id) => lastPetTypesById.get(id) ?? PET_TYPE_CAT);
             triggerAdoptionAnimation(myShelter.x, myShelter.y, myShelter.x, myShelter.y - 100, types);
           } else {
+            // Dropping off at adoption center - play drop off sound
+            playDropOff();
             adoptedIds = lastPetsInsideIds.filter((id) => !me.petsInside.includes(id)).slice(0, adoptionCount);
             const types = adoptedIds.map((id) => lastPetTypesById.get(id) ?? PET_TYPE_CAT);
             const zone = latestSnapshot?.adoptionZones?.[0];
@@ -2115,7 +2463,7 @@ function tick(now: number): void {
   const matchOver = latestSnapshot != null && latestSnapshot.matchEndAt > 0 && latestSnapshot.tick >= latestSnapshot.matchEndAt;
   const meForActive = latestSnapshot?.players.find((p) => p.id === myPlayerId);
   const gameActive = matchPhase === 'playing' && !matchOver && !meForActive?.eliminated;
-  const canMove = gameActive && !breederGame.active; // Can't move during breeder minigame
+  const canMove = gameActive && !breederGame.active && !breederWarningVisible; // Can't move during breeder minigame or warning
 
   // Send input at server tick rate (only when match is playing and not over, and not in minigame)
   if (canMove && gameWs?.readyState === WebSocket.OPEN && now - lastInputSendTime >= TICK_MS) {
@@ -2142,8 +2490,16 @@ function tick(now: number): void {
       playerDisplayX = tx;
       playerDisplayY = ty;
     } else {
-      playerDisplayX += (tx - playerDisplayX) * PLAYER_DISPLAY_SMOOTH;
-      playerDisplayY += (ty - playerDisplayY) * PLAYER_DISPLAY_SMOOTH;
+      // Check if this is a teleport (large position change) - snap camera instantly instead of smoothing
+      const distToTarget = Math.hypot(tx - playerDisplayX, ty - playerDisplayY);
+      if (distToTarget > 200) {
+        // Teleport detected - snap camera instantly
+        playerDisplayX = tx;
+        playerDisplayY = ty;
+      } else {
+        playerDisplayX += (tx - playerDisplayX) * PLAYER_DISPLAY_SMOOTH;
+        playerDisplayY += (ty - playerDisplayY) * PLAYER_DISPLAY_SMOOTH;
+      }
     }
     if (!Number.isFinite(playerDisplayX) || !Number.isFinite(playerDisplayY)) {
       playerDisplayX = tx;
@@ -2323,7 +2679,7 @@ function drawAdoptionZone(z: AdoptionZoneState): void {
 function drawAdoptionEvent(ev: AdoptionEvent, nowTick: number): void {
   const cx = ev.x;
   const cy = ev.y;
-  const r = ev.radius; // Use event's randomized radius
+  const r = ev.radius || 300; // Use event's radius or default to 300
   const remaining = Math.max(0, ev.startTick + ev.durationTicks - nowTick);
   const secLeft = Math.ceil(remaining / 25);
   const imgSize = 100; // Larger for better visibility
@@ -2726,9 +3082,9 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
 function drawShelter(shelter: ShelterState, isOwner: boolean, ownerColor?: string): void {
   const cx = shelter.x;
   const cy = shelter.y;
-  // Cap visual size to 400px to prevent overflow (logical size can be larger for win condition)
+  // Cap visual size to 200px (~2x a new shelter) to prevent overflow (logical size can be larger for win condition)
   const baseSize = SHELTER_BASE_RADIUS + shelter.size * SHELTER_RADIUS_PER_SIZE;
-  const half = Math.min(400, Math.max(40, baseSize));
+  const half = Math.min(200, Math.max(40, baseSize));
   
   ctx.save();
   ctx.shadowColor = 'rgba(0,0,0,0.4)';
@@ -3274,12 +3630,15 @@ function render(dt: number): void {
       minimapCtx.fillStyle = 'rgba(123, 237, 159, 0.6)';
       minimapCtx.fillRect(z.x * scale - r, z.y * scale - r, r * 2, r * 2);
     }
-    for (const pet of latestSnapshot.pets) {
-      if (pet.insideShelterId !== null) continue;
-      // Skip uninitialized pets at (0,0)
-      if (pet.x === 0 && pet.y === 0) continue;
-      minimapCtx.fillStyle = '#c9a86c';
-      minimapCtx.fillRect(pet.x * scale - 2, pet.y * scale - 2, 4, 4);
+    // Only draw stray pets if hideStraysOnMinimap is false
+    if (!hideStraysOnMinimap) {
+      for (const pet of latestSnapshot.pets) {
+        if (pet.insideShelterId !== null) continue;
+        // Skip uninitialized pets at (0,0)
+        if (pet.x === 0 && pet.y === 0) continue;
+        minimapCtx.fillStyle = '#c9a86c';
+        minimapCtx.fillRect(pet.x * scale - 2, pet.y * scale - 2, 4, 4);
+      }
     }
     for (const u of latestSnapshot.pickups ?? []) {
       const px = u.x * scale;
@@ -3398,61 +3757,73 @@ function render(dt: number): void {
       minimapCtx.strokeRect(bx - bHalf, by - bHalf, bHalf * 2, bHalf * 2);
       minimapCtx.restore();
     }
-    // Draw adoption events on minimap (pulsing teal ring for visibility)
+    // Draw adoption events on minimap (highly visible with bright pulsing effects)
     for (const ev of latestSnapshot.adoptionEvents ?? []) {
       const ex = ev.x * scale;
       const ey = ev.y * scale;
-      const r = Math.min(12, ev.radius * scale);
-      
-      // Pulsing effect - creates an expanding ring animation
-      const pulseTime = Date.now() % 2000; // 2 second cycle
-      const pulseProgress = pulseTime / 2000;
-      const pulseRadius = r + pulseProgress * 8; // Expands outward
-      const pulseAlpha = 1 - pulseProgress; // Fades out as it expands
+      const r = Math.min(14, Math.max(8, ev.radius * scale)); // Ensure minimum visible size
       
       minimapCtx.save();
       
-      // Draw expanding pulse ring
-      minimapCtx.strokeStyle = `rgba(94, 234, 212, ${pulseAlpha * 0.8})`;
-      minimapCtx.lineWidth = 3 - pulseProgress * 2;
+      // Strong outer glow effect for maximum visibility
+      minimapCtx.shadowColor = '#00ffcc';
+      minimapCtx.shadowBlur = 12 + Math.sin(Date.now() * 0.006) * 6;
+      
+      // Draw bright filled background circle
+      minimapCtx.fillStyle = 'rgba(0, 255, 200, 0.5)';
+      minimapCtx.beginPath();
+      minimapCtx.arc(ex, ey, r + 2, 0, Math.PI * 2);
+      minimapCtx.fill();
+      
+      // Pulsing effect - creates expanding ring animations (faster and more prominent)
+      const pulseTime = Date.now() % 1500; // 1.5 second cycle (faster)
+      const pulseProgress = pulseTime / 1500;
+      const pulseRadius = r + pulseProgress * 12; // Expands further outward
+      const pulseAlpha = 1 - pulseProgress;
+      
+      // Draw expanding pulse ring (thicker, brighter)
+      minimapCtx.strokeStyle = `rgba(0, 255, 200, ${pulseAlpha})`;
+      minimapCtx.lineWidth = 4 - pulseProgress * 3;
       minimapCtx.beginPath();
       minimapCtx.arc(ex, ey, pulseRadius, 0, Math.PI * 2);
       minimapCtx.stroke();
       
       // Draw second pulse ring (offset timing for continuous effect)
-      const pulse2Time = (Date.now() + 1000) % 2000;
-      const pulse2Progress = pulse2Time / 2000;
-      const pulse2Radius = r + pulse2Progress * 8;
+      const pulse2Time = (Date.now() + 750) % 1500;
+      const pulse2Progress = pulse2Time / 1500;
+      const pulse2Radius = r + pulse2Progress * 12;
       const pulse2Alpha = 1 - pulse2Progress;
-      minimapCtx.strokeStyle = `rgba(94, 234, 212, ${pulse2Alpha * 0.8})`;
-      minimapCtx.lineWidth = 3 - pulse2Progress * 2;
+      minimapCtx.strokeStyle = `rgba(0, 255, 200, ${pulse2Alpha})`;
+      minimapCtx.lineWidth = 4 - pulse2Progress * 3;
       minimapCtx.beginPath();
       minimapCtx.arc(ex, ey, pulse2Radius, 0, Math.PI * 2);
       minimapCtx.stroke();
       
-      // Draw glowing center
-      minimapCtx.shadowColor = '#5eead4';
-      minimapCtx.shadowBlur = 6 + Math.sin(Date.now() * 0.005) * 3;
+      // Draw third pulse ring for extra visibility
+      const pulse3Time = (Date.now() + 500) % 1500;
+      const pulse3Progress = pulse3Time / 1500;
+      const pulse3Radius = r + pulse3Progress * 12;
+      const pulse3Alpha = (1 - pulse3Progress) * 0.7;
+      minimapCtx.strokeStyle = `rgba(255, 215, 0, ${pulse3Alpha})`; // Gold color for contrast
+      minimapCtx.lineWidth = 3 - pulse3Progress * 2;
+      minimapCtx.beginPath();
+      minimapCtx.arc(ex, ey, pulse3Radius, 0, Math.PI * 2);
+      minimapCtx.stroke();
       
-      // Main event circle
-      minimapCtx.strokeStyle = '#5eead4';
-      minimapCtx.lineWidth = 2;
-      minimapCtx.setLineDash([4, 4]);
+      // Main event circle - solid bright border
+      minimapCtx.strokeStyle = '#00ffcc';
+      minimapCtx.lineWidth = 3;
       minimapCtx.beginPath();
       minimapCtx.arc(ex, ey, r, 0, Math.PI * 2);
       minimapCtx.stroke();
-      minimapCtx.setLineDash([]);
       
-      // Filled center
-      minimapCtx.fillStyle = 'rgba(94, 234, 212, 0.4)';
-      minimapCtx.fill();
-      
-      // Draw event icon in center
-      minimapCtx.fillStyle = '#5eead4';
-      minimapCtx.font = 'bold 8px sans-serif';
+      // Draw bright star/event icon in center (larger, more visible)
+      minimapCtx.shadowBlur = 8;
+      minimapCtx.fillStyle = '#ffffff';
+      minimapCtx.font = 'bold 12px sans-serif';
       minimapCtx.textAlign = 'center';
       minimapCtx.textBaseline = 'middle';
-      minimapCtx.fillText('📢', ex, ey);
+      minimapCtx.fillText('★', ex, ey);
       
       minimapCtx.restore();
     }
@@ -3686,7 +4057,7 @@ function render(dt: number): void {
   const canBuildShelter = me && me.size >= 50 && !hasShelter && !isEliminated && matchPhase === 'playing';
   
   // Update tokens display
-  gameTokensEl.textContent = `${playerTokens} RT`;
+  gameTokensEl.textContent = formatNumber(playerTokens);
   
   // Menu button - show when in match and not eliminated (always available, even after building shelter)
   const showMenuButton = me && !isEliminated && matchPhase === 'playing';
@@ -3858,10 +4229,18 @@ function render(dt: number): void {
   }
   
   const iAmEliminated = !!(me?.eliminated);
-  if ((remainingSec <= 0 || iAmEliminated) && latestSnapshot?.players.length) {
-    // Close any active breeder minigame when match ends
+  const matchEndedEarly = !!(latestSnapshot?.matchEndedEarly);
+  const matchIsFinished = remainingSec <= 0 || matchEndedEarly || iAmEliminated;
+  if (matchIsFinished && latestSnapshot?.players.length) {
+    // Close any active breeder minigame when match ends (including early wins)
     if (breederGame.active) {
       endBreederMiniGame(false);
+    }
+    // Also close the breeder warning popup if showing
+    if (breederWarningVisible) {
+      breederWarningPopupEl.classList.add('hidden');
+      breederWarningVisible = false;
+      pendingBreederGame = null;
     }
     if (!matchEndPlayed) {
       matchEndPlayed = true;
@@ -3947,6 +4326,8 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
   setTimeout(() => { leaderboardActionInProgress = false; }, 500);
   
   if (btn.id === 'play-again-btn') {
+    // Request fullscreen immediately while still in user gesture context
+    enterMobileFullscreen();
     if (gameWs) {
       gameWs.close();
       gameWs = null;
@@ -3967,7 +4348,10 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
         gameWrapEl.classList.add('visible');
         requestAnimationFrame(tick);
       })
-      .catch((err: Error) => showConnectionError(err.message || 'Connection failed.'));
+      .catch((err: Error) => {
+        exitMobileFullscreen();
+        showConnectionError(err.message || 'Connection failed.');
+      });
   } else if (btn.id === 'lobby-btn') {
     if (gameWs) {
       gameWs.close();
@@ -3981,14 +4365,18 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
     gameWrapEl.classList.remove('visible');
     landingEl.classList.remove('hidden');
     authAreaEl.classList.remove('hidden');
+    exitMobileFullscreen();
     updateLandingTokens();
     restoreModeSelection();
     // Clear saved match state since match ended
     hasSavedMatch = false;
-    // Clear active FFA/Teams match since match ended properly
-    setActiveMultiplayerMatch(null);
+    // Remove current match from pending list since it ended properly
+    if (currentMatchId) {
+      removeActiveMultiplayerMatch(currentMatchId);
+    }
     updateResumeMatchUI();
     fetchSavedMatchStatus(); // Sync with server
+    fetchActiveMatchesInfo(); // Refresh match list
     startServerClockWhenOnLobby();
     connectLobbyLeaderboard();
   }
@@ -4045,6 +4433,7 @@ lobbyBackBtnEl.addEventListener('click', () => {
   gameWrapEl.classList.remove('visible');
   landingEl.classList.remove('hidden');
   authAreaEl.classList.remove('hidden'); // Show auth when returning to lobby
+  exitMobileFullscreen();
   updateLandingTokens();
   restoreModeSelection(); // Restore sticky mode
   startServerClockWhenOnLobby();
@@ -4071,14 +4460,14 @@ groundBtnEl.addEventListener('click', () => {
 
 // --- Random Port button ---
 portBtnEl.addEventListener('click', () => {
-  if (breederGame.active) return; // Don't allow porting during mini-game
+  if (breederGame.active || breederWarningVisible) return; // Don't allow porting during mini-game or warning
   if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
   gameWs.send(JSON.stringify({ type: 'usePort' }));
 });
 
 // --- Shelter Port button ---
 shelterPortBtnEl.addEventListener('click', () => {
-  if (breederGame.active) return; // Don't allow porting during mini-game
+  if (breederGame.active || breederWarningVisible) return; // Don't allow porting during mini-game or warning
   if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
   const me = latestSnapshot?.players.find((pl) => pl.id === myPlayerId);
   if (!me) return;
@@ -4093,7 +4482,7 @@ shelterPortBtnEl.addEventListener('click', () => {
 
 // --- Transfer Pets button ---
 transferBtnEl.addEventListener('click', () => {
-  if (breederGame.active) return; // Don't allow during mini-game
+  if (breederGame.active || breederWarningVisible) return; // Don't allow during mini-game or warning
   if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
   const targetShelterId = (transferBtnEl as HTMLButtonElement).dataset.targetShelterId;
   if (!targetShelterId) return;
@@ -4232,8 +4621,8 @@ document.addEventListener('keydown', (e) => {
     toggleActionMenu();
   }
   if (e.key === 'p' || e.key === 'P') {
-    // Use random port charge (not during breeder mini-game)
-    if (breederGame.active) return;
+    // Use random port charge (not during breeder mini-game or warning)
+    if (breederGame.active || breederWarningVisible) return;
     if (gameWs && gameWs.readyState === WebSocket.OPEN) {
       const me = latestSnapshot?.players.find((pl) => pl.id === myPlayerId);
       if (me && (me.portCharges ?? 0) > 0 && !me.eliminated && matchPhase === 'playing') {
@@ -4242,8 +4631,8 @@ document.addEventListener('keydown', (e) => {
     }
   }
   if (e.key === 'h' || e.key === 'H') {
-    // Use shelter port charge (not during breeder mini-game)
-    if (breederGame.active) return;
+    // Use shelter port charge (not during breeder mini-game or warning)
+    if (breederGame.active || breederWarningVisible) return;
     if (gameWs && gameWs.readyState === WebSocket.OPEN) {
       const me = latestSnapshot?.players.find((pl) => pl.id === myPlayerId);
       if (!me) return;
@@ -4254,6 +4643,32 @@ document.addEventListener('keydown', (e) => {
       }
       if (me.eliminated || matchPhase !== 'playing') return;
       gameWs.send(JSON.stringify({ type: 'useShelterPort' }));
+    }
+  }
+  
+  // Breeder mini-game hotkeys
+  if (e.key === 'i' || e.key === 'I') {
+    // Instant Rescue [I] - only during active breeder game
+    if (!breederGame.active) return;
+    const instantBtn = document.getElementById('instant-rescue-btn') as HTMLButtonElement | null;
+    if (instantBtn && !instantBtn.classList.contains('hidden') && !instantBtn.disabled) {
+      instantBtn.click();
+    }
+  }
+  if (e.key === 'c' || e.key === 'C') {
+    // Continue [C] - close breeder result screen
+    if (!breederGame.active) return;
+    const closeBtn = document.getElementById('breeder-close-btn');
+    if (closeBtn && !closeBtn.classList.contains('hidden')) {
+      closeBtn.click();
+    }
+  }
+  if (e.key === 'r' || e.key === 'R') {
+    // Retreat [R] - retreat from active breeder game
+    if (!breederGame.active) return;
+    const retreatBtn = document.getElementById('breeder-retreat-btn');
+    if (retreatBtn && !retreatBtn.classList.contains('hidden')) {
+      retreatBtn.click();
     }
   }
 });
@@ -4298,6 +4713,15 @@ musicToggleEl.addEventListener('change', () => {
   if (musicToggleEl.checked) playMusic();
 });
 sfxToggleEl.addEventListener('change', () => setSfxEnabled(sfxToggleEl.checked));
+
+// Hide strays toggle - only show buildings/shelters/camps/events on minimap
+let hideStraysOnMinimap = localStorage.getItem('hideStrays') === 'true';
+hideStraysToggleEl.checked = hideStraysOnMinimap;
+hideStraysToggleEl.addEventListener('change', () => {
+  hideStraysOnMinimap = hideStraysToggleEl.checked;
+  localStorage.setItem('hideStrays', hideStraysOnMinimap ? 'true' : 'false');
+});
+
 settingsBtnEl.addEventListener('click', () => settingsPanelEl.classList.toggle('hidden'));
 settingsCloseEl.addEventListener('click', () => settingsPanelEl.classList.add('hidden'));
 
@@ -4330,6 +4754,9 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
     }
   }
   
+  // Capture match duration before clearing state
+  const exitMatchDurationMs = latestSnapshot?.matchDurationMs ?? 0;
+  
   // Always close and return to lobby (even if WebSocket is already closed)
   settingsPanelEl.classList.add('hidden');
   if (gameWs) {
@@ -4346,6 +4773,7 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
   gameWrapEl.classList.remove('visible');
   landingEl.classList.remove('hidden');
   authAreaEl.classList.remove('hidden');
+  exitMobileFullscreen();
   updateLandingTokens();
   restoreModeSelection();
   // For solo mode with active connection, show Resume button (we know we just saved)
@@ -4353,17 +4781,28 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
     hasSavedMatch = true;
     updateResumeMatchUI();
   } else if ((selectedMode === 'ffa' || selectedMode === 'teams') && currentMatchId && isSignedIn) {
-    // For FFA/Teams, store the match info for rejoin (only if signed in)
-    setActiveMultiplayerMatch({ matchId: currentMatchId, mode: selectedMode });
+    // For FFA/Teams, add the match to the list (don't replace existing matches)
+    addActiveMultiplayerMatch({ 
+      matchId: currentMatchId, 
+      mode: selectedMode, 
+      durationMs: exitMatchDurationMs,
+      isPaused: false, // Will update on next poll
+    });
     updateResumeMatchUI();
   } else {
     // Match already ended or unknown state - fetch from server
     fetchSavedMatchStatus();
+    fetchActiveMatchesInfo();
   }
   currentMatchId = null;
   startServerClockWhenOnLobby();
   connectLobbyLeaderboard();
   startGameStatsPolling();
+  // Start real-time clock updates and polling for FFA/Teams
+  if (selectedMode === 'ffa' || selectedMode === 'teams') {
+    startMatchClockUpdates();
+    startMatchPolling();
+  }
 });
 switchServerBtnEl.addEventListener('click', () => {
   if (gameWs) {
@@ -4464,16 +4903,20 @@ referralClaimBtn.addEventListener('click', async () => {
   }
 });
 
-function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boolean; resume?: boolean }): void {
+function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boolean; resume?: boolean; rejoinMatchId?: string }): void {
+  // Request fullscreen immediately while still in user gesture context
+  enterMobileFullscreen();
   playMusic();
   stopServerClock();
+  stopMatchClockUpdates();
+  stopMatchPolling();
   landingEl.classList.add('hidden');
   connectionOverlayEl.classList.remove('hidden');
-  connectionOverlayEl.innerHTML = options.resume
+  connectionOverlayEl.innerHTML = (options.resume || options.rejoinMatchId)
     ? '<h2>Resuming…</h2><p>Loading your saved match.</p>'
     : '<h2>Connecting…</h2><p>Waiting for game server.</p>';
   authAreaEl.classList.add('hidden');
-  connect({ mode: options.mode, abandon: options.abandon })
+  connect({ mode: options.mode, abandon: options.abandon, rejoinMatchId: options.rejoinMatchId })
     .then(() => {
       connectionOverlayEl.classList.add('hidden');
       gameWrapEl.classList.add('visible');
@@ -4482,6 +4925,7 @@ function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boole
     })
     .catch((err: Error) => {
       showConnectionError(err.message || 'Connection failed.');
+      exitMobileFullscreen(); // Exit fullscreen on connection error
       authAreaEl.classList.remove('hidden');
     });
 }
@@ -4489,13 +4933,9 @@ function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boole
 const resumeMatchBtnEl = document.getElementById('resume-match-btn');
 if (resumeMatchBtnEl) {
   resumeMatchBtnEl.addEventListener('click', () => {
+    // Solo resume - only used for solo mode now
     if (selectedMode === 'solo' && hasSavedMatch) {
       startConnect({ mode: 'solo', resume: true });
-      return;
-    }
-    // FFA/Teams rejoin - just start connect with the mode, server will handle rejoin
-    if (activeMultiplayerMatch && selectedMode === activeMultiplayerMatch.mode) {
-      startConnect({ mode: selectedMode });
       return;
     }
   });
@@ -4515,16 +4955,12 @@ landingPlayBtn.addEventListener('click', () => {
     });
     return;
   }
-  // FFA/Teams: if there's an active match, confirm abandon before starting new
-  if (activeMultiplayerMatch && selectedMode === activeMultiplayerMatch.mode) {
-    showAbandonConfirmPopup(() => {
-      // Clear the stored match and start new
-      setActiveMultiplayerMatch(null);
-      updateResumeMatchUI();
-      startConnect({ mode: selectedMode });
-    });
+  // FFA/Teams: check if at max matches
+  if ((selectedMode === 'ffa' || selectedMode === 'teams') && activeMultiplayerMatches.length >= MAX_SIMULTANEOUS_MATCHES) {
+    showToast('Maximum matches reached (5). Finish or leave a match first.', 'info');
     return;
   }
+  // Start new match
   startConnect({ mode: selectedMode });
 });
 
@@ -4545,15 +4981,25 @@ cookieEssentialBtn.addEventListener('click', () => {
 updateLandingTokens();
 document.querySelectorAll('.landing-buy').forEach((btn) => {
   btn.addEventListener('click', () => {
-    const boost = (btn as HTMLElement).dataset.boost as keyof typeof BOOST_PRICES;
-    if (!boost || !(boost in BOOST_PRICES)) return;
-    const price = BOOST_PRICES[boost as keyof typeof BOOST_PRICES];
-    const m = getTokens();
-    if (m < price) return;
-    setTokens(m - price);
-    if (boost === 'size') pendingBoosts.sizeBonus += 1;
-    else if (boost === 'speed') pendingBoosts.speedBoost = true;
-    else if (boost === 'adoptSpeed') pendingBoosts.adoptSpeed = true;
+    const boost = (btn as HTMLElement).dataset.boost;
+    if (!boost) return;
+    const tokens = getTokens();
+    
+    if (boost === 'size') {
+      // Dynamic pricing for size boosts
+      const price = getSizeBoostPrice(pendingBoosts.sizeBonus);
+      if (tokens < price || pendingBoosts.sizeBonus >= 50) return;
+      setTokens(tokens - price);
+      pendingBoosts.sizeBonus += 1;
+    } else if (boost === 'speed') {
+      if (tokens < BOOST_PRICES.speed || pendingBoosts.speedBoost) return;
+      setTokens(tokens - BOOST_PRICES.speed);
+      pendingBoosts.speedBoost = true;
+    } else if (boost === 'adoptSpeed') {
+      if (tokens < BOOST_PRICES.adoptSpeed || pendingBoosts.adoptSpeed) return;
+      setTokens(tokens - BOOST_PRICES.adoptSpeed);
+      pendingBoosts.adoptSpeed = true;
+    }
     updateLandingTokens();
   });
 });
@@ -4687,6 +5133,35 @@ interface BreederStartOptions {
 }
 
 function startBreederMiniGame(petCount: number, level: number = 1, opts: BreederStartOptions = {}): void {
+  // Check if player has enough RT to possibly win
+  const me = latestSnapshot?.players.find(p => p.id === myPlayerId);
+  const currentRT = me?.money ?? 0;
+  const minRTNeeded = calculateMinimumRTNeeded(petCount, level);
+  const campType = opts.isMill ? 'mill' : 'breeder camp';
+  
+  if (currentRT < minRTNeeded) {
+    // Stop movement immediately when showing warning
+    breederWarningVisible = true;
+    setInputFlag(INPUT_LEFT, false);
+    setInputFlag(INPUT_RIGHT, false);
+    setInputFlag(INPUT_UP, false);
+    setInputFlag(INPUT_DOWN, false);
+    sendInputImmediately(); // Send stop to server immediately
+    
+    // Show warning popup
+    pendingBreederGame = { petCount, level, opts };
+    breederWarningTextEl.textContent = `This ${campType} requires more RT than you have to rescue all pets.`;
+    breederWarningStatsEl.textContent = `Required: ${minRTNeeded}+ RT | You have: ${currentRT} RT`;
+    breederWarningPopupEl.classList.remove('hidden');
+    return;
+  }
+  
+  // Proceed with game if enough RT
+  proceedWithBreederMiniGame(petCount, level, opts);
+}
+
+/** Actually start the breeder mini-game (called directly or after warning confirmation) */
+function proceedWithBreederMiniGame(petCount: number, level: number, opts: BreederStartOptions): void {
   breederGame.active = true;
   
   // Clear all movement input flags to stop the van when minigame opens
@@ -4802,7 +5277,7 @@ function setupInstantRescueButton(): void {
   const currentRt = me?.money ?? 0;
   const canAfford = currentRt >= cost;
 
-  btn.textContent = `⚡ Instant Rescue (${cost} RT)`;
+  btn.textContent = `⚡ Instant Rescue [I] (${cost} RT)`;
   btn.disabled = !canAfford;
   btn.classList.remove('hidden');
 
@@ -4933,7 +5408,7 @@ function renderBreederPets(): void {
 function updateBreederTokensDisplay(): void {
   const me = latestSnapshot?.players.find((p) => p.id === myPlayerId);
   const tokens = me?.money ?? 0;
-  breederTokensEl.textContent = `Your Tokens: ${tokens} RT`;
+  breederTokensEl.textContent = `Your Tokens: ${formatNumber(tokens)}`;
   
   const requiredCount = getRequiredIngredients(breederGame.level);
   
@@ -4989,7 +5464,10 @@ function useFood(food: FoodType): void {
   const me = latestSnapshot?.players.find((p) => p.id === myPlayerId);
   const tokens = me?.money ?? 0;
   
-  if (tokens < cost) return;
+  if (tokens < cost) {
+    showToast(`Not enough RT! Need ${cost} RT`, 'error');
+    return;
+  }
   
   const requiredCount = getRequiredIngredients(breederGame.level);
   
@@ -5017,7 +5495,7 @@ function useFood(food: FoodType): void {
         pet.rescued = true;
         breederGame.rescuedCount++;
         breederGame.selectedPetIndex = null;
-        playPickupGrowth();
+        playPickupBoost();
         
         if (breederGame.rescuedCount >= breederGame.totalPets) {
           endBreederMiniGame(true);
@@ -5078,7 +5556,7 @@ function useFood(food: FoodType): void {
       breederGame.rescuedCount++;
       breederGame.selectedPetIndex = null;
       breederGame.selectedIngredients = [];
-      playPickupGrowth();
+      playPickupBoost();
       showToast('Meal complete! Pet rescued!', 'success');
       
       if (breederGame.rescuedCount >= breederGame.totalPets) {
@@ -5177,6 +5655,37 @@ breederFoodsEl.querySelectorAll('.breeder-food-btn').forEach((btn) => {
 });
 
 breederCloseBtnEl.addEventListener('click', closeBreederMiniGame);
+
+// Retreat button in active breeder minigame - allows escape at any time
+const breederRetreatBtn = document.getElementById('breeder-retreat-btn');
+breederRetreatBtn?.addEventListener('click', () => {
+  // End the minigame as a loss (player retreated)
+  endBreederMiniGame(false);
+  // Send retreat message to server to let player escape
+  if (gameWs?.readyState === WebSocket.OPEN) {
+    gameWs.send(JSON.stringify({ type: 'breederRetreat' }));
+  }
+});
+
+// Breeder Warning Popup Event Listeners
+breederWarningContinueEl.addEventListener('click', () => {
+  breederWarningPopupEl.classList.add('hidden');
+  breederWarningVisible = false;
+  if (pendingBreederGame) {
+    proceedWithBreederMiniGame(pendingBreederGame.petCount, pendingBreederGame.level, pendingBreederGame.opts);
+    pendingBreederGame = null;
+  }
+});
+
+breederWarningRetreatEl.addEventListener('click', () => {
+  breederWarningPopupEl.classList.add('hidden');
+  breederWarningVisible = false;
+  pendingBreederGame = null;
+  // Send retreat message to server to let player escape
+  if (gameWs?.readyState === WebSocket.OPEN) {
+    gameWs.send(JSON.stringify({ type: 'breederRetreat' }));
+  }
+});
 
 // --- Daily Gift System ---
 interface DailyGiftReward {
@@ -5813,16 +6322,25 @@ function updateKarmaDisplay(): void {
 }
 
 function updateEquipmentPanel(): void {
-  equipRtEl.textContent = String(currentInventory.storedRt);
+  // RT comes from localStorage tokens (all available for match)
+  const tokens = getTokens();
+  equipRtEl.textContent = formatNumber(tokens);
+  
+  // Ports from server inventory (persisted)
   equipPortsEl.textContent = String(currentInventory.portCharges);
-  equipSpeedEl.textContent = String(currentInventory.speedBoosts);
-  equipSizeEl.textContent = String(currentInventory.sizeBoosts);
+  
+  // Speed: check if pending boost OR server inventory
+  const hasSpeed = pendingBoosts.speedBoost || currentInventory.speedBoosts > 0;
+  equipSpeedEl.textContent = hasSpeed ? '✓' : '0';
+  
+  // Size+ from pending boosts (per-match, not persisted)
+  equipSizeEl.textContent = pendingBoosts.sizeBonus > 0 ? `+${pendingBoosts.sizeBonus}` : '0';
   
   if (currentInventory.signedIn) {
-    if (currentInventory.storedRt > 0 || currentInventory.portCharges > 0) {
-      equipNoteEl.textContent = 'Items will be used next match';
+    if (tokens > 0 || currentInventory.portCharges > 0 || pendingBoosts.sizeBonus > 0) {
+      equipNoteEl.textContent = 'Ready for next match!';
     } else {
-      equipNoteEl.textContent = 'Earn items by winning matches!';
+      equipNoteEl.textContent = 'Earn tokens by winning matches!';
     }
     equipNoteEl.classList.add('signed-in');
   } else {

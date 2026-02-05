@@ -248,6 +248,18 @@ function initSqlite(): void {
     CREATE INDEX IF NOT EXISTS match_history_user_id_idx ON match_history(user_id);
     CREATE INDEX IF NOT EXISTS match_history_played_at_idx ON match_history(played_at DESC);
   `);
+  
+  // FFA/Teams match persistence (matches continue even without players)
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS saved_ffa_matches (
+      match_id TEXT PRIMARY KEY,
+      mode TEXT NOT NULL,
+      world_state TEXT NOT NULL,
+      player_user_ids TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
 
   // Game counts table for tracking all games (including guests) - mode-agnostic totals
   sqlite.exec(`
@@ -489,6 +501,46 @@ export function getSavedMatch(userId: string): SavedMatchRow | null {
 
 export function deleteSavedMatch(userId: string): void {
   db().prepare('DELETE FROM saved_matches WHERE user_id = ?').run(userId);
+}
+
+// --- FFA/Teams match persistence ---
+
+export interface SavedFfaMatchRow {
+  match_id: string;
+  mode: string;
+  world_state: string;
+  player_user_ids: string; // JSON array of { playerId, userId }
+  created_at: number;
+  updated_at: number;
+}
+
+/** Save an FFA/Teams match state (called on graceful shutdown and periodically) */
+export function saveFfaMatch(
+  matchId: string,
+  mode: string,
+  worldState: string,
+  playerUserIds: Array<{ playerId: string; userId: string }>
+): void {
+  const now = Date.now();
+  const conn = db();
+  const existing = conn.prepare('SELECT created_at FROM saved_ffa_matches WHERE match_id = ?').get(matchId) as { created_at: number } | undefined;
+  const created_at = existing?.created_at ?? now;
+  conn.prepare('DELETE FROM saved_ffa_matches WHERE match_id = ?').run(matchId);
+  conn.prepare(
+    'INSERT INTO saved_ffa_matches (match_id, mode, world_state, player_user_ids, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(matchId, mode, worldState, JSON.stringify(playerUserIds), created_at, now);
+}
+
+/** Get all saved FFA/Teams matches (for server restart restore) */
+export function getAllSavedFfaMatches(): SavedFfaMatchRow[] {
+  return db().prepare(
+    'SELECT match_id, mode, world_state, player_user_ids, created_at, updated_at FROM saved_ffa_matches'
+  ).all() as SavedFfaMatchRow[];
+}
+
+/** Delete a saved FFA/Teams match (when it ends) */
+export function deleteSavedFfaMatch(matchId: string): void {
+  db().prepare('DELETE FROM saved_ffa_matches WHERE match_id = ?').run(matchId);
 }
 
 // --- Match history ---

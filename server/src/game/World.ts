@@ -179,7 +179,7 @@ export class World {
   private lastBreederWaveTick = 0; // When last wave spawned
   private nextBreederWaveInterval = 0; // Random interval until next wave
   private breederWaveSpawned = false; // Has the wave for current level been spawned?
-  private pendingBreederMiniGames = new Map<string, { petCount: number; startTick: number; level: number; isMill?: boolean; breederShelterId?: string; breederUid?: string }>();
+  private pendingBreederMiniGames = new Map<string, { petCount: number; startTick: number; level: number; isMill?: boolean; breederShelterId?: string; breederUid?: string; campData?: { x: number; y: number; spawnTick: number }; startSent?: boolean }>();
   /** CPU at breeder: must stay min time before starting simulated mini-game */
   private cpuAtBreeder = new Map<string, { breederUid: string; level: number; arrivalTick: number }>();
   /** Delayed CPU breeder completions: resolved at completeAtTick with RT-based win/loss */
@@ -879,6 +879,26 @@ export class World {
       return 0;
     }
 
+    // Stop at ally shelter to deliver pets if within delivery range
+    if (p.petsInside.length > 0) {
+      for (const other of this.players.values()) {
+        if (other.id === p.id) continue;
+        if (!this.isAlly(p.id, other.id, this.lastAllyPairs)) continue;
+        const allyShelter = this.getPlayerShelter(other.id);
+        if (allyShelter && allyShelter.petsInside.length < shelterMaxPets(other.size)) {
+          const vanRadius = VAN_FIXED_RADIUS;
+          const shelterR = shelterRadius(allyShelter.size);
+          const deliveryDistance = vanRadius + shelterR + 20;
+          const d = dist(p.x, p.y, allyShelter.x, allyShelter.y);
+          if (d <= deliveryDistance) {
+            // At ally shelter - stop to let pet transfer happen
+            this.cpuTargets.delete(p.id);
+            return 0;
+          }
+        }
+      }
+    }
+
     // Go to zone edge if full and not touching yet
     // But first check if we have an ally with a shelter to deliver to
     if (p.petsInside.length >= capacity && !touchingZone) {
@@ -1233,6 +1253,9 @@ export class World {
   private static getBreederMinStaySeconds(level: number): number {
     return 5 + level;
   }
+  
+  /** Time CPU waits after "starting" breeder before completion (instant result, just 1 second pause). */
+  private static readonly CPU_BREEDER_COMPLETION_SECONDS = 1;
 
   /** True if player is in any breeder state (mini-game or CPU at/during breeder) - van must not move. */
   private isPlayerInBreederState(playerId: string): boolean {
@@ -1378,7 +1401,8 @@ export class World {
     }
     const expiredEventIds: string[] = [];
     for (const [eid, ev] of this.adoptionEvents.entries()) {
-      if (now >= ev.startTick + ev.durationTicks) {
+      // Event ends when time runs out OR when goal is reached
+      if (now >= ev.startTick + ev.durationTicks || ev.totalRescued >= ev.totalNeeded) {
         this.resolveAdoptionEvent(eid, ev);
         expiredEventIds.push(eid);
       }
@@ -1630,7 +1654,7 @@ export class World {
           isMill: true,
           breederShelterId: shelterId,
         });
-        this.pendingAnnouncements.push(`${p.displayName} is attacking the Level ${breederShelter.level} mill!`);
+        // Don't announce start - only announce win/lose
         log(`Player ${p.displayName} started mill mini-game vs ${shelterId} (lv${breederShelter.level})`);
         break; // one van per mill
       }
@@ -1786,10 +1810,9 @@ export class World {
       
       // Vans can pass through each other (no van-van collision)
       // Vans only collide with stationary shelters (not other vans)
-      // Vans can pass through allied shelters (for pet delivery)
+      // Vans collide with ALL shelters except their own - allies deliver at edge, not through
       for (const shelter of this.shelters.values()) {
         if (shelter.ownerId === p.id) continue; // Don't collide with own shelter
-        if (this.isAlly(p.id, shelter.ownerId, this.lastAllyPairs)) continue; // Allies can pass through
         const sr = shelterRadius(shelter.size);
         if (!aabbOverlap(nx, ny, radius, shelter.x, shelter.y, sr)) continue;
         const penX = radius + sr - Math.abs(nx - shelter.x);
@@ -1973,9 +1996,9 @@ export class World {
         this.strayWarnings.add(600);
         this.pendingAnnouncements.push('Warning: 600 strays on the map! Rescue more pets!');
       }
-      if (strayCountVictory >= 1200 && !this.strayWarnings.has(1200)) {
-        this.strayWarnings.add(1200);
-        this.pendingAnnouncements.push('Danger: 1200 strays! The situation is getting critical!');
+      if (strayCountVictory >= 1500 && !this.strayWarnings.has(1500)) {
+        this.strayWarnings.add(1500);
+        this.pendingAnnouncements.push('Danger: 1500 strays! The situation is getting critical!');
       }
       if (strayCountVictory >= 2500 && !this.strayWarnings.has(2500)) {
         this.strayWarnings.add(2500);
@@ -1990,7 +2013,7 @@ export class World {
       this.strayLoss = true;
       log(`Match end: too many strays (${strayCountVictory}) - loss for all, no RT`);
     }
-    // Victory check: zero strays AND all breeders cleared (no camps, no shelters)
+    // Victory check: zero strays AND all breeders cleared (no camps, no mills)
     if (!this.matchEndedEarly && this.shelters.size > 0) {
       const allBreedersCleared = this.breederShelters.size === 0 && this.breederCamps.size === 0;
       if (strayCountVictory === 0 && allBreedersCleared) {
@@ -2006,7 +2029,7 @@ export class World {
           }
         }
         this.winnerId = winnerId;
-        log(`Match end: zero strays and all breeders cleared at tick ${this.tick}. Winner: ${this.winnerId ?? 'co-op'} (${maxAdoptions} adoptions)`);
+        log(`Match end: zero strays and all breeders cleared at level ${this.breederCurrentLevel}, tick ${this.tick}. Winner: ${this.winnerId ?? 'co-op'} (${maxAdoptions} adoptions)`);
       }
     }
     
@@ -2160,10 +2183,10 @@ export class World {
       this.pendingCpuBreederCompletions.set(playerId, {
         level,
         petCount,
-        completeAtTick: now + World.getBreederTimeLimitSeconds(level) * TICK_RATE,
+        completeAtTick: now + World.CPU_BREEDER_COMPLETION_SECONDS * TICK_RATE,
       });
-      this.pendingAnnouncements.push(`${player.displayName} is shutting down a Level ${level} breeder camp!`);
-      log(`CPU ${player.displayName} started level ${level} breeder mini-game (resolves in ${World.getBreederTimeLimitSeconds(level)}s)`);
+      // Don't announce start - only announce win/lose
+      log(`CPU ${player.displayName} started level ${level} breeder (resolves in ${World.CPU_BREEDER_COMPLETION_SECONDS}s)`);
     }
 
     for (const p of this.players.values()) {
@@ -2227,7 +2250,7 @@ export class World {
         this.pickups.delete(uid);
         
         if (u.type === PICKUP_TYPE_BREEDER) {
-          // Get level before removing from camps tracking
+          // Get camp data before removing from camps tracking
           const camp = this.breederCamps.get(uid);
           const level = camp?.level ?? 1;
           // Higher level = more pets to rescue
@@ -2235,18 +2258,21 @@ export class World {
           const levelBonus = Math.floor((level - 1) / 2); // +1 pet every 2 levels
           const petCount = Math.min(basePets + levelBonus, 15); // Cap 15 for high-level breeders
           
+          // Store camp data for potential retreat/restoration
+          const campData = camp ? { x: camp.x, y: camp.y, spawnTick: camp.spawnTick } : undefined;
+          
           // Breeder mini-game - track for this player with level AND breeder UID
           this.pendingBreederMiniGames.set(p.id, {
             petCount,
             startTick: now,
             level,
             breederUid: uid,
+            campData,
           });
           // Remove from breeder camps tracking (prevents growth)
           this.breederCamps.delete(uid);
           // Claim is kept until minigame completes
-          // Announce breeder takedown attempt
-          this.pendingAnnouncements.push(`${p.displayName} is shutting down a Level ${level} breeder camp!`);
+          // Don't announce start - only announce win/lose
           log(`Player ${p.displayName} triggered level ${level} breeder mini-game (breeder ${uid})`);
         } else {
           p.speedBoostUntil = 0; // end speed boost when picking up any boost
@@ -2394,7 +2420,7 @@ export class World {
           this.lastGlobalAdoptionTick = now;
           this.scarcityLevel = 0;
         }
-        this.pendingAnnouncements.push(`${p.displayName} dropped off pets at the ${ev.type.replace(/_/g, ' ')} for instant adoption!`);
+        // Removed announcement - too spammy
         break; // One van per event per tick
       }
     }
@@ -2434,7 +2460,7 @@ export class World {
       strayLoss: this.strayLoss || undefined,
       totalMatchAdoptions: this.totalMatchAdoptions,
       scarcityLevel: this.scarcityLevel > 0 ? this.scarcityLevel : undefined,
-      matchDurationMs: this.matchStarted ? Date.now() - this.matchStartTime - this.pausedDurationMs : 0,
+      matchDurationMs: this.getMatchDurationMs(),
       players: Array.from(this.players.values()).map((p) => {
         const eliminated = this.eliminatedPlayerIds.has(p.id);
         const hasShelter = this.hasShelter(p.id);
@@ -2486,6 +2512,10 @@ export class World {
     return this.tick >= this.matchEndAt;
   }
 
+  isMatchStarted(): boolean {
+    return this.matchStarted;
+  }
+
   /** Record that the match is being paused (frozen). Call before serializing. */
   recordPause(): void {
     if (this.frozenAtMs === null) {
@@ -2501,6 +2531,17 @@ export class World {
     }
   }
   
+  /** Get accurate match duration in milliseconds, accounting for paused state. */
+  getMatchDurationMs(): number {
+    if (!this.matchStarted) return 0;
+    // If paused, use frozenAtMs as the reference point
+    if (this.frozenAtMs !== null) {
+      return this.frozenAtMs - this.matchStartTime - this.pausedDurationMs;
+    }
+    // If running, use current time
+    return Date.now() - this.matchStartTime - this.pausedDurationMs;
+  }
+  
   /** Deduct tokens from a player (for breeder mini-game food purchases) */
   deductTokens(playerId: string, amount: number): boolean {
     const current = this.playerMoney.get(playerId) ?? 0;
@@ -2510,8 +2551,16 @@ export class World {
   }
   
   /** Check if a player has a pending breeder mini-game */
-  getPendingBreederMiniGame(playerId: string): { petCount: number; startTick: number; level: number; isMill?: boolean; breederShelterId?: string } | null {
+  getPendingBreederMiniGame(playerId: string): { petCount: number; startTick: number; level: number; isMill?: boolean; breederShelterId?: string; startSent?: boolean } | null {
     return this.pendingBreederMiniGames.get(playerId) ?? null;
+  }
+  
+  /** Mark breederStart as sent (prevents resending, but keeps entry for retreat/complete) */
+  markBreederStartSent(playerId: string): void {
+    const pending = this.pendingBreederMiniGames.get(playerId);
+    if (pending) {
+      pending.startSent = true;
+    }
   }
 
   /** Mill time limit in seconds: 60 + level*2. */
@@ -2524,6 +2573,72 @@ export class World {
     // Clear breeder claim before deleting the minigame entry
     const miniGame = this.pendingBreederMiniGames.get(playerId);
     if (miniGame?.breederUid) {
+      this.breederClaimedBy.delete(miniGame.breederUid);
+    }
+    this.pendingBreederMiniGames.delete(playerId);
+  }
+  
+  /** Handle player retreating from a breeder camp - restores the camp so it can be attacked again */
+  retreatFromBreederCamp(playerId: string): void {
+    const miniGame = this.pendingBreederMiniGames.get(playerId);
+    if (!miniGame) return;
+    
+    // Only restore camps (not mills) - mills are persistent shelters
+    if (!miniGame.isMill && miniGame.breederUid && miniGame.campData) {
+      const uid = miniGame.breederUid;
+      const { x, y, spawnTick } = miniGame.campData;
+      const level = miniGame.level;
+      
+      // Restore the breeder camp
+      this.breederCamps.set(uid, { x, y, spawnTick, level });
+      
+      // Restore the pickup (PickupState doesn't have spawnTick, it uses level)
+      this.pickups.set(uid, { id: uid, x, y, type: PICKUP_TYPE_BREEDER, level });
+      
+      // Move van away from camp to prevent immediate re-trigger
+      const player = this.players.get(playerId);
+      if (player) {
+        const dx = player.x - x;
+        const dy = player.y - y;
+        const dist = Math.hypot(dx, dy);
+        const pushDistance = 80; // Push van 80 units away from camp
+        if (dist > 0) {
+          player.x += (dx / dist) * pushDistance;
+          player.y += (dy / dist) * pushDistance;
+        } else {
+          // Van exactly on camp, push in random direction
+          player.x += pushDistance;
+        }
+        // Clamp to world bounds
+        player.x = clamp(player.x, 0, MAP_WIDTH);
+        player.y = clamp(player.y, 0, MAP_HEIGHT);
+      }
+      
+      log(`Player ${playerId} retreated from breeder camp ${uid} - camp restored, van pushed away`);
+    } else if (miniGame.isMill) {
+      // For mills, just push the van away without restoring (mill is permanent)
+      const player = this.players.get(playerId);
+      const millShelterId = miniGame.breederShelterId;
+      const mill = millShelterId ? this.breederShelters.get(millShelterId) : null;
+      if (player && mill) {
+        const dx = player.x - mill.x;
+        const dy = player.y - mill.y;
+        const dist = Math.hypot(dx, dy);
+        const pushDistance = 100; // Push van 100 units away from mill
+        if (dist > 0) {
+          player.x += (dx / dist) * pushDistance;
+          player.y += (dy / dist) * pushDistance;
+        } else {
+          player.x += pushDistance;
+        }
+        player.x = clamp(player.x, 0, MAP_WIDTH);
+        player.y = clamp(player.y, 0, MAP_HEIGHT);
+        log(`Player ${playerId} retreated from mill ${millShelterId} - van pushed away`);
+      }
+    }
+    
+    // Clear the claim and pending minigame
+    if (miniGame.breederUid) {
       this.breederClaimedBy.delete(miniGame.breederUid);
     }
     this.pendingBreederMiniGames.delete(playerId);
@@ -2626,19 +2741,18 @@ export class World {
       }
     }
     
-    if (rescuedCount > 0) {
-      this.pendingAnnouncements.push(isFullWin
-        ? `${player.displayName} rescued all ${rescuedCount} pets from level ${level} breeders!`
-        : `${player.displayName} rescued ${rescuedCount}/${totalPets} pets from level ${level} breeders (partial win)!`);
-    }
     // Mill: clear "in combat" so mill can be attacked again; only remove shelter on 100% rescue
     if (isMill && millShelterId) {
       this.millInCombat.delete(millShelterId);
       if (rescuedCount === totalPets) {
         this.breederShelters.delete(millShelterId);
+        // Only announce when a mill is fully shut down
+        this.pendingAnnouncements.push(`${player.displayName} shut down a Level ${level} breeder mill!`);
         log(`Mill ${millShelterId} shut down by ${player.displayName}`);
       }
+      // No announcements for partial rescue or failure on mills
     }
+    // No announcements for breeder camps (too spammy)
     log(`Player ${player.displayName} completed lv${level} breeder: ${rescuedCount}/${totalPets} rescued, +${tokenBonus} RT, ${numItems} boosts`);
     return { tokenBonus, rewards };
   }
@@ -2700,6 +2814,7 @@ export class World {
       matchEndedEarly: this.matchEndedEarly,
       winnerId: this.winnerId,
       strayLoss: this.strayLoss,
+      disconnectedPlayerIds: Array.from(this.disconnectedPlayerIds),
       players: Array.from(this.players.entries()),
       pets: Array.from(this.pets.entries()),
       adoptionZones: this.adoptionZones,
@@ -2772,7 +2887,7 @@ export class World {
       triggeredEvents: number[]; satelliteZonesSpawned: boolean; matchProcessed: boolean;
       breederSpawnCount: number; breederCurrentLevel: number; lastBreederWaveTick: number;
       nextBreederWaveInterval: number; breederWaveSpawned: boolean;
-      pendingBreederMiniGames: [string, { petCount: number; startTick: number; level: number; isMill?: boolean; breederShelterId?: string; breederUid?: string }][];
+      pendingBreederMiniGames: [string, { petCount: number; startTick: number; level: number; isMill?: boolean; breederShelterId?: string; breederUid?: string; campData?: { x: number; y: number; spawnTick: number }; startSent?: boolean }][];
       cpuAtBreeder: [string, { breederUid: string; level: number; arrivalTick: number }][];
       pendingCpuBreederCompletions: [string, { level: number; petCount: number; completeAtTick: number }][];
       breederClaimedBy: [string, string][];
@@ -2781,7 +2896,7 @@ export class World {
       breederShelterId: number; wildStrayIds: string[]; cpuCanShutdownBreeders: boolean;
       pendingAnnouncements: string[]; adoptionEvents: [string, AdoptionEvent][];
       adoptionEventIdSeq: number; nextAdoptionEventSpawnTick: number;
-      strayLoss?: boolean;
+      strayLoss?: boolean; disconnectedPlayerIds?: string[];
     };
     w.tick = state.tick;
     w.matchStartTick = state.matchStartTick;
@@ -2793,6 +2908,7 @@ export class World {
     w.matchEndedEarly = state.matchEndedEarly;
     w.winnerId = state.winnerId ?? null;
     w.strayLoss = state.strayLoss ?? false;
+    w.disconnectedPlayerIds = new Set(state.disconnectedPlayerIds ?? []);
     w.players = new Map(state.players);
     w.pets = new Map(state.pets);
     w.adoptionZones = state.adoptionZones;

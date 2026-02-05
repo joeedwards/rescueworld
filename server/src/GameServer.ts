@@ -12,7 +12,7 @@ import { decodeInput, encodeSnapshot, MSG_INPUT } from 'shared';
 import { registerServer, appendReplay, getNextGuestName } from './registry.js';
 import { withdrawForMatch, depositAfterMatch, getInventory, type Inventory } from './inventory.js';
 import { recordMatchWin, recordMatchLoss, updateReputationOnQuit } from './leaderboard.js';
-import { saveSavedMatch, getSavedMatch, deleteSavedMatch, insertMatchHistory, incrementGameCount } from './referrals.js';
+import { saveSavedMatch, getSavedMatch, deleteSavedMatch, insertMatchHistory, incrementGameCount, saveFfaMatch, getAllSavedFfaMatches, deleteSavedFfaMatch } from './referrals.js';
 import { awardKarmaPoints } from './karmaService.js';
 
 /** Timestamped log function for server output */
@@ -69,27 +69,121 @@ const wss = new WebSocketServer({ port: GAME_WS_PORT });
 
 // All active matches
 const matches = new Map<string, Match>();
+
+/** Restore saved FFA/Teams matches from database on server startup */
+function restoreSavedFfaMatches(): void {
+  try {
+    const savedMatches = getAllSavedFfaMatches();
+    for (const saved of savedMatches) {
+      try {
+        const world = World.deserialize(saved.world_state);
+        // Skip matches that have already ended
+        if (world.isMatchOver() || world.isStrayLoss()) {
+          log(`Skipping ended FFA/Teams match ${saved.match_id}`);
+          deleteSavedFfaMatch(saved.match_id);
+          continue;
+        }
+        
+        // Account for paused time since server shutdown
+        world.recordResume();
+        
+        const playerUserIds: Array<{ playerId: string; userId: string }> = JSON.parse(saved.player_user_ids);
+        
+        const match: Match = {
+          id: saved.match_id,
+          world,
+          phase: 'playing',
+          mode: saved.mode as 'ffa' | 'teams',
+          countdownEndAt: 0,
+          players: new Map(),
+          cpuIds: new Set(),
+          readySet: new Set(),
+          soloUserId: undefined,
+          frozen: false,
+          playerUserIds: new Map(),
+          fightAllyChoices: new Map(),
+          allyRequests: new Map(),
+          lastReplayTick: 0,
+          playerStartingInventory: new Map(),
+        };
+        
+        // Restore player-userId mappings and set all players as disconnected
+        for (const { playerId, userId } of playerUserIds) {
+          match.playerUserIds.set(playerId, userId);
+          // Add to user's match list (array)
+          const userMatches = userIdToFfaMatches.get(userId) ?? [];
+          userMatches.push({ matchId: saved.match_id, playerId });
+          userIdToFfaMatches.set(userId, userMatches);
+          world.setPlayerDisconnected(playerId, true);
+        }
+        
+        // Identify CPU players
+        const snapshot = world.getSnapshot();
+        for (const p of snapshot.players) {
+          if (p.id.startsWith('cpu-')) {
+            match.cpuIds.add(p.id);
+          }
+        }
+        
+        matches.set(saved.match_id, match);
+        log(`Restored FFA/Teams match ${saved.match_id} (mode=${saved.mode}, players=${playerUserIds.length})`);
+        
+        // Delete from saved matches since it's now in memory
+        deleteSavedFfaMatch(saved.match_id);
+      } catch (e) {
+        log(`Failed to restore FFA/Teams match ${saved.match_id}: ${e}`);
+        deleteSavedFfaMatch(saved.match_id);
+      }
+    }
+  } catch (e) {
+    log(`Failed to load saved FFA/Teams matches: ${e}`);
+  }
+}
+
 // Map player ID -> match ID for quick lookup
 const playerToMatch = new Map<string, string>();
 // Solo: userId -> matchId for frozen matches (resume from memory)
 const userIdToSoloMatchId = new Map<string, string>();
-// FFA/Teams: userId -> { matchId, playerId } for disconnected players who can rejoin
-const userIdToFfaMatch = new Map<string, { matchId: string; playerId: string }>();
+// FFA/Teams: userId -> array of { matchId, playerId } for disconnected players who can rejoin (max 5)
+const userIdToFfaMatches = new Map<string, Array<{ matchId: string; playerId: string }>>();
+const MAX_SIMULTANEOUS_MATCHES = 5;
 // FFA lobby match (waiting for players)
 let ffaLobbyMatchId: string | null = null;
 
-/** Get active match info for a user (for API endpoint) */
-export function getActiveMatchForUser(userId: string): { matchId: string; playerId: string; mode: string } | null {
-  // Check FFA/Teams first
-  const ffaInfo = userIdToFfaMatch.get(userId);
-  if (ffaInfo) {
-    const match = matches.get(ffaInfo.matchId);
-    if (match && match.phase === 'playing' && !match.world.isMatchOver()) {
-      return { matchId: ffaInfo.matchId, playerId: ffaInfo.playerId, mode: match.mode };
-    } else {
-      // Match ended or doesn't exist, clean up
-      userIdToFfaMatch.delete(userId);
+// Restore saved FFA/Teams matches on startup (after maps are initialized)
+restoreSavedFfaMatches();
+
+/** Get all active FFA/Teams matches for a user (for API endpoint) */
+export function getActiveMatchesForUser(userId: string): Array<{ matchId: string; playerId: string; mode: string }> {
+  const result: Array<{ matchId: string; playerId: string; mode: string }> = [];
+  const userMatches = userIdToFfaMatches.get(userId);
+  if (userMatches) {
+    // Filter out ended matches and build result
+    const validMatches = userMatches.filter(info => {
+      const match = matches.get(info.matchId);
+      return match && match.phase === 'playing' && !match.world.isMatchOver();
+    });
+    // Update the map with only valid matches
+    if (validMatches.length !== userMatches.length) {
+      if (validMatches.length === 0) {
+        userIdToFfaMatches.delete(userId);
+      } else {
+        userIdToFfaMatches.set(userId, validMatches);
+      }
     }
+    for (const info of validMatches) {
+      const match = matches.get(info.matchId)!;
+      result.push({ matchId: info.matchId, playerId: info.playerId, mode: match.mode });
+    }
+  }
+  return result;
+}
+
+/** Get first active match info for a user (backward compatibility) */
+export function getActiveMatchForUser(userId: string): { matchId: string; playerId: string; mode: string } | null {
+  const allMatches = getActiveMatchesForUser(userId);
+  if (allMatches.length > 0) {
+    return allMatches[0];
   }
   
   // Check Solo frozen match
@@ -102,6 +196,19 @@ export function getActiveMatchForUser(userId: string): { matchId: string; player
   }
   
   return null;
+}
+
+/** Check if a match is currently paused (frozen) */
+export function isMatchPaused(matchId: string): boolean {
+  const match = matches.get(matchId);
+  return match?.frozen ?? false;
+}
+
+/** Get match duration in milliseconds for a given match ID */
+export function getMatchDurationMs(matchId: string): number {
+  const match = matches.get(matchId);
+  if (!match || !match.world.isMatchStarted()) return 0;
+  return match.world.getMatchDurationMs();
 }
 
 /** Get real-time game stats for the public API */
@@ -177,24 +284,20 @@ export async function gracefulShutdown(): Promise<void> {
     }
   }
 
-  // 4. Deposit RT for FFA/Teams players so they keep earned progress
+  // 4. Save FFA/Teams matches so they can continue after restart
   for (const [matchId, match] of matches) {
-    if ((match.mode === 'ffa' || match.mode === 'teams') && match.phase === 'playing' && !match.world.isMatchProcessed()) {
-      const snapshot = match.world.getSnapshot();
-      const durationSeconds = Math.floor((snapshot.matchDurationMs ?? 0) / 1000);
-      for (const [playerId, userId] of match.playerUserIds) {
-        const playerMoney = match.world.getPlayerMoney(playerId);
-        const portCharges = match.world.getPortCharges(playerId);
-        const shelterPortCharges = match.world.getShelterPortCharges(playerId);
-        const playerState = snapshot.players.find((p) => p.id === playerId);
-        const adoptions = playerState?.totalAdoptions ?? 0;
-        if (playerMoney > 0 || portCharges > 0 || shelterPortCharges > 0) {
-          depositAfterMatch(userId, playerMoney, portCharges, shelterPortCharges, 0, 0);
-          log(`Shutdown: deposited for ${userId} (${playerId}): ${playerMoney} RT, ${portCharges} ports, ${shelterPortCharges} home ports`);
+    if ((match.mode === 'ffa' || match.mode === 'teams') && match.phase === 'playing' && !match.world.isMatchOver()) {
+      try {
+        // Record pause time before saving so match duration is accurate on resume
+        if (!match.frozen) {
+          match.world.recordPause();
         }
-        recordMatchLoss(userId, playerMoney);
-        insertMatchHistory(userId, matchId, match.mode, 'quit', playerMoney, adoptions, durationSeconds);
-        userIdToFfaMatch.delete(userId);
+        const worldState = match.world.serialize();
+        const playerUserIds = Array.from(match.playerUserIds.entries()).map(([playerId, userId]) => ({ playerId, userId }));
+        saveFfaMatch(matchId, match.mode, worldState, playerUserIds);
+        log(`Saved FFA/Teams match ${matchId} with ${playerUserIds.length} players`);
+      } catch (e) {
+        log(`Failed to save FFA/Teams match ${matchId}: ${e}`);
       }
     }
   }
@@ -255,11 +358,16 @@ function destroyMatch(matchId: string): void {
     playerToMatch.delete(playerId);
   }
   // Clean up FFA/Teams rejoin tracking for any users in this match
-  for (const [userId, info] of userIdToFfaMatch.entries()) {
-    if (info.matchId === matchId) {
-      userIdToFfaMatch.delete(userId);
+  for (const [userId, userMatches] of userIdToFfaMatches.entries()) {
+    const filtered = userMatches.filter(info => info.matchId !== matchId);
+    if (filtered.length === 0) {
+      userIdToFfaMatches.delete(userId);
+    } else if (filtered.length !== userMatches.length) {
+      userIdToFfaMatches.set(userId, filtered);
     }
   }
+  // Delete saved FFA/Teams match from database
+  deleteSavedFfaMatch(matchId);
   matches.delete(matchId);
   if (ffaLobbyMatchId === matchId) ffaLobbyMatchId = null;
   log(`match destroyed id=${matchId}`);
@@ -431,10 +539,24 @@ function removePlayerFromMatch(playerId: string, matchId: string): void {
     playerToMatch.delete(playerId);
     // Save userId -> matchId mapping for rejoin capability
     if (userId) {
-      userIdToFfaMatch.set(userId, { matchId, playerId });
-      log(`FFA/Teams player ${playerId} (userId=${userId}) disconnected - can rejoin matchId=${matchId}`);
+      const userMatches = userIdToFfaMatches.get(userId) ?? [];
+      // Only add if not already in the list
+      if (!userMatches.some(m => m.matchId === matchId)) {
+        userMatches.push({ matchId, playerId });
+        userIdToFfaMatches.set(userId, userMatches);
+      }
+      log(`FFA/Teams player ${playerId} (userId=${userId}) disconnected - can rejoin matchId=${matchId} (${userMatches.length} active matches)`);
     } else {
       log(`FFA/Teams player ${playerId} disconnected - no userId, cannot rejoin`);
+    }
+    
+    // Check if all human players are now disconnected - pause match if so
+    const humanPlayerIds = [...match.playerUserIds.keys()].filter(id => !id.startsWith('cpu-'));
+    const anyHumanConnected = humanPlayerIds.some(id => match.players.has(id));
+    if (!anyHumanConnected && !match.frozen) {
+      match.world.recordPause();
+      match.frozen = true;
+      log(`FFA/Teams match ${matchId} paused - all human players disconnected`);
     }
     return;
   }
@@ -569,6 +691,7 @@ wss.on('connection', async (ws) => {
           clearTimeout(timeout);
           const mode = msg.mode as 'ffa' | 'solo' | 'teams';
           const name = typeof msg.displayName === 'string' && msg.displayName ? msg.displayName : null;
+          const rejoinMatchId = typeof msg.rejoinMatchId === 'string' ? msg.rejoinMatchId : null;
           
           // Check if client sent userId for registered user
           if (typeof msg.userId === 'string' && msg.userId.startsWith('u-')) {
@@ -674,9 +797,11 @@ wss.on('connection', async (ws) => {
               match.phase = 'playing';
               match.world.startMatch();
             } else if (mode === 'ffa') {
-              // Check if player has an active FFA match to rejoin
-              if (playerUserId) {
-                const ffaInfo = userIdToFfaMatch.get(playerUserId);
+              // Check if player wants to rejoin a specific FFA match
+              if (playerUserId && rejoinMatchId) {
+                const userMatches = userIdToFfaMatches.get(playerUserId) ?? [];
+                // Only rejoin if rejoinMatchId is explicitly provided
+                let ffaInfo = userMatches.find(m => m.matchId === rejoinMatchId);
                 if (ffaInfo) {
                   const existingMatch = matches.get(ffaInfo.matchId);
                   if (existingMatch && existingMatch.phase === 'playing' && !existingMatch.world.isMatchOver()) {
@@ -689,7 +814,20 @@ wss.on('connection', async (ws) => {
                     existingMatch.world.setPlayerDisconnected(ffaInfo.playerId, false);
                     existingMatch.players.set(ffaInfo.playerId, ws);
                     playerToMatch.set(ffaInfo.playerId, existingMatch.id);
-                    userIdToFfaMatch.delete(playerUserId);
+                    // Remove this match from user's pending list
+                    const updatedMatches = userMatches.filter(m => m.matchId !== ffaInfo!.matchId);
+                    if (updatedMatches.length === 0) {
+                      userIdToFfaMatches.delete(playerUserId);
+                    } else {
+                      userIdToFfaMatches.set(playerUserId, updatedMatches);
+                    }
+                    
+                    // Resume match if it was frozen (all players were disconnected)
+                    if (existingMatch.frozen) {
+                      existingMatch.world.recordResume();
+                      existingMatch.frozen = false;
+                      log(`FFA match ${existingMatch.id} resumed - player reconnected`);
+                    }
                     
                     const snap = existingMatch.world.getSnapshot();
                     const p = snap.players.find((x) => x.id === ffaInfo.playerId);
@@ -711,8 +849,21 @@ wss.on('connection', async (ws) => {
                     return;
                   } else {
                     // Match ended or doesn't exist, clean up
-                    userIdToFfaMatch.delete(playerUserId);
+                    const updatedMatches = userMatches.filter(m => m.matchId !== ffaInfo!.matchId);
+                    if (updatedMatches.length === 0) {
+                      userIdToFfaMatches.delete(playerUserId);
+                    } else {
+                      userIdToFfaMatches.set(playerUserId, updatedMatches);
+                    }
                   }
+                }
+                
+                // Check if user has reached max matches
+                const currentMatches = getActiveMatchesForUser(playerUserId);
+                if (currentMatches.length >= MAX_SIMULTANEOUS_MATCHES) {
+                  ws.send(JSON.stringify({ type: 'error', message: 'Maximum matches reached (5)' }));
+                  ws.close();
+                  return;
                 }
               }
               
@@ -732,9 +883,11 @@ wss.on('connection', async (ws) => {
                 match.readySet.clear();
               }
             } else {
-              // Teams: check if player has an active teams match to rejoin
-              if (playerUserId) {
-                const teamsInfo = userIdToFfaMatch.get(playerUserId);
+              // Teams: check if player wants to rejoin a specific teams match
+              if (playerUserId && rejoinMatchId) {
+                const userMatches = userIdToFfaMatches.get(playerUserId) ?? [];
+                // Only rejoin if rejoinMatchId is explicitly provided
+                let teamsInfo = userMatches.find(m => m.matchId === rejoinMatchId);
                 if (teamsInfo) {
                   const existingMatch = matches.get(teamsInfo.matchId);
                   if (existingMatch && existingMatch.mode === 'teams' && existingMatch.phase === 'playing' && !existingMatch.world.isMatchOver()) {
@@ -747,7 +900,20 @@ wss.on('connection', async (ws) => {
                     existingMatch.world.setPlayerDisconnected(teamsInfo.playerId, false);
                     existingMatch.players.set(teamsInfo.playerId, ws);
                     playerToMatch.set(teamsInfo.playerId, existingMatch.id);
-                    userIdToFfaMatch.delete(playerUserId);
+                    // Remove this match from user's pending list
+                    const updatedMatches = userMatches.filter(m => m.matchId !== teamsInfo!.matchId);
+                    if (updatedMatches.length === 0) {
+                      userIdToFfaMatches.delete(playerUserId);
+                    } else {
+                      userIdToFfaMatches.set(playerUserId, updatedMatches);
+                    }
+                    
+                    // Resume match if it was frozen (all players were disconnected)
+                    if (existingMatch.frozen) {
+                      existingMatch.world.recordResume();
+                      existingMatch.frozen = false;
+                      log(`Teams match ${existingMatch.id} resumed - player reconnected`);
+                    }
                     
                     const snap = existingMatch.world.getSnapshot();
                     const p = snap.players.find((x) => x.id === teamsInfo.playerId);
@@ -769,8 +935,21 @@ wss.on('connection', async (ws) => {
                     return;
                   } else {
                     // Match ended or doesn't exist, clean up
-                    userIdToFfaMatch.delete(playerUserId);
+                    const updatedMatches = userMatches.filter(m => m.matchId !== teamsInfo!.matchId);
+                    if (updatedMatches.length === 0) {
+                      userIdToFfaMatches.delete(playerUserId);
+                    } else {
+                      userIdToFfaMatches.set(playerUserId, updatedMatches);
+                    }
                   }
+                }
+                
+                // Check if user has reached max matches
+                const currentMatches = getActiveMatchesForUser(playerUserId);
+                if (currentMatches.length >= MAX_SIMULTANEOUS_MATCHES) {
+                  ws.send(JSON.stringify({ type: 'error', message: 'Maximum matches reached (5)' }));
+                  ws.close();
+                  return;
                 }
               }
               
@@ -969,6 +1148,17 @@ wss.on('connection', async (ws) => {
           return;
         }
 
+        // Player chose to retreat from breeder camp/mill before starting (insufficient RT warning)
+        if (msg.type === 'breederRetreat') {
+          // Retreat and restore the breeder camp (if applicable)
+          match.world.retreatFromBreederCamp(effectivePlayerId);
+          // Clear any pending mill game for this player
+          match.activeMillGames?.delete(effectivePlayerId);
+          // No penalty for retreating before the fight starts
+          log(`Player ${effectivePlayerId} retreated from breeder camp/mill`);
+          return;
+        }
+
         // Instant rescue for mills and camps at any level - requires tier 3+ shelter
         if (msg.type === 'instantRescue' && typeof msg.cost === 'number' && typeof msg.totalPets === 'number') {
           const level = typeof msg.level === 'number' ? msg.level : 1;
@@ -1067,9 +1257,45 @@ setInterval(() => {
         for (const ws of match.players.values()) {
           if (ws.readyState === 1) ws.send(JSON.stringify(matchState));
         }
-      } else if (match.frozen) {
-        // Solo saved match: do not tick until resumed
       } else if (match.phase === 'playing') {
+        // FFA/Teams: check if all human players are disconnected - pause if so
+        if (match.mode === 'ffa' || match.mode === 'teams') {
+          const humanPlayerIds = [...match.playerUserIds.keys()].filter(id => !id.startsWith('cpu-'));
+          const allDisconnected = humanPlayerIds.length > 0 && humanPlayerIds.every(id => !match.players.has(id));
+          
+          if (allDisconnected && !match.frozen) {
+            // Pause the match - all humans disconnected
+            match.world.recordPause();
+            match.frozen = true;
+            log(`FFA/Teams match ${matchId} paused - all human players disconnected`);
+          } else if (!allDisconnected && match.frozen) {
+            // Resume when someone connects
+            match.world.recordResume();
+            match.frozen = false;
+            log(`FFA/Teams match ${matchId} resumed - human player connected`);
+          }
+          
+          if (match.frozen) {
+            // Skip ticking this match, but still auto-save
+            const now = Date.now();
+            const AUTO_SAVE_INTERVAL_MS = 30000;
+            if (!match.lastAutoSave || now - match.lastAutoSave >= AUTO_SAVE_INTERVAL_MS) {
+              try {
+                const playerUserIds = Array.from(match.playerUserIds.entries()).map(([playerId, userId]) => ({ playerId, userId }));
+                saveFfaMatch(match.id, match.mode, match.world.serialize(), playerUserIds);
+                match.lastAutoSave = now;
+              } catch {
+                // ignore save errors
+              }
+            }
+            continue;
+          }
+        }
+        
+        // Solo frozen match: do not tick until resumed
+        if (match.frozen) {
+          continue;
+        }
         // Periodic auto-save for solo matches (crash recovery)
         if (match.mode === 'solo') {
           const now = Date.now();
@@ -1083,6 +1309,26 @@ setInterval(() => {
               } catch {
                 // ignore save errors, will retry next interval
               }
+            }
+          }
+        }
+        
+        // Periodic auto-save for FFA/Teams matches (crash recovery / server restart)
+        if (match.mode === 'ffa' || match.mode === 'teams') {
+          const now = Date.now();
+          const AUTO_SAVE_INTERVAL_MS = 30000;
+          if (!match.lastAutoSave || now - match.lastAutoSave >= AUTO_SAVE_INTERVAL_MS) {
+            try {
+              // Record pause before save so time is accurate on crash recovery
+              match.world.recordPause();
+              const playerUserIds = Array.from(match.playerUserIds.entries()).map(([playerId, userId]) => ({ playerId, userId }));
+              saveFfaMatch(match.id, match.mode, match.world.serialize(), playerUserIds);
+              // Resume immediately since match is still active
+              match.world.recordResume();
+              match.lastAutoSave = now;
+            } catch {
+              // ignore save errors, will retry next interval
+              match.world.recordResume(); // Make sure to resume even on error
             }
           }
         }
@@ -1143,7 +1389,8 @@ setInterval(() => {
         const ADD_PET_INTERVAL_TICKS = 25 * 10; // 10 seconds at 25 tps
         for (const [playerId, ws] of match.players.entries()) {
           const pending = match.world.getPendingBreederMiniGame(playerId);
-          if (pending && ws.readyState === 1) {
+          // Only send breederStart if not already sent (startSent flag)
+          if (pending && !pending.startSent && ws.readyState === 1) {
             const isMill = !!pending.isMill;
             const timeLimitSeconds = isMill
               ? match.world.getBreederMillTimeLimitSeconds(pending.level)
@@ -1160,7 +1407,8 @@ setInterval(() => {
               if (!match.activeMillGames) match.activeMillGames = new Map();
               match.activeMillGames.set(playerId, { lastAddPetTick: snapshot.tick });
             }
-            match.world.clearPendingBreederMiniGame(playerId);
+            // Mark as sent instead of clearing - pending entry stays for retreat/complete
+            match.world.markBreederStartSent(playerId);
           }
         }
         // Server-authoritative: every 10s during mill game, tell client to add one pet

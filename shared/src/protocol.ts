@@ -101,6 +101,7 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
     size += 1 + encoder.encode(ev.id).length; // id
     size += 1 + encoder.encode(ev.type).length; // type
     size += 4 + 4; // x, y
+    size += 2; // radius (16-bit)
     size += 4 + 4; // startTick, durationTicks
     size += 2 + 2; // totalNeeded(16), totalRescued(16)
   }
@@ -230,6 +231,8 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
     off += 4;
     view.setFloat32(off, ev.y, true);
     off += 4;
+    view.setUint16(off, Math.min(0xFFFF, ev.radius) >>> 0, true);
+    off += 2;
     view.setUint32(off, ev.startTick >>> 0, true);
     off += 4;
     view.setUint32(off, ev.durationTicks >>> 0, true);
@@ -431,11 +434,13 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
     off += 4;
     const evY = view.getFloat32(off, true);
     off += 4;
+    const evRadius = view.getUint16(off, true);
+    off += 2;
     const startTick = view.getUint32(off, true);
     off += 4;
     const durationTicks = view.getUint32(off, true);
     off += 4;
-    const totalNeeded = off + 4 <= view.byteLength ? view.getUint16(off, true) : 0;
+    const totalNeeded = off + 2 <= view.byteLength ? view.getUint16(off, true) : 0;
     off += 2;
     const totalRescued = off + 2 <= view.byteLength ? view.getUint16(off, true) : 0;
     off += 2;
@@ -444,7 +449,7 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
       type: evType as AdoptionEvent['type'],
       x: evX,
       y: evY,
-      radius: 0, // Not encoded in snapshot; client may use default for display
+      radius: evRadius || 300, // Default to 300 if 0
       requirements: [],
       totalNeeded,
       totalRescued,

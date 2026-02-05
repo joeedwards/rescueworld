@@ -25,7 +25,7 @@ import { getInventory, depositAfterMatch, withdrawForMatch } from './inventory.j
 import { recordMatchWin, recordRtEarned, updateReputationOnQuit } from './leaderboard.js';
 import { getGameStats } from './gameStats.js';
 import { getKarmaBalance, getKarmaInfo, awardKarmaPoints, getKarmaHistory } from './karmaService.js';
-import { getRealtimeStats } from './GameServer.js';
+import { getRealtimeStats, getActiveMatchForUser, getActiveMatchesForUser, getMatchDurationMs, isMatchPaused } from './GameServer.js';
 
 /** Timestamped log function for server output */
 function log(message: string): void {
@@ -375,6 +375,45 @@ app.delete('/api/saved-match', (req: Request, res: Response) => {
   deleteSavedMatch(userId);
   updateReputationOnQuit(userId);
   res.json({ success: true });
+});
+
+// Get all active FFA/Teams matches for a user (for lobby display with multiple matches)
+app.get('/api/active-matches', (req: Request, res: Response) => {
+  const userId = req.signedCookies?.session;
+  if (!userId) {
+    res.json({ matches: [] });
+    return;
+  }
+  const matchInfos = getActiveMatchesForUser(userId);
+  const matches = matchInfos.map(info => ({
+    matchId: info.matchId,
+    mode: info.mode,
+    durationMs: getMatchDurationMs(info.matchId),
+    isPaused: isMatchPaused(info.matchId),
+  }));
+  res.json({ matches });
+});
+
+// Get first active FFA/Teams match info for a user (backward compatibility)
+app.get('/api/active-match', (req: Request, res: Response) => {
+  const userId = req.signedCookies?.session;
+  if (!userId) {
+    res.json({ hasActiveMatch: false });
+    return;
+  }
+  const matchInfo = getActiveMatchForUser(userId);
+  if (!matchInfo) {
+    res.json({ hasActiveMatch: false });
+    return;
+  }
+  const durationMs = getMatchDurationMs(matchInfo.matchId);
+  res.json({
+    hasActiveMatch: true,
+    matchId: matchInfo.matchId,
+    mode: matchInfo.mode,
+    durationMs,
+    isPaused: isMatchPaused(matchInfo.matchId),
+  });
 });
 
 // Leaderboard endpoints

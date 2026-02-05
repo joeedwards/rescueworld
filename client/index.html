@@ -81,6 +81,16 @@
     .abandon-confirm-btn:hover { transform: scale(1.03); }
     .abandon-confirm-btn.confirm { background: #ff6b6b; color: #fff; }
     .abandon-confirm-btn.cancel { background: rgba(255,255,255,0.15); color: #fff; }
+    .breeder-warning-popup { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 100; background: rgba(60,30,30,0.98); border: 3px solid #ff9f43; border-radius: 12px; padding: 20px 24px; text-align: center; box-shadow: 0 8px 28px rgba(0,0,0,0.6); animation: abandon-popup-appear 0.2s ease-out; max-width: 320px; }
+    .breeder-warning-popup.hidden { display: none; }
+    .breeder-warning-title { font: 700 16px Rubik, sans-serif; color: #ff9f43; margin-bottom: 10px; }
+    .breeder-warning-text { font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); margin-bottom: 16px; line-height: 1.5; }
+    .breeder-warning-stats { font: 600 12px Rubik, sans-serif; color: #ff6b6b; margin-bottom: 14px; }
+    .breeder-warning-btns { display: flex; gap: 12px; justify-content: center; }
+    .breeder-warning-btn { padding: 10px 20px; font: 600 13px Rubik, sans-serif; border-radius: 8px; cursor: pointer; border: none; transition: transform 0.1s, opacity 0.1s; }
+    .breeder-warning-btn:hover { transform: scale(1.03); }
+    .breeder-warning-btn.continue { background: #ff6b6b; color: #fff; }
+    .breeder-warning-btn.retreat { background: #7bed9f; color: #1a1a2e; }
     .fight-ally-title { font: 700 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 8px; }
     .fight-ally-name { font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); margin-bottom: 14px; }
     .fight-ally-btns { display: flex; gap: 12px; justify-content: center; }
@@ -154,27 +164,27 @@
     #carried { font: 600 14px Rubik, sans-serif; color: #ffd93d; }
     #tag-cooldown { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.7); }
     .ground-btn, .port-btn, .shelter-port-btn, .build-shelter-btn {
-      position: absolute; bottom: 90px; padding: 10px 16px; border-radius: 8px;
-      font: 700 13px Rubik, sans-serif; cursor: pointer; border: 2px solid;
+      position: absolute; bottom: 90px; padding: 8px 12px; border-radius: 8px;
+      font: 700 12px Rubik, sans-serif; cursor: pointer; border: 2px solid;
       box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: all 0.15s;
     }
     .ground-btn { right: 16px; background: #7bed9f; color: #1a1a2e; border-color: #5cd98b; }
     .ground-btn:hover { background: #5cd98b; transform: translateY(-2px); }
-    .port-btn { right: 230px; background: #c77dff; color: #1a1a2e; border-color: #a855f7; }
-    .port-btn:hover { background: #a855f7; transform: translateY(-2px); }
-    .shelter-port-btn { right: 120px; background: #10b981; color: #fff; border-color: #047857; }
-    .shelter-port-btn:hover { background: #047857; transform: translateY(-2px); }
-    .transfer-btn { right: 450px; background: #3b82f6; color: #fff; border-color: #2563eb; }
+    .port-btn { right: 200px; background: rgba(60,40,80,0.85); color: #c77dff; border-color: #a855f7; }
+    .port-btn:hover { background: rgba(80,50,100,0.9); transform: translateY(-2px); }
+    .shelter-port-btn { right: 105px; background: rgba(20,60,50,0.85); color: #10b981; border-color: #047857; }
+    .shelter-port-btn:hover { background: rgba(30,80,60,0.9); transform: translateY(-2px); }
+    .transfer-btn { right: 400px; background: #3b82f6; color: #fff; border-color: #2563eb; }
     .transfer-btn:hover { background: #2563eb; transform: translateY(-2px); }
     .transfer-btn.hidden { display: none; }
-    .build-shelter-btn { right: 16px; background: #ffd93d; color: #1a1a2e; border-color: #e6c235; }
-    .build-shelter-btn:hover { background: #e6c235; transform: translateY(-2px); }
-    .build-shelter-btn:disabled { background: #888; border-color: #666; cursor: not-allowed; opacity: 0.6; }
+    .build-shelter-btn { right: 16px; background: rgba(60,55,30,0.85); color: #ffd93d; border-color: #e6c235; }
+    .build-shelter-btn:hover { background: rgba(80,70,40,0.9); transform: translateY(-2px); }
+    .build-shelter-btn:disabled { background: rgba(50,50,50,0.7); border-color: #666; cursor: not-allowed; opacity: 0.6; color: #888; }
     .ground-btn.hidden, .port-btn.hidden, .shelter-port-btn.hidden, .build-shelter-btn.hidden, .center-van-btn.hidden { display: none; }
     .center-van-btn, .center-shelter-btn { position: absolute; bottom: 90px; padding: 8px 12px; border-radius: 8px; font: 700 11px Rubik, sans-serif; cursor: pointer; border: 2px solid; box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: all 0.15s; }
-    .center-van-btn { right: 340px; border-color: #888; background: rgba(50,60,80,0.9); color: #fff; }
+    .center-van-btn { right: 300px; border-color: #888; background: rgba(50,60,80,0.9); color: #fff; }
     .center-van-btn:hover { background: rgba(70,80,100,0.95); transform: translateY(-2px); }
-    .center-shelter-btn { right: 430px; border-color: #7bed9f; background: rgba(50,80,60,0.9); color: #7bed9f; }
+    .center-shelter-btn { right: 375px; border-color: #7bed9f; background: rgba(50,80,60,0.9); color: #7bed9f; }
     .center-shelter-btn:hover { background: rgba(60,100,70,0.95); transform: translateY(-2px); }
     .center-shelter-btn.hidden { display: none; }
     .game-tokens { font: 700 14px Rubik, sans-serif; color: #ffd93d; margin-left: 12px; }
@@ -214,7 +224,14 @@
     #breeder-minigame.show { display: block; }
     .breeder-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
     .breeder-title { font: 700 18px Rubik, sans-serif; color: #ff6b6b; }
+    .breeder-timer-area { display: flex; align-items: center; gap: 10px; }
     .breeder-timer { font: 700 16px Rubik, sans-serif; color: #ffd93d; }
+    .breeder-retreat-btn {
+      padding: 6px 12px; font: 600 12px Rubik, sans-serif; border-radius: 6px;
+      cursor: pointer; border: 2px solid #7bed9f; background: rgba(123, 237, 159, 0.2);
+      color: #7bed9f; transition: all 0.15s;
+    }
+    .breeder-retreat-btn:hover { background: rgba(123, 237, 159, 0.4); transform: scale(1.05); }
     .breeder-tokens { font: 600 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 12px; }
     .instant-rescue-btn {
       padding: 10px 24px; margin-bottom: 16px; font: 600 14px Rubik, sans-serif;
@@ -534,6 +551,16 @@
     .landing-center .resume-btn { background: transparent; color: #7bed9f; border: 2px solid #7bed9f; margin-bottom: 4px; }
     .landing-center .resume-btn:hover { background: rgba(123,237,159,0.2); }
     #resume-match-btn.hidden { display: none; }
+    #active-matches-container { max-height: 150px; overflow-y: auto; margin-bottom: 8px; width: 100%; }
+    #active-matches-container.hidden { display: none; }
+    #active-matches-list { display: flex; flex-direction: column; gap: 6px; }
+    .active-match-item { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: rgba(0,0,0,0.3); border: 2px solid rgba(123,237,159,0.5); border-radius: 8px; cursor: pointer; font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); }
+    .active-match-item:hover { background: rgba(123,237,159,0.15); border-color: #7bed9f; }
+    .active-match-item .match-info { display: flex; align-items: center; gap: 8px; }
+    .active-match-item .match-mode { font-size: 11px; text-transform: uppercase; color: #7bed9f; background: rgba(123,237,159,0.2); padding: 2px 6px; border-radius: 4px; }
+    .active-match-item .match-id { color: rgba(255,255,255,0.7); }
+    .active-match-item .match-time { font-variant-numeric: tabular-nums; color: #7bed9f; }
+    .active-match-item .match-paused { color: #ffa502; font-size: 11px; }
     .landing-center .auth-buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin: 12px 0; }
     .landing-center .auth-buttons a { font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); text-decoration: none; padding: 8px 16px; border: 2px solid rgba(255,255,255,0.3); border-radius: 8px; }
     .landing-center .auth-buttons a:hover { border-color: #7bed9f; color: #7bed9f; }
@@ -573,7 +600,8 @@
     .referral-btn:hover { border-color: #7bed9f; color: #7bed9f; }
     .referral-hidden { display: none; }
     .landing-shop { margin-top: 16px; }
-    .landing-tokens { font: 600 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 8px; }
+    .boost-section { margin-bottom: 12px; }
+    .boost-header { font: 600 11px Rubik, sans-serif; color: rgba(255,255,255,0.6); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
     .karma-display { display: flex; align-items: center; gap: 6px; font: 600 14px Rubik, sans-serif; color: #fbbf24; margin-bottom: 12px; padding: 8px 12px; background: linear-gradient(135deg, rgba(251,191,36,0.15), rgba(245,158,11,0.1)); border: 1px solid rgba(251,191,36,0.3); border-radius: 8px; }
     .karma-display.hidden { display: none; }
     .karma-icon { font-size: 16px; }
@@ -586,22 +614,33 @@
     .server-clock-time { font: 600 13px Rubik, sans-serif; color: #5eead4; }
     .server-clock-next-gift { margin-top: 4px; color: rgba(255,255,255,0.8); }
     .equipment-header { font: 700 13px Rubik, sans-serif; color: #ffd93d; margin-bottom: 10px; text-align: center; }
-    .equipment-items { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .equipment-item { display: flex; align-items: center; gap: 6px; font: 600 11px Rubik, sans-serif; color: rgba(255,255,255,0.85); }
-    .equipment-icon { font-size: 14px; }
-    .equipment-value { color: #7bed9f; font-weight: 700; margin-left: auto; }
+    .equipment-items-compact { display: flex; flex-direction: column; gap: 6px; }
+    .equip-row-tokens { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 6px 10px; border-radius: 8px; background: rgba(255,255,255,0.05); cursor: pointer; position: relative; transition: background 0.15s; }
+    .equip-row-tokens:hover { background: rgba(255,255,255,0.12); }
+    .equip-row-tokens .equip-icon { font-size: 16px; }
+    .equip-row-tokens .equip-value { font: 700 15px Rubik, sans-serif; color: #7bed9f; }
+    .equip-row-boosts { display: flex; justify-content: space-around; gap: 4px; }
+    .equip-item { display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 4px 8px; border-radius: 6px; background: rgba(255,255,255,0.05); cursor: pointer; position: relative; transition: background 0.15s; flex: 1; }
+    .equip-item:hover { background: rgba(255,255,255,0.12); }
+    .equip-icon { font-size: 14px; }
+    .equip-value { font: 700 11px Rubik, sans-serif; color: #7bed9f; }
+    .equip-row-tokens[data-tooltip]:hover::after, .equip-item[data-tooltip]:hover::after { content: attr(data-tooltip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); padding: 6px 10px; background: rgba(20,25,40,0.95); color: #fff; font: 500 11px Rubik, sans-serif; border-radius: 6px; white-space: nowrap; z-index: 100; margin-bottom: 6px; border: 1px solid rgba(255,255,255,0.15); box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+    .equip-row-tokens[data-tooltip]:hover::before, .equip-item[data-tooltip]:hover::before { content: ''; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); border: 6px solid transparent; border-top-color: rgba(20,25,40,0.95); margin-bottom: -6px; z-index: 101; }
     .equipment-note { font: 400 10px Rubik, sans-serif; color: rgba(255,255,255,0.5); text-align: center; margin-top: 8px; }
     .equipment-note.signed-in { color: #7bed9f; }
     .landing-buy { display: block; width: 100%; margin-bottom: 6px; padding: 8px 10px; font: 600 12px Rubik, sans-serif; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.3); border-radius: 6px; color: #fff; cursor: pointer; }
     .landing-buy:hover { border-color: #7bed9f; color: #7bed9f; }
     .landing-buy:disabled { opacity: 0.5; cursor: not-allowed; }
-    .daily-gift-btn { display: block; width: 100%; margin-bottom: 10px; padding: 10px 12px; font: 700 13px Rubik, sans-serif; background: linear-gradient(135deg, #9b59b6, #8e44ad); border: 2px solid #ffd93d; border-radius: 8px; color: #fff; cursor: pointer; transition: all 0.15s; }
-    .daily-gift-btn:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(155,89,182,0.4); }
-    .daily-gift-btn.hidden { display: none; }
-    .daily-gift-btn.has-gift { animation: pulse-gift 1.5s infinite; }
+    .lobby-bottom-buttons { display: flex; gap: 8px; margin-top: 12px; }
+    .lobby-btn { flex: 1; padding: 12px 14px; font: 700 13px Rubik, sans-serif; border-radius: 8px; color: #fff; cursor: pointer; transition: all 0.15s; border: 2px solid; }
+    .lobby-btn:hover { transform: translateY(-2px); }
+    .lobby-btn.gift-btn { background: linear-gradient(135deg, #9b59b6, #8e44ad); border-color: #ffd93d; }
+    .lobby-btn.gift-btn:hover { box-shadow: 0 4px 12px rgba(155,89,182,0.4); }
+    .lobby-btn.gift-btn.hidden { display: none; }
+    .lobby-btn.gift-btn.has-gift { animation: pulse-gift 1.5s infinite; }
     @keyframes pulse-gift { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,215,61,0.5); } 50% { box-shadow: 0 0 0 8px rgba(255,215,61,0); } }
-    .leaderboard-btn { flex: 1; padding: 10px 12px; font: 700 13px Rubik, sans-serif; background: linear-gradient(135deg, #3498db, #2980b9); border: 2px solid #7bed9f; border-radius: 8px; color: #fff; cursor: pointer; transition: all 0.15s; }
-    .leaderboard-btn:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(52,152,219,0.4); }
+    .lobby-btn.leaderboard-btn { background: linear-gradient(135deg, #3498db, #2980b9); border-color: #7bed9f; }
+    .lobby-btn.leaderboard-btn:hover { box-shadow: 0 4px 12px rgba(52,152,219,0.4); }
     #cookie-banner {
       position: fixed; bottom: 0; left: 0; right: 0; z-index: 200;
       background: rgba(30,35,50,0.98); border-top: 2px solid rgba(255,255,255,0.15);
@@ -684,8 +723,6 @@
         <p class="landing-guest-hint" style="font-size:11px;color:rgba(255,255,255,0.7);margin-bottom:12px">Play to earn Rescue Tokens. Boosts apply this match. Sign in to save progress.</p>
         <div id="landing-profile-actions"></div>
         <div class="landing-shop">
-          <div id="landing-tokens" class="landing-tokens">Tokens: 0 RT</div>
-          
           <!-- Karma Points (shared across games) -->
           <div id="karma-display" class="karma-display hidden">
             <span class="karma-icon">✨</span>
@@ -694,45 +731,39 @@
             <span class="karma-suffix">KP</span>
           </div>
           
-          <!-- Equipment Panel -->
+          <!-- Equipment Panel (all RT available for next match) -->
           <div class="equipment-panel">
             <div class="equipment-header">Equipment Chest</div>
-            <div class="equipment-items">
-              <div class="equipment-item">
-                <span class="equipment-icon">💰</span>
-                <span>RT:</span>
-                <span class="equipment-value" id="equip-rt">0</span>
+            <div class="equipment-items-compact">
+              <div class="equip-row-tokens" data-tooltip="Rescue Tokens - Currency for boosts and upgrades">
+                <span class="equip-icon">🪙</span>
+                <span class="equip-value" id="equip-rt">0</span>
               </div>
-              <div class="equipment-item">
-                <span class="equipment-icon">🌀</span>
-                <span>Ports:</span>
-                <span class="equipment-value" id="equip-ports">0</span>
-              </div>
-              <div class="equipment-item">
-                <span class="equipment-icon">⚡</span>
-                <span>Speed:</span>
-                <span class="equipment-value" id="equip-speed">0</span>
-              </div>
-              <div class="equipment-item">
-                <span class="equipment-icon">📦</span>
-                <span>Size:</span>
-                <span class="equipment-value" id="equip-size">0</span>
+              <div class="equip-row-boosts">
+                <div class="equip-item" data-tooltip="Teleport Charges - Random teleport on the map">
+                  <span class="equip-icon">🌀</span>
+                  <span class="equip-value" id="equip-ports">0</span>
+                </div>
+                <div class="equip-item" data-tooltip="Speed Boost - Faster van movement next match">
+                  <span class="equip-icon">⚡</span>
+                  <span class="equip-value" id="equip-speed">0</span>
+                </div>
+                <div class="equip-item" data-tooltip="Size Bonus - Start with extra van capacity">
+                  <span class="equip-icon">📦</span>
+                  <span class="equip-value" id="equip-size">0</span>
+                </div>
               </div>
             </div>
             <div class="equipment-note" id="equip-note">Sign in to save equipment</div>
           </div>
-          <div id="server-clock-wrap" class="server-clock-wrap">
-            <div class="server-clock-label">Game server (UTC)</div>
-            <div id="server-clock-time" class="server-clock-time">--:--:-- UTC</div>
-            <div id="server-clock-next-gift" class="server-clock-next-gift">Next daily gift: --</div>
+          
+          <!-- Pre-match Boosts -->
+          <div class="boost-section">
+            <div class="boost-header">Pre-Match Boosts</div>
+            <button type="button" class="landing-buy" data-boost="size" id="buy-size-btn">Buy +1 Size (50 RT)</button>
+            <button type="button" class="landing-buy" data-boost="speed">Buy Speed Boost (30 RT)</button>
+            <button type="button" class="landing-buy" data-boost="adoptSpeed">Buy Adopt Speed (40 RT)</button>
           </div>
-          <div style="display:flex;gap:8px;margin-bottom:8px;">
-            <button type="button" class="daily-gift-btn hidden" id="daily-gift-btn">🎁 Daily Gift</button>
-            <button type="button" class="leaderboard-btn" id="leaderboard-btn">🏆 Leaderboard</button>
-          </div>
-          <button type="button" class="landing-buy" data-boost="size">Buy +1 size (50)</button>
-          <button type="button" class="landing-buy" data-boost="speed">Buy speed (30)</button>
-          <button type="button" class="landing-buy" data-boost="adoptSpeed">Buy adopt speed (40)</button>
         </div>
         <div class="color-selector">
           <h4>Shelter Color</h4>
@@ -755,6 +786,12 @@
             <button type="button" class="preset-color" data-color="#00bcd4" style="background:#00bcd4" title="Cyan"></button>
           </div>
         </div>
+        
+        <!-- Bottom Buttons -->
+        <div class="lobby-bottom-buttons">
+          <button type="button" class="lobby-btn gift-btn hidden" id="daily-gift-btn">🎁 Daily Gift</button>
+          <button type="button" class="lobby-btn leaderboard-btn" id="leaderboard-btn">🏆 Leaderboard</button>
+        </div>
       </aside>
       <section class="landing-center">
         <h1 class="title">Adoptar.io</h1>
@@ -768,6 +805,9 @@
         </div>
         <div class="landing-music-row">
           <label><input type="checkbox" id="landing-music-toggle" checked /> Music</label>
+        </div>
+        <div id="active-matches-container" class="hidden">
+          <div id="active-matches-list"></div>
         </div>
         <button type="button" id="resume-match-btn" class="play-btn resume-btn hidden">Resume Match</button>
         <button type="button" id="landing-play" class="play-btn">Play</button>
@@ -791,9 +831,9 @@
         </div>
         <div class="howto-section" style="margin-top:20px; text-align:left; max-width:360px;">
           <h3 style="font: 700 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 12px;">How To Play</h3>
-          <p class="howto-text">Drive your <strong>van</strong> to rescue strays. Bring them to the <strong>Adoption Center</strong> (green zone) to adopt out, earn <strong>5 RT each</strong>.</p>
-          <p class="howto-text">Drive out <strong>Breeders</strong> by better feeding their pets! <strong>Don't let the breeders setup a Mill</strong>!</p>
-          <p class="howto-text">Build a <strong>shelter</strong> (250 RT), then buy an <strong>Adoption Center</strong> (250 RT) to adopt at your shelter for only 2RT each! Add <strong>Advertising and Gravity</strong> (200 and 300 RT) to pull strays!</p>
+          <p class="howto-text">Drive your <strong>van</strong> to rescue strays. Bring them to the <strong>Adoption Center</strong> (green zone) to adopt out, earn <strong>5 RT each</strong>. Rescue all the strays to win.</p>
+          <p class="howto-text">Drive out <strong>Breeders</strong> by better feeding their pets! <strong>Don't let the breeders setup a Mill and release wandering strays</strong>! If breeders reach 3,000 strays the match is over.</p>
+          <p class="howto-text">Build a <strong>shelter</strong> (250 RT), then buy an <strong>Adoption Center</strong> (250 RT) to adopt at your shelter for only 2RT each. Add <strong>Advertising and Gravity</strong> (200 and 300 RT) to pull strays.</p>
           <p class="howto-text">Press <span class="key">E</span> for build menu.</p>
           <h4 class="howto-subtitle">Controls</h4>
           <p class="howto-text howto-keys"><span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> Move &nbsp; <span class="key">E</span> Build</p>
@@ -813,6 +853,12 @@
         <div id="game-stats-content" class="lobby-leaderboard-content" style="font-size:12px">
           <div class="lobby-leaderboard-loading">Loading…</div>
         </div>
+      </div>
+      <!-- Server Clock -->
+      <div id="server-clock-wrap" class="server-clock-wrap" style="margin-top:12px">
+        <div class="server-clock-label">Game server (UTC)</div>
+        <div id="server-clock-time" class="server-clock-time">--:--:-- UTC</div>
+        <div id="server-clock-next-gift" class="server-clock-next-gift">Next daily gift: --</div>
       </div>
       <div class="referral-panel">
         <h4>Referrals</h4>
@@ -853,6 +899,7 @@
       <h3>Settings</h3>
       <label><input type="checkbox" id="music-toggle" checked /> Music</label>
       <label><input type="checkbox" id="sfx-toggle" checked /> Sound effects</label>
+      <label><input type="checkbox" id="hide-strays-toggle" /> Hide strays on minimap</label>
       <label for="fps-select">Frame rate</label>
       <select id="fps-select" class="settings-fps-select" aria-label="Frame rate">
         <option value="30">30 FPS</option>
@@ -882,7 +929,10 @@
     <div id="breeder-minigame">
       <div class="breeder-header">
         <span class="breeder-title">🚨 Stop the Breeders!</span>
-        <span class="breeder-timer" id="breeder-timer">30s</span>
+        <div class="breeder-timer-area">
+          <span class="breeder-timer" id="breeder-timer">30s</span>
+          <button type="button" id="breeder-retreat-btn" class="breeder-retreat-btn">Retreat [R]</button>
+        </div>
       </div>
       <div class="breeder-tokens" id="breeder-tokens">Your Tokens: 0 RT</div>
       <p id="breeder-instruction-1" style="margin-bottom:8px;color:rgba(255,255,255,0.8);font-size:12px;">1. Click a pet to select it</p>
@@ -926,7 +976,18 @@
       <div class="breeder-result hidden" id="breeder-result">
         <div class="breeder-result-title" id="breeder-result-title">Rescue Complete!</div>
         <div class="breeder-rewards" id="breeder-rewards"></div>
-        <button type="button" class="breeder-close-btn" id="breeder-close-btn">Continue</button>
+        <button type="button" class="breeder-close-btn" id="breeder-close-btn">Continue [C]</button>
+      </div>
+    </div>
+    
+    <!-- Breeder Warning Popup (shown when player can't afford to win) -->
+    <div id="breeder-warning-popup" class="breeder-warning-popup hidden">
+      <div class="breeder-warning-title">⚠️ Warning: Likely Defeat!</div>
+      <p class="breeder-warning-text" id="breeder-warning-text">This breeder camp requires more RT than you have to rescue all pets.</p>
+      <p class="breeder-warning-stats" id="breeder-warning-stats">Required: 45+ RT | You have: 5 RT</p>
+      <div class="breeder-warning-btns">
+        <button type="button" id="breeder-warning-continue" class="breeder-warning-btn continue">Fight Anyway</button>
+        <button type="button" id="breeder-warning-retreat" class="breeder-warning-btn retreat">Retreat</button>
       </div>
     </div>
     
