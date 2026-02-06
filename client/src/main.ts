@@ -17,9 +17,18 @@ import {
   GROWTH_ORB_RADIUS,
   SPEED_BOOST_MULTIPLIER,
   COMBAT_MIN_SIZE,
+  // Boss Mode constants
+  BOSS_PETMALL_RADIUS,
+  BOSS_MILL_RADIUS,
+  BOSS_MILL_NAMES,
+  BOSS_INGREDIENT_COSTS,
+  BOSS_MODE_TIME_LIMIT_TICKS,
+  BOSS_TYCOON_DETECTION_RADIUS,
 } from 'shared';
 import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED, PICKUP_TYPE_PORT, PICKUP_TYPE_BREEDER, PICKUP_TYPE_SHELTER_PORT, VAN_MAX_CAPACITY } from 'shared';
 import { PET_TYPE_CAT, PET_TYPE_DOG, PET_TYPE_BIRD, PET_TYPE_RABBIT, PET_TYPE_SPECIAL } from 'shared';
+import { BOSS_MILL_HORSE, BOSS_MILL_CAT, BOSS_MILL_DOG, BOSS_MILL_BIRD, BOSS_MILL_RABBIT } from 'shared';
+import type { BossModeState, BossMill } from 'shared';
 import {
   INPUT_LEFT,
   INPUT_RIGHT,
@@ -101,6 +110,8 @@ import {
   setMusicEnabled,
   getSfxEnabled,
   setSfxEnabled,
+  updateEngineState,
+  stopEngineLoop,
 } from './audio';
 
 const SIGNALING_URL = (() => {
@@ -290,6 +301,7 @@ const actionVanSpeedBtnEl = document.getElementById('action-van-speed-btn') as H
 const groundBtnEl = document.getElementById('ground-btn')!;
 const portBtnEl = document.getElementById('port-btn')!;
 const shelterPortBtnEl = document.getElementById('shelter-port-btn')!;
+const adoptSpeedBtnEl = document.getElementById('adopt-speed-btn')!;
 const transferBtnEl = document.getElementById('transfer-btn')!;
 const buildShelterBtnEl = document.getElementById('build-shelter-btn') as HTMLButtonElement;
 const centerVanBtnEl = document.getElementById('center-van-btn')!;
@@ -351,6 +363,7 @@ const equipRtEl = document.getElementById('equip-rt')!;
 const equipPortsEl = document.getElementById('equip-ports')!;
 const equipSpeedEl = document.getElementById('equip-speed')!;
 const equipSizeEl = document.getElementById('equip-size')!;
+const equipAdoptSpeedEl = document.getElementById('equip-adopt-speed')!;
 const equipNoteEl = document.getElementById('equip-note')!;
 
 // Karma Points Elements (shared across games)
@@ -366,9 +379,15 @@ interface Inventory {
   portCharges: number;
   speedBoosts: number;
   sizeBoosts: number;
+  adoptSpeedBoosts: number;
   signedIn: boolean;
 }
-let currentInventory: Inventory = { storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, signedIn: false };
+let currentInventory: Inventory = { storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, adoptSpeedBoosts: 0, signedIn: false };
+
+// In-match adopt speed boost state
+let inMatchAdoptSpeedBoosts = 0;  // Number of boosts available in current match
+let adoptSpeedActiveUntilTick = 0;  // Tick when current boost expires (0 = not active)
+let adoptSpeedUsedSeconds = 0;  // Total seconds used this match (max 300)
 
 // Breeder Mini-Game State
 type PetType = 'dog' | 'cat' | 'horse' | 'bird' | 'rabbit';
@@ -604,7 +623,7 @@ type ReferralInfo = {
 };
 let selectedMode: 'ffa' | 'teams' | 'solo' = 'ffa';
 let hasSavedMatch = false;
-const pendingBoosts = { sizeBonus: 0, speedBoost: false, adoptSpeed: false };
+const pendingBoosts = { sizeBonus: 0, speedBoost: false };  // adoptSpeed is now inventory-based
 let currentDisplayName: string | null = null;
 let isSignedIn = false;
 let currentUserId: string | null = null;
@@ -856,7 +875,8 @@ function updateLandingTokens(): void {
     if (b === 'speed') {
       (btn as HTMLButtonElement).disabled = tokens < BOOST_PRICES.speed || pendingBoosts.speedBoost;
     } else if (b === 'adoptSpeed') {
-      (btn as HTMLButtonElement).disabled = tokens < BOOST_PRICES.adoptSpeed || pendingBoosts.adoptSpeed;
+      // Adopt speed uses stored RT from inventory (not localStorage tokens)
+      (btn as HTMLButtonElement).disabled = !isSignedIn || currentInventory.storedRt < BOOST_PRICES.adoptSpeed;
     }
   });
 }
@@ -923,6 +943,32 @@ function updateColorUI(): void {
       else if (colorType === 'gradient') (btn as HTMLElement).textContent = 'Gradient: Click to use';
     }
   });
+}
+
+/** Update adopt speed button visibility and state */
+function updateAdoptSpeedButton(): void {
+  const me = latestSnapshot?.players.find((pl) => pl.id === myPlayerId);
+  const isEliminated = me?.eliminated || !me;
+  
+  // Check if adopt speed boost is currently active (based on tick)
+  const currentTick = latestSnapshot?.tick ?? 0;
+  const isActive = currentTick < adoptSpeedActiveUntilTick;
+  
+  if (me && (inMatchAdoptSpeedBoosts > 0 || isActive) && !isEliminated && matchPhase === 'playing') {
+    if (isActive) {
+      const remainingTicks = adoptSpeedActiveUntilTick - currentTick;
+      const remainingSeconds = Math.ceil(remainingTicks / 25);  // 25 ticks per second
+      adoptSpeedBtnEl.textContent = `Adopt Speed ${remainingSeconds}s (${inMatchAdoptSpeedBoosts})`;
+      adoptSpeedBtnEl.classList.add('active');
+    } else {
+      adoptSpeedBtnEl.textContent = `Adopt Speed [B] (${inMatchAdoptSpeedBoosts})`;
+      adoptSpeedBtnEl.classList.remove('active');
+    }
+    adoptSpeedBtnEl.classList.remove('hidden');
+  } else {
+    adoptSpeedBtnEl.classList.add('hidden');
+    adoptSpeedBtnEl.classList.remove('active');
+  }
 }
 
 let toastTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -1757,6 +1803,17 @@ canvas.addEventListener('click', (e) => {
   const scaleY = canvas.height / rect.height;
   const screenX = (e.clientX - rect.left) * scaleX;
   const screenY = (e.clientY - rect.top) * scaleY;
+  
+  // Convert screen to world coordinates for boss mill check
+  const cam = getCamera();
+  const worldX = cam.x + screenX;
+  const worldY = cam.y + screenY;
+  
+  // Check for boss mill click first (in solo boss mode)
+  if (latestSnapshot.bossMode?.active && checkBossMillClick(worldX, worldY)) {
+    return; // Handled by boss mill modal
+  }
+  
   handleAllyRequestAtPosition(screenX, screenY);
 });
 
@@ -2036,33 +2093,25 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
   gameWsLocal.onopen = async () => {
     gameWs = gameWsLocal;
     const displayName = await getOrCreateDisplayName();
-    // Withdraw inventory for this match (registered users only)
-    const inventory = await withdrawInventory();
-    const startingRT = inventory.rt;
-    const startingPorts = inventory.ports;
-    if (startingRT > 0) {
-      showToast(`Starting with ${startingRT} RT from chest!`, 'success');
-    }
+    // NOTE: Don't withdraw inventory here! The server withdraws it after validating the match.
+    // This prevents inventory loss if the player tries to resume an expired match.
     gameWs.send(JSON.stringify({ 
       type: 'mode', 
       mode: options?.mode ?? 'ffa', 
       displayName,
-      startingRT,
-      startingPorts,
-      userId: currentUserId, // For inventory tracking
+      userId: currentUserId, // For inventory tracking - server will withdraw
       abandon: options?.abandon,
       rejoinMatchId: options?.rejoinMatchId,
     }));
-    if (pendingBoosts.sizeBonus > 0 || pendingBoosts.speedBoost || pendingBoosts.adoptSpeed) {
+    if (pendingBoosts.sizeBonus > 0 || pendingBoosts.speedBoost) {
       gameWs.send(JSON.stringify({
         type: 'startingBoosts',
         sizeBonus: pendingBoosts.sizeBonus,
         speedBoost: pendingBoosts.speedBoost,
-        adoptSpeed: pendingBoosts.adoptSpeed,
+        // adoptSpeedBoosts are loaded from inventory by the server
       }));
       pendingBoosts.sizeBonus = 0;
       pendingBoosts.speedBoost = false;
-      pendingBoosts.adoptSpeed = false;
     }
     // Send selected color
     const selectedColor = getSelectedColor();
@@ -2083,6 +2132,18 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         const msg = JSON.parse(e.data);
         if (msg.type === 'welcome' && msg.playerId) {
           myPlayerId = msg.playerId;
+          // Initialize in-match boost state
+          inMatchAdoptSpeedBoosts = typeof msg.adoptSpeedBoosts === 'number' ? msg.adoptSpeedBoosts : 0;
+          adoptSpeedActiveUntilTick = 0;
+          adoptSpeedUsedSeconds = 0;
+          // Server withdrew inventory - update client state to reflect 0 inventory
+          if (isSignedIn && !msg.resumed) {
+            currentInventory = { storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, adoptSpeedBoosts: 0, signedIn: true };
+          }
+          // Show toast for starting RT from chest (if not resuming)
+          if (!msg.resumed && typeof msg.startingRT === 'number' && msg.startingRT > 0) {
+            showToast(`Starting with ${msg.startingRT} RT from chest!`, 'success');
+          }
           // Track current matchId for FFA/Teams rejoin capability
           if (msg.matchId && (selectedMode === 'ffa' || selectedMode === 'teams')) {
             // If resumed, remove this match from pending list (we're back in it)
@@ -2236,6 +2297,37 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           const rewards = Array.isArray(msg.rewards) ? msg.rewards : [];
           showBreederRewards(tokenBonus, rewards);
         }
+        // Boss mode messages (enter/exit handled by proximity detection, not messages)
+        if (msg.type === 'bossPurchaseResult' || msg.type === 'bossSubmitMealResult' || msg.type === 'karmaAwarded') {
+          handleBossMessage(msg as { type: string; [key: string]: unknown });
+        }
+        // Debug boss mode result
+        if (msg.type === 'debugBossModeResult') {
+          console.log('[DEBUG] Boss mode result:', msg);
+          if (msg.success) {
+            showToast('Boss Mode activated!', 'success');
+          } else {
+            showToast(`Boss Mode failed: ${msg.reason || 'unknown'}`, 'error');
+          }
+        }
+        // Boost used confirmation
+        if (msg.type === 'boostUsed') {
+          if (msg.boostType === 'adoptSpeed') {
+            if (msg.success) {
+              inMatchAdoptSpeedBoosts = msg.remainingBoosts ?? 0;
+              adoptSpeedActiveUntilTick = msg.activeUntilTick ?? 0;
+              adoptSpeedUsedSeconds = msg.usedSeconds ?? 0;
+              updateAdoptSpeedButton();
+              showToast('Adopt speed boost activated! (60s)', 'success');
+            } else {
+              if ((msg.usedSeconds ?? 0) >= 300) {
+                showToast('Max 5 minutes used this match!', 'info');
+              } else {
+                showToast('No adopt speed boosts available!', 'info');
+              }
+            }
+          }
+        }
         // Match end inventory notification - match has ended, saved match cleared
         if (msg.type === 'matchEndInventory') {
           hasSavedMatch = false;
@@ -2385,6 +2477,33 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           playerDisplayY = me.y;
         }
       }
+      
+      // Handle boss mode mill proximity changes (server-driven)
+      if (snap.bossMode?.active) {
+        const currentPlayerAtMill = snap.bossMode.playerAtMill;
+        
+        // Detect when player enters a mill (proximity-based, server tells us)
+        if (currentPlayerAtMill >= 0 && lastPlayerAtMill < 0) {
+          // Player just entered a mill - open the modal
+          openBossMillModalFromProximity(currentPlayerAtMill);
+        } else if (currentPlayerAtMill < 0 && lastPlayerAtMill >= 0) {
+          // Player left the mill - close the modal
+          closeBossMillModal();
+        }
+        
+        lastPlayerAtMill = currentPlayerAtMill;
+        
+        // Update modal content if still open
+        if (bossMillOpen) {
+          updateBossMillModal();
+        }
+      } else {
+        // Boss mode ended
+        if (bossMillOpen) {
+          closeBossMillModal();
+        }
+        lastPlayerAtMill = -1;
+      }
     }
   };
   gameWsLocal.onclose = () => {
@@ -2396,6 +2515,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     matchPhase = 'playing';
     sentAllyRequests.clear();
     iAmReady = false;
+    stopEngineLoop(); // Stop engine sound when disconnecting
   };
   await new Promise<void>((resolve, reject) => {
     const deadline = Date.now() + CONNECT_TIMEOUT_MS;
@@ -2470,6 +2590,14 @@ function tick(now: number): void {
     lastInputSendTime = now;
     const buf = encodeInput(inputFlags, inputSeq++);
     gameWs.send(buf);
+  }
+
+  // Update engine sound state based on movement and speed boost
+  {
+    const isMoving = canMove && inputFlags !== 0;
+    const currentTick = latestSnapshot?.tick ?? 0;
+    const isBoosted = isMoving && predictedPlayer != null && (predictedPlayer.speedBoostUntil ?? 0) > currentTick;
+    updateEngineState(isMoving, isBoosted);
   }
 
   // Advance local player prediction every frame (smooth movement and camera) — freeze when lobby/countdown, match over, or in minigame
@@ -3286,6 +3414,188 @@ function drawBreederShelter(shelter: BreederShelterState): void {
   ctx.restore();
 }
 
+// ============================================
+// BOSS MODE RENDERING
+// ============================================
+
+/** Boss mill pet type emojis */
+const BOSS_MILL_EMOJIS: Record<number, string> = {
+  [BOSS_MILL_HORSE]: '🐴',
+  [BOSS_MILL_CAT]: '🐈',
+  [BOSS_MILL_DOG]: '🐕',
+  [BOSS_MILL_BIRD]: '🐦',
+  [BOSS_MILL_RABBIT]: '🐰',
+};
+
+/** Draw the PetMall and all boss mills */
+function drawBossMode(bossMode: BossModeState): void {
+  const { mallX, mallY, mills, tycoonX, tycoonY, tycoonTargetMill, playerAtMill, millsCleared } = bossMode;
+  
+  ctx.save();
+  
+  // Draw PetMall center area (plaza)
+  ctx.fillStyle = 'rgba(139, 69, 19, 0.3)';
+  ctx.beginPath();
+  ctx.arc(mallX, mallY, BOSS_PETMALL_RADIUS * 0.6, 0, Math.PI * 2);
+  ctx.fill();
+  
+  // Draw "PetMall" title above center
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 24px Rubik, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0,0,0,0.8)';
+  ctx.shadowBlur = 6;
+  ctx.fillText('🏪 PETMALL', mallX, mallY - 40);
+  ctx.font = '16px Rubik, sans-serif';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(`${millsCleared}/5 Mills Cleared`, mallX, mallY);
+  ctx.shadowBlur = 0;
+  
+  // Draw each mill
+  for (const mill of mills) {
+    drawBossMill(mill, mill.id === playerAtMill, mill.id === tycoonTargetMill);
+  }
+  
+  // Draw Breeder Tycoon
+  drawBreederTycoon(tycoonX, tycoonY);
+  
+  ctx.restore();
+}
+
+/** Draw a single boss mill */
+function drawBossMill(mill: BossMill, isPlayerHere: boolean, isTycoonTarget: boolean): void {
+  const { x, y, petType, completed, id } = mill;
+  const emoji = BOSS_MILL_EMOJIS[petType] ?? '🐾';
+  const name = BOSS_MILL_NAMES[petType] ?? 'Mill';
+  
+  ctx.save();
+  
+  // Different style for completed mills
+  if (completed) {
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = 'rgba(100, 200, 100, 0.3)';
+  } else if (isPlayerHere) {
+    // Player is here - blue highlight
+    ctx.shadowColor = '#00aaff';
+    ctx.shadowBlur = 20;
+    ctx.fillStyle = 'rgba(0, 170, 255, 0.2)';
+  } else if (isTycoonTarget) {
+    // Tycoon is heading here - red warning
+    ctx.shadowColor = '#ff0000';
+    ctx.shadowBlur = 15 + Math.sin(Date.now() / 100) * 5;
+    ctx.fillStyle = 'rgba(255, 0, 0, 0.1)';
+  } else {
+    ctx.fillStyle = 'rgba(139, 69, 19, 0.2)';
+  }
+  
+  // Draw mill building base
+  ctx.beginPath();
+  ctx.arc(x, y, BOSS_MILL_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+  
+  ctx.shadowBlur = 0;
+  
+  // Draw building shape
+  const bw = BOSS_MILL_RADIUS * 1.4;
+  const bh = BOSS_MILL_RADIUS * 1.2;
+  
+  if (completed) {
+    ctx.fillStyle = '#3d8b40';
+    ctx.strokeStyle = '#2d6a30';
+  } else {
+    ctx.fillStyle = '#8b4513';
+    ctx.strokeStyle = '#5c2d0e';
+  }
+  
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.roundRect(x - bw / 2, y - bh / 2, bw, bh, 8);
+  ctx.fill();
+  ctx.stroke();
+  
+  // Roof
+  ctx.beginPath();
+  ctx.moveTo(x - bw / 2 - 10, y - bh / 2);
+  ctx.lineTo(x, y - bh / 2 - 30);
+  ctx.lineTo(x + bw / 2 + 10, y - bh / 2);
+  ctx.closePath();
+  ctx.fillStyle = completed ? '#2d6a30' : '#654321';
+  ctx.fill();
+  ctx.stroke();
+  
+  // Pet emoji in center
+  ctx.font = '36px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(emoji, x, y);
+  
+  // Name label
+  ctx.fillStyle = completed ? '#90ee90' : '#ffd700';
+  ctx.font = 'bold 12px Rubik, sans-serif';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(name, x, y - bh / 2 - 35);
+  
+  // Status below
+  if (completed) {
+    ctx.fillStyle = '#90ee90';
+    ctx.font = '11px Rubik, sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.fillText('✓ RESCUED!', x, y + bh / 2 + 5);
+  } else if (isPlayerHere) {
+    ctx.fillStyle = '#00aaff';
+    ctx.font = '11px Rubik, sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.fillText('PREPARING MEAL...', x, y + bh / 2 + 5);
+  }
+  
+  ctx.restore();
+}
+
+/** Draw the Breeder Tycoon NPC */
+function drawBreederTycoon(x: number, y: number): void {
+  ctx.save();
+  
+  // Pulsing red aura
+  const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 150);
+  ctx.shadowColor = `rgba(255, 0, 0, ${0.6 + pulse * 0.4})`;
+  ctx.shadowBlur = 25 + pulse * 15;
+  
+  // Body
+  ctx.fillStyle = '#2d0a0a';
+  ctx.beginPath();
+  ctx.arc(x, y, 35, 0, Math.PI * 2);
+  ctx.fill();
+  
+  ctx.strokeStyle = '#ff4444';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  
+  // Top hat
+  ctx.fillStyle = '#1a0505';
+  ctx.beginPath();
+  ctx.fillRect(x - 20, y - 50, 40, 25);
+  ctx.fillRect(x - 28, y - 28, 56, 8);
+  ctx.fill();
+  
+  ctx.shadowBlur = 0;
+  
+  // Face (angry eyes)
+  ctx.fillStyle = '#ff0000';
+  ctx.font = '24px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('😈', x, y + 5);
+  
+  // Label
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 11px Rubik, sans-serif';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText('BREEDER TYCOON', x, y - 55);
+  
+  ctx.restore();
+}
+
 /** Pet type emojis for map strays (same as adoption drop-off graphic) */
 const STRAY_PET_EMOJIS: Record<number, string> = {
   [PET_TYPE_CAT]: '🐈',
@@ -3510,6 +3820,11 @@ function render(dt: number): void {
     for (const breederShelter of latestSnapshot.breederShelters ?? []) {
       drawBreederShelter(breederShelter);
     }
+  }
+
+  // Draw boss mode PetMall and mills
+  if (latestSnapshot?.bossMode?.active) {
+    drawBossMode(latestSnapshot.bossMode);
   }
 
   for (const pet of latestSnapshot?.pets ?? []) {
@@ -3755,6 +4070,64 @@ function render(dt: number): void {
       minimapCtx.strokeStyle = `rgba(255, 50, 50, ${0.9 + pulse * 0.1})`;
       minimapCtx.lineWidth = 2.5;
       minimapCtx.strokeRect(bx - bHalf, by - bHalf, bHalf * 2, bHalf * 2);
+      minimapCtx.restore();
+    }
+    // Draw boss mode on minimap
+    if (latestSnapshot.bossMode?.active) {
+      const bm = latestSnapshot.bossMode;
+      // Draw PetMall center
+      const mallX = bm.mallX * scale;
+      const mallY = bm.mallY * scale;
+      const mallR = BOSS_PETMALL_RADIUS * scale * 0.6;
+      
+      minimapCtx.save();
+      minimapCtx.strokeStyle = '#ffd700';
+      minimapCtx.lineWidth = 2;
+      minimapCtx.setLineDash([4, 4]);
+      minimapCtx.beginPath();
+      minimapCtx.arc(mallX, mallY, mallR, 0, Math.PI * 2);
+      minimapCtx.stroke();
+      minimapCtx.setLineDash([]);
+      
+      // Draw boss mills
+      for (const mill of bm.mills) {
+        const mx = mill.x * scale;
+        const my = mill.y * scale;
+        const mr = Math.max(6, BOSS_MILL_RADIUS * scale * 0.5);
+        
+        if (mill.completed) {
+          minimapCtx.fillStyle = 'rgba(100, 255, 100, 0.6)';
+        } else if (mill.id === bm.playerAtMill) {
+          minimapCtx.fillStyle = 'rgba(0, 170, 255, 0.8)';
+        } else if (mill.id === bm.tycoonTargetMill) {
+          minimapCtx.fillStyle = 'rgba(255, 100, 100, 0.8)';
+        } else {
+          minimapCtx.fillStyle = 'rgba(139, 69, 19, 0.7)';
+        }
+        
+        minimapCtx.beginPath();
+        minimapCtx.arc(mx, my, mr, 0, Math.PI * 2);
+        minimapCtx.fill();
+        
+        if (!mill.completed) {
+          minimapCtx.strokeStyle = mill.id === bm.playerAtMill ? '#00aaff' : '#ffd700';
+          minimapCtx.lineWidth = 1.5;
+          minimapCtx.stroke();
+        }
+      }
+      
+      // Draw Breeder Tycoon
+      const tx = bm.tycoonX * scale;
+      const ty = bm.tycoonY * scale;
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 150);
+      minimapCtx.shadowColor = '#ff0000';
+      minimapCtx.shadowBlur = 5 + pulse * 5;
+      minimapCtx.fillStyle = '#ff2222';
+      minimapCtx.beginPath();
+      minimapCtx.arc(tx, ty, 5, 0, Math.PI * 2);
+      minimapCtx.fill();
+      minimapCtx.shadowBlur = 0;
+      
       minimapCtx.restore();
     }
     // Draw adoption events on minimap (highly visible with bright pulsing effects)
@@ -4115,6 +4488,9 @@ function render(dt: number): void {
     shelterPortBtnEl.classList.add('hidden');
   }
   
+  // Adopt speed boost button - show when player has boosts available
+  updateAdoptSpeedButton();
+  
   // Transfer button - show when near allied shelter and carrying pets
   let nearbyAlliedShelter: ShelterState | null = null;
   if (me && me.petsInside.length > 0 && !isEliminated && matchPhase === 'playing') {
@@ -4207,6 +4583,9 @@ function render(dt: number): void {
     const secs = totalSec % 60;
     gameClockEl.textContent = `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   }
+  
+  // Boss mode timer overlay
+  updateBossModeTimer();
   
   // Adoption events panel
   const events = latestSnapshot?.adoptionEvents ?? [];
@@ -4480,6 +4859,22 @@ shelterPortBtnEl.addEventListener('click', () => {
   gameWs.send(JSON.stringify({ type: 'useShelterPort' }));
 });
 
+// --- Adopt Speed Boost button ---
+adoptSpeedBtnEl.addEventListener('click', () => {
+  if (breederGame.active || breederWarningVisible) return;
+  if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  if (inMatchAdoptSpeedBoosts <= 0) {
+    showToast('No adopt speed boosts available!', 'info');
+    return;
+  }
+  if (adoptSpeedUsedSeconds >= 300) {
+    showToast('Max 5 minutes used this match!', 'info');
+    return;
+  }
+  if (matchPhase !== 'playing') return;
+  gameWs.send(JSON.stringify({ type: 'useBoost', boostType: 'adoptSpeed' }));
+});
+
 // --- Transfer Pets button ---
 transferBtnEl.addEventListener('click', () => {
   if (breederGame.active || breederWarningVisible) return; // Don't allow during mini-game or warning
@@ -4645,7 +5040,33 @@ document.addEventListener('keydown', (e) => {
       gameWs.send(JSON.stringify({ type: 'useShelterPort' }));
     }
   }
-  
+  // Debug: Force boss mode (Ctrl+Shift+B) - check BEFORE regular B handler
+  if (e.ctrlKey && e.shiftKey && (e.key === 'b' || e.key === 'B')) {
+    e.preventDefault();
+    console.log('[DEBUG] Ctrl+Shift+B pressed, sending debugBossMode');
+    if (gameWs?.readyState === WebSocket.OPEN) {
+      gameWs.send(JSON.stringify({ type: 'debugBossMode' }));
+      showToast('Triggering Boss Mode...', 'info');
+    } else {
+      console.log('[DEBUG] gameWs not open, readyState:', gameWs?.readyState);
+      showToast('Not connected to game server', 'error');
+    }
+    return;
+  }
+  if (e.key === 'b' || e.key === 'B') {
+    // Use adopt speed boost (not during breeder mini-game or warning)
+    if (breederGame.active || breederWarningVisible) return;
+    if (gameWs && gameWs.readyState === WebSocket.OPEN) {
+      if (inMatchAdoptSpeedBoosts <= 0) return;
+      if (adoptSpeedUsedSeconds >= 300) {
+        showToast('Max 5 minutes used this match!', 'info');
+        return;
+      }
+      if (matchPhase !== 'playing') return;
+      gameWs.send(JSON.stringify({ type: 'useBoost', boostType: 'adoptSpeed' }));
+    }
+  }
+
   // Breeder mini-game hotkeys
   if (e.key === 'i' || e.key === 'I') {
     // Instant Rescue [I] - only during active breeder game
@@ -4996,9 +5417,13 @@ document.querySelectorAll('.landing-buy').forEach((btn) => {
       setTokens(tokens - BOOST_PRICES.speed);
       pendingBoosts.speedBoost = true;
     } else if (boost === 'adoptSpeed') {
-      if (tokens < BOOST_PRICES.adoptSpeed || pendingBoosts.adoptSpeed) return;
-      setTokens(tokens - BOOST_PRICES.adoptSpeed);
-      pendingBoosts.adoptSpeed = true;
+      // Purchase adopt speed boost via API (uses stored RT from inventory)
+      if (!isSignedIn) {
+        showToast('Sign in to purchase adopt speed boosts!', 'error');
+        return;
+      }
+      purchaseAdoptSpeedBoost();
+      return;  // Don't call updateLandingTokens, API will refresh
     }
     updateLandingTokens();
   });
@@ -5105,6 +5530,298 @@ colorPickerConfirm?.addEventListener('click', () => {
   updateLandingTokens();
   updateColorUI();
 });
+
+// ============================================
+// BOSS MILL MODAL LOGIC
+// ============================================
+
+const bossMillModal = document.getElementById('boss-mill-modal');
+const bossMillTitle = document.getElementById('boss-mill-title');
+const bossMillDesc = document.getElementById('boss-mill-desc');
+const bossMillPetCount = document.getElementById('boss-mill-pet-count');
+const bossMillPlayerRt = document.getElementById('boss-mill-player-rt');
+const bossMillIngredients = document.getElementById('boss-mill-ingredients');
+const bossMillSubmit = document.getElementById('boss-mill-submit');
+const bossMillFlee = document.getElementById('boss-mill-flee');
+const bossMillClose = document.getElementById('boss-mill-close');
+const bossMillWarning = document.getElementById('boss-mill-warning');
+
+let currentBossMillId: number = -1;
+let bossMillOpen = false;
+let lastPlayerAtMill: number = -1; // Track previous value to detect changes
+
+/** Ingredient emojis for display */
+const INGREDIENT_EMOJIS: Record<string, string> = {
+  bowl: '🥣',
+  water: '💧',
+  carrot: '🥕',
+  apple: '🍎',
+  chicken: '🍗',
+  seeds: '🌾',
+  treat: '🦴',
+};
+
+/** Open the boss mill modal when player enters via proximity (server-driven) */
+function openBossMillModalFromProximity(millId: number): void {
+  const bossMode = latestSnapshot?.bossMode;
+  if (!bossMode?.active) return;
+  
+  const mill = bossMode.mills.find(m => m.id === millId);
+  if (!mill || mill.completed) return;
+  
+  currentBossMillId = millId;
+  bossMillOpen = true;
+  
+  // No need to send enter message - server already knows from proximity detection
+  
+  updateBossMillModal();
+  bossMillModal?.classList.remove('hidden');
+}
+
+/** Close the boss mill modal */
+function closeBossMillModal(): void {
+  bossMillOpen = false;
+  currentBossMillId = -1;
+  bossMillModal?.classList.add('hidden');
+  // No need to send exit message - server handles proximity detection automatically
+}
+
+/** Update the boss mill modal with current data */
+function updateBossMillModal(): void {
+  const bossMode = latestSnapshot?.bossMode;
+  if (!bossMode?.active || currentBossMillId < 0) return;
+  
+  const mill = bossMode.mills.find(m => m.id === currentBossMillId);
+  if (!mill) {
+    closeBossMillModal();
+    return;
+  }
+  
+  // Update title
+  const emoji = BOSS_MILL_EMOJIS[mill.petType] ?? '🐾';
+  const name = BOSS_MILL_NAMES[mill.petType] ?? 'Mill';
+  if (bossMillTitle) bossMillTitle.textContent = `${emoji} ${name}`;
+  if (bossMillDesc) bossMillDesc.textContent = `Prepare a meal to rescue the ${name.toLowerCase().replace(' stable', 's').replace(' boutique', 's').replace(' depot', 's').replace(' barn', 's').replace(' hutch', 's')}!`;
+  if (bossMillPetCount) bossMillPetCount.textContent = String(mill.petCount);
+  
+  // Update player RT
+  const me = latestSnapshot?.players.find(p => p.id === myPlayerId);
+  const playerRt = me?.money ?? 0;
+  if (bossMillPlayerRt) bossMillPlayerRt.textContent = String(playerRt);
+  
+  // Build ingredients list
+  if (bossMillIngredients) {
+    bossMillIngredients.innerHTML = '';
+    let allComplete = true;
+    
+    for (const [ingredient, needed] of Object.entries(mill.recipe)) {
+      const purchased = mill.purchased[ingredient] ?? 0;
+      const isComplete = purchased >= needed;
+      if (!isComplete) allComplete = false;
+      
+      const cost = BOSS_INGREDIENT_COSTS[ingredient] ?? 10;
+      const canAfford = playerRt >= cost;
+      
+      const row = document.createElement('div');
+      row.className = `ingredient-row${isComplete ? ' complete' : ''}`;
+      
+      const emojiSpan = INGREDIENT_EMOJIS[ingredient] ?? '🍽️';
+      
+      row.innerHTML = `
+        <span class="ingredient-name">${emojiSpan} ${ingredient.charAt(0).toUpperCase() + ingredient.slice(1)}</span>
+        <span class="ingredient-progress">${purchased}/${needed}</span>
+        <button class="ingredient-buy" data-ingredient="${ingredient}" ${isComplete || !canAfford ? 'disabled' : ''}>
+          ${isComplete ? '✓' : `+1 (${cost} RT)`}
+        </button>
+      `;
+      
+      bossMillIngredients.appendChild(row);
+    }
+    
+    // Enable/disable submit button
+    if (bossMillSubmit) {
+      (bossMillSubmit as HTMLButtonElement).disabled = !allComplete;
+    }
+  }
+  
+  // Show/hide tycoon warning
+  if (bossMillWarning) {
+    const tycoonAtThisMill = bossMode.tycoonTargetMill === currentBossMillId;
+    const tycoonDist = Math.hypot(bossMode.tycoonX - mill.x, bossMode.tycoonY - mill.y);
+    const isClose = tycoonDist < BOSS_TYCOON_DETECTION_RADIUS * 2;
+    
+    if (tycoonAtThisMill && isClose) {
+      bossMillWarning.classList.remove('hidden');
+    } else {
+      bossMillWarning.classList.add('hidden');
+    }
+  }
+}
+
+/** Purchase an ingredient for the current boss mill */
+function purchaseBossIngredient(ingredient: string, amount: number): void {
+  console.log('[DEBUG] purchaseBossIngredient called:', ingredient, amount);
+  if (gameWs?.readyState === WebSocket.OPEN) {
+    console.log('[DEBUG] Sending bossPurchase message');
+    gameWs.send(JSON.stringify({ type: 'bossPurchase', ingredient, amount }));
+  } else {
+    console.log('[DEBUG] gameWs not open');
+  }
+}
+
+/** Submit the meal to rescue pets */
+function submitBossMeal(): void {
+  if (gameWs?.readyState === WebSocket.OPEN) {
+    gameWs.send(JSON.stringify({ type: 'bossSubmitMeal' }));
+  }
+}
+
+// Event listeners for boss mill modal
+bossMillClose?.addEventListener('click', closeBossMillModal);
+bossMillFlee?.addEventListener('click', closeBossMillModal);
+bossMillSubmit?.addEventListener('click', submitBossMeal);
+
+// Global click debugger for boss mode (temporary)
+document.addEventListener('click', (e) => {
+  const target = e.target as HTMLElement;
+  if (bossMillOpen) {
+    console.log('[DEBUG GLOBAL] Click detected, target:', target.tagName, target.className, target.id);
+  }
+}, true); // Use capture phase
+
+// Event delegation for ingredient buy buttons (since they're recreated on each update)
+// Use pointerdown instead of click because the modal is rebuilt on every snapshot,
+// which can destroy buttons between mousedown and mouseup, preventing click from firing
+bossMillIngredients?.addEventListener('pointerdown', (e) => {
+  console.log('[DEBUG] Ingredients container clicked, target:', e.target);
+  const target = e.target as HTMLElement;
+  console.log('[DEBUG] Target classList:', target.classList, 'disabled:', target.hasAttribute('disabled'));
+  if (target.classList.contains('ingredient-buy')) {
+    if (target.hasAttribute('disabled')) {
+      console.log('[DEBUG] Button is disabled, ignoring');
+      return;
+    }
+    const ingredient = target.getAttribute('data-ingredient');
+    console.log('[DEBUG] Ingredient:', ingredient);
+    if (ingredient) {
+      console.log('[DEBUG] Calling purchaseBossIngredient');
+      purchaseBossIngredient(ingredient, 1);
+    }
+  }
+});
+
+// Handle server responses for boss mode
+function handleBossMessage(msg: { type: string; [key: string]: unknown }): void {
+  console.log('[DEBUG] handleBossMessage:', msg);
+  switch (msg.type) {
+    case 'bossPurchaseResult':
+      console.log('[DEBUG] bossPurchaseResult:', msg);
+      if (!msg.success) {
+        showToast(String(msg.message || 'Purchase failed'), 'error');
+      }
+      // Modal will update on next snapshot
+      break;
+    case 'bossSubmitMealResult':
+      if (msg.success) {
+        closeBossMillModal();
+        // Show celebration
+        if (msg.kpAwarded) {
+          showToast('All mills cleared! +1 Karma Point!', 'success');
+        } else {
+          showToast(String(msg.message), 'success');
+        }
+      } else {
+        showToast(String(msg.message), 'error');
+      }
+      break;
+    case 'karmaAwarded':
+      showToast(`+${msg.amount} Karma Point for Boss Mode Victory!`, 'success');
+      break;
+  }
+}
+
+// Boss mill interaction is now proximity-based (driven by server state)
+// This function is kept for potential future use but currently not used
+function checkBossMillClick(_worldX: number, _worldY: number): boolean {
+  // Click interaction disabled - player must drive to mills
+  return false;
+}
+
+// Boss mode timer elements
+const bossModeTimerEl = document.getElementById('boss-mode-timer');
+const bossTimerTimeEl = document.getElementById('boss-timer-time');
+const bossTimerMillsEl = document.getElementById('boss-timer-mills');
+const bossRadarIndicatorEl = document.getElementById('radar-indicator');
+
+/** Update the boss mode timer overlay */
+function updateBossModeTimer(): void {
+  const bossMode = latestSnapshot?.bossMode;
+  
+  if (!bossMode?.active) {
+    bossModeTimerEl?.classList.add('hidden');
+    return;
+  }
+  
+  bossModeTimerEl?.classList.remove('hidden');
+  
+  // Calculate remaining time
+  const currentTick = latestSnapshot?.tick ?? 0;
+  const elapsedTicks = currentTick - bossMode.startTick;
+  const remainingTicks = Math.max(0, bossMode.timeLimit - elapsedTicks);
+  const remainingSeconds = Math.ceil(remainingTicks / TICK_RATE);
+  const mins = Math.floor(remainingSeconds / 60);
+  const secs = remainingSeconds % 60;
+  
+  if (bossTimerTimeEl) {
+    bossTimerTimeEl.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+    // Add low time warning
+    if (remainingSeconds < 60) {
+      bossTimerTimeEl.classList.add('low');
+    } else {
+      bossTimerTimeEl.classList.remove('low');
+    }
+  }
+  
+  if (bossTimerMillsEl) {
+    bossTimerMillsEl.textContent = `${bossMode.millsCleared}/5 Mills Cleared`;
+  }
+  
+  // Update radar indicator - show tycoon position relative to player
+  if (bossRadarIndicatorEl) {
+    const me = latestSnapshot?.players.find(p => p.id === myPlayerId);
+    if (me) {
+      // Calculate direction from player to tycoon
+      const dx = bossMode.tycoonX - me.x;
+      const dy = bossMode.tycoonY - me.y;
+      const dist = Math.hypot(dx, dy);
+      
+      // Normalize and scale to radar size (30px radius, center at 26px)
+      const maxDist = 1000; // Distance at which indicator is at edge
+      const radarScale = Math.min(1, dist / maxDist);
+      const angle = Math.atan2(dy, dx);
+      
+      const radarCenterX = 26;
+      const radarCenterY = 26;
+      const radarRadius = 22;
+      
+      const indicatorX = radarCenterX + Math.cos(angle) * radarRadius * radarScale;
+      const indicatorY = radarCenterY + Math.sin(angle) * radarRadius * radarScale;
+      
+      bossRadarIndicatorEl.style.left = `${indicatorX}px`;
+      bossRadarIndicatorEl.style.top = `${indicatorY}px`;
+      
+      // Change color based on distance (closer = more red/urgent)
+      const urgency = 1 - radarScale;
+      if (urgency > 0.7) {
+        bossRadarIndicatorEl.style.boxShadow = '0 0 15px #ff0000';
+      } else if (urgency > 0.4) {
+        bossRadarIndicatorEl.style.boxShadow = '0 0 10px #ff6600';
+      } else {
+        bossRadarIndicatorEl.style.boxShadow = '0 0 6px #ff4444';
+      }
+    }
+  }
+}
 
 // --- Landing: music toggle + play on load ---
 if (landingMusicToggleEl) {
@@ -5628,6 +6345,12 @@ function showBreederRewards(tokenBonus: number, rewards: Array<{ type: string; a
     if (r.type === 'speed') rewardLines.push(`<div class="breeder-reward-item">Speed Boost!</div>`);
     if (r.type === 'port') rewardLines.push(`<div class="breeder-reward-item">+${r.amount} Port Charge</div>`);
     if (r.type === 'shelterPort') rewardLines.push(`<div class="breeder-reward-item">+${r.amount} Home Port 🏠</div>`);
+    if (r.type === 'adoptSpeed') {
+      rewardLines.push(`<div class="breeder-reward-item">+${r.amount} Adopt Speed Boost 🚀</div>`);
+      // Update in-match boost count
+      inMatchAdoptSpeedBoosts += r.amount;
+      updateAdoptSpeedButton();
+    }
   });
   
   const title = hasRewards 
@@ -6293,6 +7016,7 @@ async function fetchInventory(): Promise<void> {
     if (!res.ok) return;
     currentInventory = await res.json();
     updateEquipmentPanel();
+    updateLandingTokens();  // Update button disabled states based on inventory
   } catch {
     // Ignore errors
   }
@@ -6322,9 +7046,10 @@ function updateKarmaDisplay(): void {
 }
 
 function updateEquipmentPanel(): void {
-  // RT comes from localStorage tokens (all available for match)
-  const tokens = getTokens();
-  equipRtEl.textContent = formatNumber(tokens);
+  // For signed-in users: show server inventory storedRt
+  // For guests: show localStorage tokens
+  const displayRt = isSignedIn ? currentInventory.storedRt : getTokens();
+  equipRtEl.textContent = formatNumber(displayRt);
   
   // Ports from server inventory (persisted)
   equipPortsEl.textContent = String(currentInventory.portCharges);
@@ -6336,8 +7061,11 @@ function updateEquipmentPanel(): void {
   // Size+ from pending boosts (per-match, not persisted)
   equipSizeEl.textContent = pendingBoosts.sizeBonus > 0 ? `+${pendingBoosts.sizeBonus}` : '0';
   
+  // Adopt speed boosts from inventory (use during match for 60s each)
+  equipAdoptSpeedEl.textContent = String(currentInventory.adoptSpeedBoosts ?? 0);
+  
   if (currentInventory.signedIn) {
-    if (tokens > 0 || currentInventory.portCharges > 0 || pendingBoosts.sizeBonus > 0) {
+    if (displayRt > 0 || currentInventory.portCharges > 0 || pendingBoosts.sizeBonus > 0 || currentInventory.adoptSpeedBoosts > 0) {
       equipNoteEl.textContent = 'Ready for next match!';
     } else {
       equipNoteEl.textContent = 'Earn tokens by winning matches!';
@@ -6360,7 +7088,7 @@ async function withdrawInventory(): Promise<{ rt: number; ports: number }> {
     });
     if (!res.ok) return { rt: 0, ports: 0 };
     const data = await res.json();
-    currentInventory = { storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, signedIn: true };
+    currentInventory = { storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, adoptSpeedBoosts: 0, signedIn: true };
     updateEquipmentPanel();
     return { rt: data.storedRt ?? 0, ports: data.portCharges ?? 0 };
   } catch {
@@ -6383,6 +7111,29 @@ async function depositInventory(rt: number, portCharges: number = 0, isWinner: b
     await fetchInventory();
   } catch {
     // Ignore errors
+  }
+}
+
+/** Purchase an adopt speed boost using stored RT */
+async function purchaseAdoptSpeedBoost(): Promise<void> {
+  try {
+    const res = await fetch('/api/inventory/purchase-boost', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ boostType: 'adoptSpeed' }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showToast(data.error === 'Not enough RT' ? 'Not enough stored RT!' : 'Failed to purchase boost', 'error');
+      return;
+    }
+    currentInventory = data.inventory;
+    updateEquipmentPanel();
+    updateLandingTokens();
+    showToast('Purchased adopt speed boost!', 'success');
+  } catch {
+    showToast('Failed to purchase boost', 'error');
   }
 }
 

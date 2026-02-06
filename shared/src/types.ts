@@ -152,6 +152,81 @@ export interface KarmaBalance {
   karmaPoints: number;
 }
 
+// Boss Mode types
+export const BOSS_MILL_HORSE = 0;
+export const BOSS_MILL_CAT = 1;
+export const BOSS_MILL_DOG = 2;
+export const BOSS_MILL_BIRD = 3;
+export const BOSS_MILL_RABBIT = 4;
+
+/** Ingredient types for boss mode recipes */
+export const INGREDIENT_BOWL = 'bowl';
+export const INGREDIENT_WATER = 'water';
+export const INGREDIENT_CARROT = 'carrot';
+export const INGREDIENT_APPLE = 'apple';
+export const INGREDIENT_CHICKEN = 'chicken';
+export const INGREDIENT_SEEDS = 'seeds';
+export const INGREDIENT_TREAT = 'treat'; // New premium ingredient for cats/dogs
+
+/** A single boss mill in the PetMall */
+export interface BossMill {
+  id: number;
+  /** Pet type for this mill (BOSS_MILL_*) */
+  petType: number;
+  /** Number of pets to rescue */
+  petCount: number;
+  /** Recipe required per pet: { ingredient: amount } */
+  recipe: { [ingredient: string]: number };
+  /** Ingredients purchased so far */
+  purchased: { [ingredient: string]: number };
+  /** True when all pets rescued */
+  completed: boolean;
+  /** Position in the PetMall */
+  x: number;
+  y: number;
+}
+
+/** Boss Mode state for solo matches */
+export interface BossMode {
+  /** Whether boss mode is active */
+  active: boolean;
+  /** Tick when boss mode started */
+  startTick: number;
+  /** Time limit in ticks (5 minutes = 7500 ticks at 25Hz) */
+  timeLimit: number;
+  /** The 5 boss mills */
+  mills: BossMill[];
+  /** Tycoon patrol position */
+  tycoonX: number;
+  tycoonY: number;
+  /** Which mill the tycoon is currently at or heading to (0-4) */
+  tycoonTargetMill: number;
+  /** Tick when tycoon will move to next mill */
+  tycoonMoveAtTick: number;
+  /** Number of mills cleared */
+  millsCleared: number;
+  /** PetMall center position */
+  mallX: number;
+  mallY: number;
+  /** Which mill the player is currently interacting with (-1 = none) */
+  playerAtMill: number;
+}
+
+/** Boss Mode state sent to client (subset for rendering) */
+export interface BossModeState {
+  active: boolean;
+  startTick: number;
+  timeLimit: number;
+  mills: BossMill[];
+  tycoonX: number;
+  tycoonY: number;
+  tycoonTargetMill: number;
+  millsCleared: number;
+  mallX: number;
+  mallY: number;
+  playerAtMill: number;
+}
+
 /** Match end inventory message (sent via WebSocket JSON) */
 export interface MatchEndInventoryMessage {
   type: 'matchEndInventory';
@@ -190,5 +265,7 @@ export interface GameSnapshot {
   breederShelters?: BreederShelterState[];
   /** Active adoption events */
   adoptionEvents?: AdoptionEvent[];
+  /** Boss mode state (solo only) */
+  bossMode?: BossModeState;
   stateHash?: string;
 }

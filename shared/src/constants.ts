@@ -120,3 +120,86 @@ export const VAN_BASE_SIZE = 50;
 
 /** Max pets a van can carry (before building shelter). */
 export const VAN_MAX_CAPACITY = 50;
+
+// ============================================
+// BOSS MODE CONSTANTS
+// ============================================
+
+/** Boss mode time limit in seconds (5 minutes). */
+export const BOSS_MODE_TIME_LIMIT_SECONDS = 180; // 3 minutes
+/** Boss mode time limit in ticks. */
+export const BOSS_MODE_TIME_LIMIT_TICKS = BOSS_MODE_TIME_LIMIT_SECONDS * TICK_RATE;
+
+/** Tycoon patrol time at each mill (seconds). */
+export const BOSS_TYCOON_DWELL_SECONDS = 10;
+/** Tycoon patrol time at each mill (ticks). */
+export const BOSS_TYCOON_DWELL_TICKS = BOSS_TYCOON_DWELL_SECONDS * TICK_RATE;
+/** Tycoon movement speed (units per tick). */
+export const BOSS_TYCOON_SPEED = 8;
+/** Warning time before tycoon arrives (seconds). */
+export const BOSS_TYCOON_WARNING_SECONDS = 3;
+/** Tycoon detection radius at mill. */
+export const BOSS_TYCOON_DETECTION_RADIUS = 150;
+
+/** Ingredient costs in RT. */
+export const BOSS_INGREDIENT_COSTS: { [ingredient: string]: number } = {
+  bowl: 20,
+  water: 20,
+  carrot: 8,
+  apple: 5,
+  chicken: 15,
+  seeds: 5,
+  treat: 25, // Premium ingredient for cats/dogs
+};
+
+/** Pet counts per mill. */
+export const BOSS_MILL_PET_COUNTS: { [millType: number]: number } = {
+  0: 5, // Horse
+  1: 6, // Cat
+  2: 6, // Dog
+  3: 5, // Bird
+  4: 5, // Rabbit
+};
+
+/** Mill names for display. */
+export const BOSS_MILL_NAMES: { [millType: number]: string } = {
+  0: 'Horse Stable',
+  1: 'Cat Boutique',
+  2: 'Dog Depot',
+  3: 'Bird Barn',
+  4: 'Rabbit Hutch',
+};
+
+/** Recipes per pet for each mill type (ingredient -> amount per pet). */
+export const BOSS_MILL_RECIPES: { [millType: number]: { [ingredient: string]: number } } = {
+  0: { bowl: 1, water: 2, carrot: 2, apple: 1 }, // Horse: 6 ingredients per pet
+  1: { bowl: 1, water: 2, chicken: 2, treat: 1 }, // Cat: 6 ingredients per pet
+  2: { bowl: 1, water: 2, chicken: 2, treat: 1 }, // Dog: 6 ingredients per pet
+  3: { bowl: 1, water: 1, seeds: 2, carrot: 1 }, // Bird: 5 ingredients per pet
+  4: { bowl: 1, water: 2, carrot: 2, apple: 1 }, // Rabbit: 6 ingredients per pet
+};
+
+/** PetMall radius (mills arranged around center). */
+export const BOSS_PETMALL_RADIUS = 400;
+
+/** Mill visual radius. */
+export const BOSS_MILL_RADIUS = 100;
+
+/** Rewards for boss mode completion. */
+export const BOSS_MODE_REWARDS = {
+  /** KP awarded for clearing all 5 mills. */
+  fullClearKP: 1,
+  /** RT bonus for clearing all 5 mills. */
+  fullClearRT: 100,
+  /** RT bonus per mill cleared (3-4 mills). */
+  partialClearRT: 50,
+  /** RT bonus per mill cleared (1-2 mills). */
+  minimalClearRT: 25,
+  /** Speed bonus for clearing a mill in under 30 seconds. */
+  speedBonusRT: 20,
+  /** Combo multiplier for consecutive mill clears. */
+  comboMultiplier: 1.5,
+};
+
+/** Penalty for being caught by tycoon (lose this fraction of purchased ingredients). */
+export const BOSS_CAUGHT_PENALTY = 0.5;

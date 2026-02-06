@@ -44,9 +44,19 @@ export function setSfxEnabled(on: boolean): void {
 
 let audioContext: AudioContext | null = null;
 function getContext(): AudioContext | null {
-  if (audioContext) return audioContext;
+  if (audioContext) {
+    // Resume if suspended (browser autoplay policy)
+    if (audioContext.state === 'suspended') {
+      audioContext.resume().catch(() => {});
+    }
+    return audioContext;
+  }
   try {
     audioContext = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+    // Resume immediately in case it starts suspended
+    if (audioContext.state === 'suspended') {
+      audioContext.resume().catch(() => {});
+    }
   } catch {
     return null;
   }
@@ -79,8 +89,67 @@ export function playPickupGrowth(): void {
 }
 
 export function playPickupSpeed(): void {
-  playTone(440, 0.08, 'square', 0.2);
-  setTimeout(() => playTone(880, 0.08, 'square', 0.15), 60);
+  // "Turbo Ignition" - dramatic bass-drop effect for speed boost activation
+  if (!getSfxEnabled()) return;
+  const ctx = getContext();
+  if (!ctx) return;
+  try {
+    // Layer 1: Descending frequency sweep 150Hz down to 60Hz (reverse power-up)
+    const osc1 = ctx.createOscillator();
+    const gain1 = ctx.createGain();
+    osc1.connect(gain1);
+    gain1.connect(ctx.destination);
+    osc1.type = 'sawtooth';
+    osc1.frequency.setValueAtTime(150, ctx.currentTime);
+    osc1.frequency.exponentialRampToValueAtTime(60, ctx.currentTime + 0.12);
+    gain1.gain.setValueAtTime(0.28, ctx.currentTime);
+    gain1.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.18);
+    osc1.start(ctx.currentTime);
+    osc1.stop(ctx.currentTime + 0.18);
+
+    // Layer 2: Square wave punch
+    const osc2 = ctx.createOscillator();
+    const gain2 = ctx.createGain();
+    osc2.connect(gain2);
+    gain2.connect(ctx.destination);
+    osc2.type = 'square';
+    osc2.frequency.value = 100;
+    gain2.gain.setValueAtTime(0.20, ctx.currentTime);
+    gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.08);
+    osc2.start(ctx.currentTime);
+    osc2.stop(ctx.currentTime + 0.08);
+
+    // Layer 3: Rising harmonic triangle (delayed)
+    setTimeout(() => {
+      const ctx2 = getContext();
+      if (!ctx2) return;
+      const osc3 = ctx2.createOscillator();
+      const gain3 = ctx2.createGain();
+      osc3.connect(gain3);
+      gain3.connect(ctx2.destination);
+      osc3.type = 'triangle';
+      osc3.frequency.setValueAtTime(200, ctx2.currentTime);
+      osc3.frequency.exponentialRampToValueAtTime(400, ctx2.currentTime + 0.10);
+      gain3.gain.setValueAtTime(0.18, ctx2.currentTime);
+      gain3.gain.exponentialRampToValueAtTime(0.001, ctx2.currentTime + 0.12);
+      osc3.start(ctx2.currentTime);
+      osc3.stop(ctx2.currentTime + 0.12);
+    }, 40);
+
+    // Layer 4: Sub-bass rumble
+    const osc4 = ctx.createOscillator();
+    const gain4 = ctx.createGain();
+    osc4.connect(gain4);
+    gain4.connect(ctx.destination);
+    osc4.type = 'sine';
+    osc4.frequency.value = 50;
+    gain4.gain.setValueAtTime(0.22, ctx.currentTime);
+    gain4.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+    osc4.start(ctx.currentTime);
+    osc4.stop(ctx.currentTime + 0.15);
+  } catch {
+    // ignore
+  }
 }
 
 export function playAdoption(): void {
@@ -90,16 +159,27 @@ export function playAdoption(): void {
 }
 
 export function playDropOff(): void {
-  // Happy "cha-ching" sound for dropping off pets at adoption center
-  playTone(523, 0.08, 'sine', 0.22);
-  setTimeout(() => playTone(659, 0.08, 'sine', 0.2), 60);
-  setTimeout(() => playTone(784, 0.1, 'sine', 0.22), 120);
-  setTimeout(() => playTone(1047, 0.12, 'sine', 0.18), 180);
+  // "Karma Reward" - deep satisfying impact with rewarding chord progression
+  // Layer 1: Deep bass punch for impact
+  playTone(65, 0.15, 'sawtooth', 0.30);
+  // Layer 2: Sub-bass rumble (felt more than heard)
+  playTone(40, 0.20, 'sine', 0.20);
+  // Layer 3: Reward chord - staggered triangle tones
+  setTimeout(() => playTone(330, 0.12, 'triangle', 0.18), 80);
+  setTimeout(() => playTone(415, 0.12, 'triangle', 0.15), 120);
+  setTimeout(() => playTone(523, 0.14, 'triangle', 0.18), 160);
+  // Layer 4: High shimmer coin-like finish
+  setTimeout(() => playTone(880, 0.10, 'sine', 0.08), 200);
 }
 
 export function playStrayCollected(): void {
-  // Soft "boop" when picking up a stray
-  playTone(330, 0.06, 'sine', 0.18);
+  // "Karma Pulse" - satisfying bass thump with warm harmonics for rescue feeling
+  // Layer 1: Deep bass hit - the heartbeat of rescue
+  playTone(80, 0.12, 'sawtooth', 0.25);
+  // Layer 2: Warm body tone (delayed 20ms)
+  setTimeout(() => playTone(220, 0.10, 'sine', 0.18), 20);
+  // Layer 3: Subtle sparkle overtone (delayed 40ms)
+  setTimeout(() => playTone(660, 0.08, 'triangle', 0.10), 40);
 }
 
 export function playPickupBoost(): void {
@@ -164,6 +244,269 @@ export function playPort(): void {
     // ignore
   }
 }
+
+// ============================================================================
+// ENGINE SOUND SYSTEM - Continuous van movement audio
+// ============================================================================
+
+interface EngineNodes {
+  baseOsc: OscillatorNode;
+  harmonicOsc: OscillatorNode;
+  lfo: OscillatorNode;
+  masterGain: GainNode;
+  baseGain: GainNode;
+  harmonicGain: GainNode;
+  noiseSource: AudioBufferSourceNode | null;
+  noiseGain: GainNode | null;
+}
+
+let engineNodes: EngineNodes | null = null;
+let boostEngineNodes: EngineNodes | null = null;
+let engineState: 'off' | 'normal' | 'boost' = 'off';
+
+function createNoiseBuffer(ctx: AudioContext, duration: number): AudioBuffer {
+  const sampleRate = ctx.sampleRate;
+  const length = sampleRate * duration;
+  const buffer = ctx.createBuffer(1, length, sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < length; i++) {
+    data[i] = Math.random() * 2 - 1;
+  }
+  return buffer;
+}
+
+function createEngineNodes(ctx: AudioContext, isBoost: boolean): EngineNodes {
+  // Configuration based on boost state
+  const baseFreq = isBoost ? 110 : 75;
+  const harmonicFreq = isBoost ? 220 : 150;
+  const lfoFreq = isBoost ? 8 : 4;
+  const volume = isBoost ? 0.14 : 0.12;
+
+  // Master gain for fade in/out
+  const masterGain = ctx.createGain();
+  masterGain.gain.value = 0;
+  masterGain.connect(ctx.destination);
+
+  // Base oscillator - sawtooth for engine growl
+  const baseOsc = ctx.createOscillator();
+  const baseGain = ctx.createGain();
+  baseOsc.type = 'sawtooth';
+  baseOsc.frequency.value = baseFreq;
+  baseGain.gain.value = volume;
+  baseOsc.connect(baseGain);
+  baseGain.connect(masterGain);
+
+  // Harmonic oscillator - triangle for richness
+  const harmonicOsc = ctx.createOscillator();
+  const harmonicGain = ctx.createGain();
+  harmonicOsc.type = 'triangle';
+  harmonicOsc.frequency.value = harmonicFreq;
+  harmonicGain.gain.value = volume * 0.3;
+  harmonicOsc.connect(harmonicGain);
+  harmonicGain.connect(masterGain);
+
+  // LFO for engine pulse rhythm
+  const lfo = ctx.createOscillator();
+  const lfoGain = ctx.createGain();
+  lfo.type = 'sine';
+  lfo.frequency.value = lfoFreq;
+  lfoGain.gain.value = volume * 0.3; // Modulation depth
+  lfo.connect(lfoGain);
+  lfoGain.connect(baseGain.gain);
+
+  // Add extra harmonic for boost mode
+  if (isBoost) {
+    const extraOsc = ctx.createOscillator();
+    const extraGain = ctx.createGain();
+    extraOsc.type = 'sine';
+    extraOsc.frequency.value = 330;
+    extraGain.gain.value = volume * 0.2;
+    extraOsc.connect(extraGain);
+    extraGain.connect(masterGain);
+    extraOsc.start();
+  }
+
+  // Filtered noise for road/air texture
+  let noiseSource: AudioBufferSourceNode | null = null;
+  let noiseGain: GainNode | null = null;
+  try {
+    const noiseBuffer = createNoiseBuffer(ctx, 2);
+    noiseSource = ctx.createBufferSource();
+    noiseSource.buffer = noiseBuffer;
+    noiseSource.loop = true;
+
+    // Filter the noise - lowpass for road, bandpass for boost whoosh
+    const noiseFilter = ctx.createBiquadFilter();
+    if (isBoost) {
+      noiseFilter.type = 'bandpass';
+      noiseFilter.frequency.value = 500;
+      noiseFilter.Q.value = 0.7;
+    } else {
+      noiseFilter.type = 'lowpass';
+      noiseFilter.frequency.value = 200;
+    }
+
+    noiseGain = ctx.createGain();
+    noiseGain.gain.value = isBoost ? 0.06 : 0.03;
+
+    noiseSource.connect(noiseFilter);
+    noiseFilter.connect(noiseGain);
+    noiseGain.connect(masterGain);
+    noiseSource.start();
+  } catch {
+    // Noise is optional, ignore errors
+  }
+
+  // Start oscillators
+  baseOsc.start();
+  harmonicOsc.start();
+  lfo.start();
+
+  return {
+    baseOsc,
+    harmonicOsc,
+    lfo,
+    masterGain,
+    baseGain,
+    harmonicGain,
+    noiseSource,
+    noiseGain,
+  };
+}
+
+function fadeInEngine(nodes: EngineNodes, ctx: AudioContext): void {
+  const now = ctx.currentTime;
+  nodes.masterGain.gain.setValueAtTime(0, now);
+  nodes.masterGain.gain.linearRampToValueAtTime(1, now + 0.1);
+}
+
+function fadeOutEngine(nodes: EngineNodes, ctx: AudioContext, callback?: () => void): void {
+  const now = ctx.currentTime;
+  nodes.masterGain.gain.setValueAtTime(nodes.masterGain.gain.value, now);
+  nodes.masterGain.gain.linearRampToValueAtTime(0, now + 0.1);
+  
+  // Cleanup after fade
+  setTimeout(() => {
+    try {
+      nodes.baseOsc.stop();
+      nodes.harmonicOsc.stop();
+      nodes.lfo.stop();
+      if (nodes.noiseSource) nodes.noiseSource.stop();
+      nodes.baseOsc.disconnect();
+      nodes.harmonicOsc.disconnect();
+      nodes.lfo.disconnect();
+      nodes.masterGain.disconnect();
+      if (nodes.noiseSource) nodes.noiseSource.disconnect();
+    } catch {
+      // ignore cleanup errors
+    }
+    if (callback) callback();
+  }, 120);
+}
+
+export function startEngineLoop(): void {
+  if (!getSfxEnabled()) return;
+  if (engineState === 'normal') return;
+  
+  const ctx = getContext();
+  if (!ctx) return;
+
+  try {
+    // Stop boost engine if running
+    if (engineState === 'boost' && boostEngineNodes) {
+      fadeOutEngine(boostEngineNodes, ctx, () => {
+        boostEngineNodes = null;
+      });
+    }
+
+    // Create and start normal engine
+    engineNodes = createEngineNodes(ctx, false);
+    fadeInEngine(engineNodes, ctx);
+    engineState = 'normal';
+  } catch {
+    // ignore
+  }
+}
+
+export function stopEngineLoop(): void {
+  const ctx = getContext();
+  if (!ctx) return;
+
+  try {
+    if (engineNodes) {
+      fadeOutEngine(engineNodes, ctx, () => {
+        engineNodes = null;
+      });
+    }
+    if (boostEngineNodes) {
+      fadeOutEngine(boostEngineNodes, ctx, () => {
+        boostEngineNodes = null;
+      });
+    }
+    engineState = 'off';
+  } catch {
+    // ignore
+  }
+}
+
+export function startBoostEngineLoop(): void {
+  if (!getSfxEnabled()) return;
+  if (engineState === 'boost') return;
+
+  const ctx = getContext();
+  if (!ctx) return;
+
+  try {
+    // Stop normal engine if running
+    if (engineState === 'normal' && engineNodes) {
+      fadeOutEngine(engineNodes, ctx, () => {
+        engineNodes = null;
+      });
+    }
+
+    // Create and start boost engine
+    boostEngineNodes = createEngineNodes(ctx, true);
+    fadeInEngine(boostEngineNodes, ctx);
+    engineState = 'boost';
+  } catch {
+    // ignore
+  }
+}
+
+export function stopBoostEngineLoop(): void {
+  // Transition back to normal engine if we were boosting
+  if (engineState === 'boost') {
+    startEngineLoop();
+  }
+}
+
+/**
+ * Update engine state based on movement and boost status.
+ * Call this from the game loop.
+ */
+export function updateEngineState(isMoving: boolean, isBoosted: boolean): void {
+  if (!isMoving) {
+    if (engineState !== 'off') {
+      stopEngineLoop();
+    }
+    return;
+  }
+
+  // Moving - determine which engine to use
+  if (isBoosted) {
+    if (engineState !== 'boost') {
+      startBoostEngineLoop();
+    }
+  } else {
+    if (engineState !== 'normal') {
+      startEngineLoop();
+    }
+  }
+}
+
+// ============================================================================
+// MUSIC SYSTEM
+// ============================================================================
 
 let musicAudio: HTMLAudioElement | null = null;
 function getMusicUrl(): string {

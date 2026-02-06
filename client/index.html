@@ -163,7 +163,7 @@
     }
     #carried { font: 600 14px Rubik, sans-serif; color: #ffd93d; }
     #tag-cooldown { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.7); }
-    .ground-btn, .port-btn, .shelter-port-btn, .build-shelter-btn {
+    .ground-btn, .port-btn, .shelter-port-btn, .build-shelter-btn, .adopt-speed-btn {
       position: absolute; bottom: 90px; padding: 8px 12px; border-radius: 8px;
       font: 700 12px Rubik, sans-serif; cursor: pointer; border: 2px solid;
       box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: all 0.15s;
@@ -174,13 +174,17 @@
     .port-btn:hover { background: rgba(80,50,100,0.9); transform: translateY(-2px); }
     .shelter-port-btn { right: 105px; background: rgba(20,60,50,0.85); color: #10b981; border-color: #047857; }
     .shelter-port-btn:hover { background: rgba(30,80,60,0.9); transform: translateY(-2px); }
+    .adopt-speed-btn { right: 300px; background: rgba(80,50,20,0.85); color: #f59e0b; border-color: #d97706; }
+    .adopt-speed-btn:hover { background: rgba(100,70,30,0.9); transform: translateY(-2px); }
+    .adopt-speed-btn.active { background: rgba(120,80,30,0.95); border-color: #fbbf24; animation: adoptSpeedPulse 1s infinite; }
+    @keyframes adoptSpeedPulse { 0%, 100% { box-shadow: 0 0 8px rgba(251,191,36,0.5); } 50% { box-shadow: 0 0 16px rgba(251,191,36,0.8); } }
     .transfer-btn { right: 400px; background: #3b82f6; color: #fff; border-color: #2563eb; }
     .transfer-btn:hover { background: #2563eb; transform: translateY(-2px); }
     .transfer-btn.hidden { display: none; }
     .build-shelter-btn { right: 16px; background: rgba(60,55,30,0.85); color: #ffd93d; border-color: #e6c235; }
     .build-shelter-btn:hover { background: rgba(80,70,40,0.9); transform: translateY(-2px); }
     .build-shelter-btn:disabled { background: rgba(50,50,50,0.7); border-color: #666; cursor: not-allowed; opacity: 0.6; color: #888; }
-    .ground-btn.hidden, .port-btn.hidden, .shelter-port-btn.hidden, .build-shelter-btn.hidden, .center-van-btn.hidden { display: none; }
+    .ground-btn.hidden, .port-btn.hidden, .shelter-port-btn.hidden, .build-shelter-btn.hidden, .center-van-btn.hidden, .adopt-speed-btn.hidden { display: none; }
     .center-van-btn, .center-shelter-btn { position: absolute; bottom: 90px; padding: 8px 12px; border-radius: 8px; font: 700 11px Rubik, sans-serif; cursor: pointer; border: 2px solid; box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: all 0.15s; }
     .center-van-btn { right: 300px; border-color: #888; background: rgba(50,60,80,0.9); color: #fff; }
     .center-van-btn:hover { background: rgba(70,80,100,0.95); transform: translateY(-2px); }
@@ -752,6 +756,10 @@
                   <span class="equip-icon">📦</span>
                   <span class="equip-value" id="equip-size">0</span>
                 </div>
+                <div class="equip-item" data-tooltip="Adopt Speed Boosts - Faster adoptions (use in-match)">
+                  <span class="equip-icon">🚀</span>
+                  <span class="equip-value" id="equip-adopt-speed">0</span>
+                </div>
               </div>
             </div>
             <div class="equipment-note" id="equip-note">Sign in to save equipment</div>
@@ -1089,6 +1097,7 @@
     <button type="button" id="ground-btn" class="ground-btn hidden">Ground Here</button>
     <button type="button" id="port-btn" class="port-btn hidden">Random [P] (0)</button>
     <button type="button" id="shelter-port-btn" class="shelter-port-btn hidden">Home [H] (0)</button>
+    <button type="button" id="adopt-speed-btn" class="adopt-speed-btn hidden">Adopt Speed [B] (0)</button>
     <button type="button" id="transfer-btn" class="transfer-btn hidden">Transfer [T] 🤝</button>
     <button type="button" id="center-van-btn" class="center-van-btn hidden">📍 Van</button>
     <button type="button" id="center-shelter-btn" class="center-shelter-btn hidden">🏠 Shelter</button>
@@ -1125,6 +1134,315 @@
       </div>
     </div>
   </div>
+  
+  <!-- Boss Mode Timer Overlay -->
+  <div id="boss-mode-timer" class="boss-mode-timer hidden">
+    <div class="boss-timer-content">
+      <div class="boss-timer-title">BOSS MODE</div>
+      <div class="boss-timer-time" id="boss-timer-time">5:00</div>
+      <div class="boss-timer-mills" id="boss-timer-mills">0/5 Mills Cleared</div>
+    </div>
+    <div class="boss-radar" id="boss-radar">
+      <div class="radar-label">Tycoon</div>
+      <div class="radar-indicator" id="radar-indicator"></div>
+    </div>
+  </div>
+  
+  <!-- Boss Mill Modal -->
+  <div id="boss-mill-modal" class="boss-mill-modal hidden">
+    <div class="boss-mill-content">
+      <div class="boss-mill-header">
+        <h2 id="boss-mill-title">🐴 Horse Stable</h2>
+        <span class="boss-mill-close" id="boss-mill-close">&times;</span>
+      </div>
+      <div class="boss-mill-body">
+        <div class="boss-mill-info">
+          <p id="boss-mill-desc">Prepare a meal to rescue the horses!</p>
+          <p id="boss-mill-pets-info">Pets to rescue: <span id="boss-mill-pet-count">5</span></p>
+          <p id="boss-mill-rt-info">Your RT: <span id="boss-mill-player-rt">0</span></p>
+        </div>
+        <div class="boss-mill-recipe">
+          <h3>Required Ingredients</h3>
+          <div id="boss-mill-ingredients"></div>
+        </div>
+        <div class="boss-mill-actions">
+          <button type="button" id="boss-mill-submit" class="boss-mill-submit" disabled>Submit Meal</button>
+          <button type="button" id="boss-mill-flee" class="boss-mill-flee">Flee (Close)</button>
+        </div>
+        <div class="boss-mill-warning hidden" id="boss-mill-warning">
+          <span class="warning-icon">⚠️</span>
+          <span class="warning-text">Breeder Tycoon approaching!</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <style>
+    /* Boss Mode Timer Overlay Styles */
+    .boss-mode-timer {
+      position: fixed;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      background: linear-gradient(135deg, rgba(139, 69, 19, 0.9), rgba(50, 25, 10, 0.95));
+      border: 2px solid #ffd700;
+      border-radius: 12px;
+      padding: 10px 20px;
+      z-index: 100;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    }
+    .boss-mode-timer.hidden {
+      display: none;
+    }
+    .boss-timer-content {
+      text-align: center;
+    }
+    .boss-timer-title {
+      color: #ffd700;
+      font-size: 12px;
+      font-weight: bold;
+      letter-spacing: 2px;
+      margin-bottom: 2px;
+    }
+    .boss-timer-time {
+      color: #fff;
+      font-size: 28px;
+      font-weight: bold;
+      font-family: 'Courier New', monospace;
+    }
+    .boss-timer-time.low {
+      color: #ff4444;
+      animation: pulse-timer 0.5s infinite;
+    }
+    .boss-timer-mills {
+      color: #90ee90;
+      font-size: 12px;
+    }
+    @keyframes pulse-timer {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .boss-radar {
+      width: 60px;
+      height: 60px;
+      background: radial-gradient(circle, rgba(0,0,0,0.8) 0%, rgba(50,50,50,0.6) 100%);
+      border: 2px solid #666;
+      border-radius: 50%;
+      position: relative;
+      overflow: hidden;
+    }
+    .radar-label {
+      position: absolute;
+      top: 2px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: #888;
+      font-size: 8px;
+      text-transform: uppercase;
+    }
+    .radar-indicator {
+      position: absolute;
+      width: 8px;
+      height: 8px;
+      background: #ff4444;
+      border-radius: 50%;
+      box-shadow: 0 0 10px #ff0000;
+      transition: all 0.2s;
+    }
+    
+    /* Boss Mill Modal Styles */
+    .boss-mill-modal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.85);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 1000;
+    }
+    .boss-mill-modal.hidden {
+      display: none;
+    }
+    .boss-mill-content {
+      background: linear-gradient(135deg, #2d1f1f 0%, #1a1212 100%);
+      border: 3px solid #8b4513;
+      border-radius: 16px;
+      padding: 0;
+      max-width: 450px;
+      width: 90%;
+      box-shadow: 0 0 40px rgba(139, 69, 19, 0.5);
+      pointer-events: auto;
+      position: relative;
+    }
+    .boss-mill-header {
+      background: linear-gradient(90deg, #8b4513, #654321);
+      padding: 16px 20px;
+      border-radius: 12px 12px 0 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .boss-mill-header h2 {
+      margin: 0;
+      color: #ffd700;
+      font-size: 1.5rem;
+    }
+    .boss-mill-close {
+      color: #fff;
+      font-size: 28px;
+      cursor: pointer;
+      opacity: 0.7;
+      transition: opacity 0.2s;
+    }
+    .boss-mill-close:hover {
+      opacity: 1;
+    }
+    .boss-mill-body {
+      padding: 20px;
+    }
+    .boss-mill-info {
+      margin-bottom: 20px;
+      color: #ccc;
+    }
+    .boss-mill-info p {
+      margin: 8px 0;
+    }
+    .boss-mill-info span {
+      color: #ffd700;
+      font-weight: bold;
+    }
+    .boss-mill-recipe h3 {
+      color: #ffd700;
+      margin: 0 0 12px 0;
+      font-size: 1.1rem;
+    }
+    #boss-mill-ingredients {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .ingredient-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(255, 255, 255, 0.05);
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .ingredient-row.complete {
+      background: rgba(100, 200, 100, 0.2);
+      border-color: #4CAF50;
+    }
+    .ingredient-name {
+      color: #fff;
+      font-weight: 500;
+      flex: 1;
+    }
+    .ingredient-progress {
+      color: #ffd700;
+      margin: 0 16px;
+      min-width: 60px;
+      text-align: center;
+    }
+    .ingredient-row.complete .ingredient-progress {
+      color: #4CAF50;
+    }
+    .ingredient-buy {
+      background: linear-gradient(135deg, #4CAF50, #388E3C);
+      color: white;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: all 0.2s;
+      pointer-events: auto;
+      position: relative;
+      z-index: 10;
+    }
+    .ingredient-buy:hover:not(:disabled) {
+      transform: scale(1.05);
+      box-shadow: 0 2px 10px rgba(76, 175, 80, 0.4);
+    }
+    .ingredient-buy:disabled {
+      background: #444;
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+    .boss-mill-actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 24px;
+    }
+    .boss-mill-submit {
+      flex: 2;
+      background: linear-gradient(135deg, #ffd700, #daa520);
+      color: #1a1a1a;
+      border: none;
+      padding: 14px 20px;
+      border-radius: 8px;
+      font-size: 1.1rem;
+      font-weight: bold;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .boss-mill-submit:hover:not(:disabled) {
+      transform: scale(1.02);
+      box-shadow: 0 4px 20px rgba(255, 215, 0, 0.4);
+    }
+    .boss-mill-submit:disabled {
+      background: #555;
+      color: #888;
+      cursor: not-allowed;
+    }
+    .boss-mill-flee {
+      flex: 1;
+      background: rgba(255, 68, 68, 0.2);
+      color: #ff6666;
+      border: 2px solid #ff4444;
+      padding: 14px 20px;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: bold;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .boss-mill-flee:hover {
+      background: rgba(255, 68, 68, 0.4);
+    }
+    .boss-mill-warning {
+      margin-top: 16px;
+      padding: 12px;
+      background: rgba(255, 68, 68, 0.3);
+      border: 2px solid #ff4444;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      animation: pulse-warning 0.5s infinite;
+    }
+    .boss-mill-warning.hidden {
+      display: none;
+    }
+    .warning-icon {
+      font-size: 1.5rem;
+    }
+    .warning-text {
+      color: #ff6666;
+      font-weight: bold;
+    }
+    @keyframes pulse-warning {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+  </style>
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <script type="module" src="/src/main.ts"></script>

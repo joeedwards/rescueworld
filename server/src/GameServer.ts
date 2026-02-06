@@ -327,9 +327,11 @@ setInterval(() => {
 }, 10000);
 
 function createMatch(mode: 'ffa' | 'solo' | 'teams'): Match {
+  const world = new World();
+  world.setMatchMode(mode); // Set match mode for boss mode trigger in solo
   const match: Match = {
     id: generateMatchId(),
-    world: new World(),
+    world,
     phase: 'lobby',
     mode,
     countdownEndAt: 0,
@@ -479,9 +481,10 @@ function removePlayerFromMatch(playerId: string, matchId: string): void {
     const durationSeconds = Math.floor((snap.matchDurationMs ?? 0) / 1000);
     const isWinner = !isStrayLoss && snap.winnerId === playerId;
     
-    if (finalRT > 0 || portCharges > 0 || shelterPortCharges > 0) {
-      depositAfterMatch(userId, finalRT, portCharges, shelterPortCharges, 0, 0);
-      log(`Solo match ended on leave - deposited ${finalRT} RT, ${portCharges} ports for ${userId}`);
+    const adoptSpeedBoosts = isStrayLoss ? 0 : match.world.getAdoptSpeedBoosts(playerId);
+    if (finalRT > 0 || portCharges > 0 || shelterPortCharges > 0 || adoptSpeedBoosts > 0) {
+      depositAfterMatch(userId, finalRT, portCharges, shelterPortCharges, 0, 0, adoptSpeedBoosts);
+      log(`Solo match ended on leave - deposited ${finalRT} RT, ${portCharges} ports, ${adoptSpeedBoosts} adopt speed for ${userId}`);
     }
     
     if (isStrayLoss) {
@@ -572,9 +575,10 @@ function removePlayerFromMatch(playerId: string, matchId: string): void {
       const quitPlayerState = snap.players.find(p => p.id === playerId);
       const adoptions = quitPlayerState?.totalAdoptions ?? 0;
       const durationSeconds = Math.floor((snap.matchDurationMs ?? 0) / 1000);
-      if (playerMoney > 0 || portCharges > 0 || shelterPortCharges > 0) {
-        depositAfterMatch(userId, playerMoney, portCharges, shelterPortCharges, 0, 0);
-        log(`Player ${playerId} disconnected - deposited ${playerMoney} RT, ${portCharges} ports, ${shelterPortCharges} home ports for ${userId}`);
+      const adoptSpeedBoosts = match.world.getAdoptSpeedBoosts(playerId);
+      if (playerMoney > 0 || portCharges > 0 || shelterPortCharges > 0 || adoptSpeedBoosts > 0) {
+        depositAfterMatch(userId, playerMoney, portCharges, shelterPortCharges, 0, 0, adoptSpeedBoosts);
+        log(`Player ${playerId} disconnected - deposited ${playerMoney} RT, ${portCharges} ports, ${shelterPortCharges} home ports, ${adoptSpeedBoosts} adopt speed for ${userId}`);
       }
       if (playerMoney > 0) {
         recordMatchLoss(userId, playerMoney);
@@ -612,21 +616,30 @@ wss.on('connection', async (ws) => {
     displayName = name;
     playerAdded = true;
     
+    // Withdraw inventory NOW - only when we're definitely adding to a valid match
+    let startingAdoptSpeedBoosts = 0;
+    if (playerUserId && !startingInventory) {
+      startingInventory = withdrawForMatch(playerUserId);
+      startingRT = startingInventory.storedRt;
+      startingPorts = startingInventory.portCharges;
+      startingShelterTier3Boosts = startingInventory.shelterTier3Boosts ?? 0;
+      startingAdoptSpeedBoosts = startingInventory.adoptSpeedBoosts ?? 0;
+      log(`Registered user ${playerUserId} withdrawing: ${startingRT} RT, ${startingPorts} ports, ${startingAdoptSpeedBoosts} adopt speed`);
+    }
     if (playerUserId) {
       match.playerUserIds.set(effectivePlayerId, playerUserId);
       if (startingInventory) {
         match.playerStartingInventory.set(effectivePlayerId, startingInventory);
-        startingShelterTier3Boosts = startingInventory.shelterTier3Boosts ?? 0;
       }
     }
     
     log(`player joined match id=${match.id} playerId=${effectivePlayerId} displayName=${name} startingRT=${startingRT}`);
-    match.world.addPlayer(effectivePlayerId, name, startingRT, startingPorts, startingShelterTier3Boosts);
+    match.world.addPlayer(effectivePlayerId, name, startingRT, startingPorts, startingShelterTier3Boosts, startingAdoptSpeedBoosts);
     match.players.set(effectivePlayerId, ws);
     playerToMatch.set(effectivePlayerId, match.id);
     currentMatchId = match.id;
     
-    ws.send(JSON.stringify({ type: 'welcome', playerId: effectivePlayerId, displayName, matchId: match.id, startingRT, startingPorts }));
+    ws.send(JSON.stringify({ type: 'welcome', playerId: effectivePlayerId, displayName, matchId: match.id, startingRT, startingPorts, adoptSpeedBoosts: startingAdoptSpeedBoosts }));
   };
 
   const resumeSoloMatch = (match: Match) => {
@@ -694,14 +707,11 @@ wss.on('connection', async (ws) => {
           const rejoinMatchId = typeof msg.rejoinMatchId === 'string' ? msg.rejoinMatchId : null;
           
           // Check if client sent userId for registered user
+          // NOTE: Don't withdraw inventory here! We need to validate the match first.
+          // Inventory withdrawal happens in addPlayerToMatch after confirming match is valid.
           if (typeof msg.userId === 'string' && msg.userId.startsWith('u-')) {
-            const userId = msg.userId as string;
-            playerUserId = userId;
-            // Withdraw inventory from database
-            startingInventory = withdrawForMatch(userId);
-            startingRT = startingInventory.storedRt;
-            startingPorts = startingInventory.portCharges;
-            log(`Registered user ${userId} withdrawing: ${startingRT} RT, ${startingPorts} ports`);
+            playerUserId = msg.userId as string;
+            log(`Registered user ${playerUserId} connecting...`);
           } else {
             // Fallback: accept from client for backwards compatibility (guests)
             if (typeof msg.startingRT === 'number' && msg.startingRT > 0) {
@@ -1118,12 +1128,26 @@ wss.on('connection', async (ws) => {
           return;
         }
         
-        if (msg.type === 'startingBoosts' && (typeof msg.sizeBonus === 'number' || msg.speedBoost || msg.adoptSpeed)) {
+        if (msg.type === 'startingBoosts' && (typeof msg.sizeBonus === 'number' || msg.speedBoost || typeof msg.adoptSpeedBoosts === 'number')) {
           match.world.applyStartingBoosts(effectivePlayerId, {
             sizeBonus: typeof msg.sizeBonus === 'number' ? msg.sizeBonus : 0,
             speedBoost: !!msg.speedBoost,
-            adoptSpeed: !!msg.adoptSpeed,
+            adoptSpeedBoosts: typeof msg.adoptSpeedBoosts === 'number' ? msg.adoptSpeedBoosts : 0,
           });
+          return;
+        }
+        
+        // Use adopt speed boost during match
+        if (msg.type === 'useBoost' && msg.boostType === 'adoptSpeed') {
+          const result = match.world.useAdoptSpeedBoost(effectivePlayerId);
+          ws.send(JSON.stringify({
+            type: 'boostUsed',
+            boostType: 'adoptSpeed',
+            success: result.success,
+            remainingBoosts: result.remainingBoosts,
+            activeUntilTick: result.activeUntilTick,
+            usedSeconds: result.usedSeconds,
+          }));
           return;
         }
         
@@ -1203,6 +1227,54 @@ wss.on('connection', async (ws) => {
             tokenBonus: finalTokenBonus,
             rewards: result.rewards,
           }));
+          return;
+        }
+
+        // Boss Mode: Enter/Exit mills is now handled automatically via proximity detection in World.updateBossMillProximity()
+
+        // Debug: Force enter boss mode (for testing)
+        if (msg.type === 'debugBossMode') {
+          log(`[DEBUG] Boss mode trigger requested. Match mode: ${match.mode}`);
+          if (match.mode !== 'solo') {
+            log(`[DEBUG] Boss mode rejected - match mode is '${match.mode}', not 'solo'`);
+            ws.send(JSON.stringify({ type: 'debugBossModeResult', success: false, reason: 'not solo mode' }));
+            return;
+          }
+          const success = match.world.debugEnterBossMode();
+          log(`[DEBUG] Boss mode trigger result: ${success}`);
+          ws.send(JSON.stringify({ type: 'debugBossModeResult', success }));
+          return;
+        }
+
+        // Boss Mode: Purchase ingredient
+        if (msg.type === 'bossPurchase' && typeof msg.ingredient === 'string' && typeof msg.amount === 'number') {
+          log(`[DEBUG] bossPurchase received: ingredient=${msg.ingredient}, amount=${msg.amount}`);
+          if (match.mode !== 'solo') return;
+          const result = match.world.purchaseBossIngredient(effectivePlayerId, msg.ingredient, msg.amount);
+          log(`[DEBUG] bossPurchase result: ${JSON.stringify(result)}`);
+          ws.send(JSON.stringify({ type: 'bossPurchaseResult', ...result }));
+          return;
+        }
+
+        // Boss Mode: Submit meal to rescue pets
+        if (msg.type === 'bossSubmitMeal') {
+          if (match.mode !== 'solo') return;
+          const result = match.world.submitBossMeal(effectivePlayerId);
+          ws.send(JSON.stringify({ type: 'bossSubmitMealResult', ...result }));
+          
+          // If full victory (5 mills cleared), award Karma Point
+          if (result.kpAwarded) {
+            const userId = match.playerUserIds.get(effectivePlayerId);
+            if (userId) {
+              try {
+                awardKarmaPoints(userId, 1, 'boss_mode_victory');
+                log(`Awarded 1 KP to ${userId} for boss mode victory`);
+                ws.send(JSON.stringify({ type: 'karmaAwarded', amount: 1, reason: 'boss_mode_victory' }));
+              } catch (e) {
+                log(`Failed to award boss mode KP: ${e}`);
+              }
+            }
+          }
           return;
         }
       } catch {
@@ -1462,25 +1534,29 @@ setInterval(() => {
             const finalRT = isStrayLoss ? 0 : (playerState.money ?? 0);
             const portCharges = isStrayLoss ? 0 : match.world.getPortCharges(pid);
             const shelterPortCharges = isStrayLoss ? 0 : match.world.getShelterPortCharges(pid);
-            if (finalRT > 0 || portCharges > 0 || shelterPortCharges > 0) {
-              depositAfterMatch(userId, finalRT, portCharges, shelterPortCharges, 0, 0);
-              log(`Deposited for ${userId}: ${finalRT} RT, ${portCharges} ports, ${shelterPortCharges} home ports`);
+            const adoptSpeedBoosts = isStrayLoss ? 0 : match.world.getAdoptSpeedBoosts(pid);
+            if (finalRT > 0 || portCharges > 0 || shelterPortCharges > 0 || adoptSpeedBoosts > 0) {
+              depositAfterMatch(userId, finalRT, portCharges, shelterPortCharges, 0, 0, adoptSpeedBoosts);
+              log(`Deposited for ${userId}: ${finalRT} RT, ${portCharges} ports, ${shelterPortCharges} home ports, ${adoptSpeedBoosts} adopt speed`);
             }
             const isWinner = !isStrayLoss && snapshot.winnerId === pid;
+            const adoptions = playerState.totalAdoptions ?? 0;
             let karmaAwarded = 0;
             if (isStrayLoss) {
               recordMatchLoss(userId, 0);
             } else {
               if (isWinner) {
                 recordMatchWin(userId, finalRT);
-                // Award 1 Karma Point for match win (FFA/Teams only, not solo)
-                if (match.mode !== 'solo') {
-                  awardKarmaPoints(userId, 1, `Match win: ${matchId}`);
-                  karmaAwarded = 1;
-                }
-                log(`Recorded win for ${userId}${karmaAwarded ? ' +1 KP' : ''}`);
+                log(`Recorded win for ${userId}`);
               } else {
                 recordMatchLoss(userId, finalRT);
+              }
+              // Award 1 Karma Point for players with 50+ adoptions (FFA/Teams only, not solo)
+              // Multiple players can earn KP if they meet the threshold
+              if (match.mode !== 'solo' && adoptions >= 50) {
+                awardKarmaPoints(userId, 1, `Match ${matchId} (${adoptions} adoptions)`);
+                karmaAwarded = 1;
+                log(`Awarded 1 KP to ${userId} for ${adoptions} adoptions`);
               }
             }
             insertMatchHistory(

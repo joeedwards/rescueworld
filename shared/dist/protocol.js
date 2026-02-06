@@ -4,13 +4,23 @@
  * Snapshot: shelters (players) with size/petsInside, strays (pets), adoption zones.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.MSG_SNAPSHOT = exports.MSG_INPUT = void 0;
+exports.MSG_BOSS_EXIT_MILL = exports.MSG_BOSS_ENTER_MILL = exports.MSG_BOSS_SUBMIT_MEAL = exports.MSG_BOSS_PURCHASE = exports.MSG_BOSS_MODE_END = exports.MSG_BOSS_CAUGHT = exports.MSG_BOSS_POSITION = exports.MSG_BOSS_MILL_UPDATE = exports.MSG_BOSS_MODE_START = exports.MSG_SNAPSHOT = exports.MSG_INPUT = void 0;
 exports.encodeInput = encodeInput;
 exports.decodeInput = decodeInput;
 exports.encodeSnapshot = encodeSnapshot;
 exports.decodeSnapshot = decodeSnapshot;
 exports.MSG_INPUT = 0x01;
 exports.MSG_SNAPSHOT = 0x02;
+// Boss Mode protocol messages (JSON over WebSocket)
+exports.MSG_BOSS_MODE_START = 'bossModeStart';
+exports.MSG_BOSS_MILL_UPDATE = 'bossMillUpdate';
+exports.MSG_BOSS_POSITION = 'bossPosition';
+exports.MSG_BOSS_CAUGHT = 'bossCaught';
+exports.MSG_BOSS_MODE_END = 'bossModeEnd';
+exports.MSG_BOSS_PURCHASE = 'bossPurchase';
+exports.MSG_BOSS_SUBMIT_MEAL = 'bossSubmitMeal';
+exports.MSG_BOSS_ENTER_MILL = 'bossEnterMill';
+exports.MSG_BOSS_EXIT_MILL = 'bossExitMill';
 function encodeInput(inputFlags, inputSeq) {
     const buf = new ArrayBuffer(4);
     const view = new DataView(buf);
@@ -108,6 +118,27 @@ function encodeSnapshot(snap) {
         size += 2; // radius (16-bit)
         size += 4 + 4; // startTick, durationTicks
         size += 2 + 2; // totalNeeded(16), totalRescued(16)
+    }
+    // Boss mode
+    const bossMode = snap.bossMode;
+    size += 1; // hasBossMode flag
+    if (bossMode) {
+        size += 4 + 4 + 4 + 4; // startTick, timeLimit, tycoonX, tycoonY
+        size += 1 + 1 + 4 + 4 + 1; // tycoonTargetMill, millsCleared, mallX, mallY, playerAtMill
+        size += 1; // numMills
+        for (const mill of bossMode.mills) {
+            size += 1 + 1 + 1 + 4 + 4 + 1; // id, petType, petCount, x, y, completed
+            // Recipe: numIngredients, then for each: ingredientName(string), amount(1)
+            size += 1;
+            for (const ing of Object.keys(mill.recipe)) {
+                size += 1 + encoder.encode(ing).length + 1;
+            }
+            // Purchased: numIngredients, then for each: ingredientName(string), amount(1)
+            size += 1;
+            for (const ing of Object.keys(mill.purchased)) {
+                size += 1 + encoder.encode(ing).length + 1;
+            }
+        }
     }
     const buf = new ArrayBuffer(size * 2); // No cap - large games need large buffers
     const view = new DataView(buf);
@@ -250,6 +281,53 @@ function encodeSnapshot(snap) {
         off += 2;
         view.setUint16(off, Math.min(0xFFFF, ev.totalRescued) >>> 0, true);
         off += 2;
+    }
+    // Encode boss mode (bossMode variable already declared above for size calculation)
+    if (bossMode && bossMode.active) {
+        view.setUint8(off++, 1); // hasBossMode = true
+        view.setUint32(off, bossMode.startTick >>> 0, true);
+        off += 4;
+        view.setUint32(off, bossMode.timeLimit >>> 0, true);
+        off += 4;
+        view.setFloat32(off, bossMode.tycoonX, true);
+        off += 4;
+        view.setFloat32(off, bossMode.tycoonY, true);
+        off += 4;
+        view.setUint8(off++, bossMode.tycoonTargetMill & 0xff);
+        view.setUint8(off++, bossMode.millsCleared & 0xff);
+        view.setFloat32(off, bossMode.mallX, true);
+        off += 4;
+        view.setFloat32(off, bossMode.mallY, true);
+        off += 4;
+        view.setInt8(off++, bossMode.playerAtMill); // -1 to 4
+        view.setUint8(off++, bossMode.mills.length);
+        for (const mill of bossMode.mills) {
+            view.setUint8(off++, mill.id & 0xff);
+            view.setUint8(off++, mill.petType & 0xff);
+            view.setUint8(off++, mill.petCount & 0xff);
+            view.setFloat32(off, mill.x, true);
+            off += 4;
+            view.setFloat32(off, mill.y, true);
+            off += 4;
+            view.setUint8(off++, mill.completed ? 1 : 0);
+            // Recipe
+            const recipeKeys = Object.keys(mill.recipe);
+            view.setUint8(off++, recipeKeys.length);
+            for (const ing of recipeKeys) {
+                off = writeString(view, off, ing);
+                view.setUint8(off++, (mill.recipe[ing] ?? 0) & 0xff);
+            }
+            // Purchased
+            const purchasedKeys = Object.keys(mill.purchased);
+            view.setUint8(off++, purchasedKeys.length);
+            for (const ing of purchasedKeys) {
+                off = writeString(view, off, ing);
+                view.setUint8(off++, (mill.purchased[ing] ?? 0) & 0xff);
+            }
+        }
+    }
+    else {
+        view.setUint8(off++, 0); // hasBossMode = false
     }
     return buf.slice(0, off);
 }
@@ -468,6 +546,72 @@ function decodeSnapshot(buf) {
             rewards: { top1: 0, top2: 0, top3: 0, participation: 0 },
         });
     }
+    // Decode boss mode
+    let bossMode;
+    if (off < view.byteLength) {
+        const hasBossMode = view.getUint8(off++);
+        if (hasBossMode) {
+            const startTick = view.getUint32(off, true);
+            off += 4;
+            const timeLimit = view.getUint32(off, true);
+            off += 4;
+            const tycoonX = view.getFloat32(off, true);
+            off += 4;
+            const tycoonY = view.getFloat32(off, true);
+            off += 4;
+            const tycoonTargetMill = view.getUint8(off++);
+            const millsCleared = view.getUint8(off++);
+            const mallX = view.getFloat32(off, true);
+            off += 4;
+            const mallY = view.getFloat32(off, true);
+            off += 4;
+            const playerAtMill = view.getInt8(off++);
+            const numMills = view.getUint8(off++);
+            const mills = [];
+            for (let i = 0; i < numMills; i++) {
+                const id = view.getUint8(off++);
+                const petType = view.getUint8(off++);
+                const petCount = view.getUint8(off++);
+                const mx = view.getFloat32(off, true);
+                off += 4;
+                const my = view.getFloat32(off, true);
+                off += 4;
+                const completed = view.getUint8(off++) !== 0;
+                // Recipe
+                const numRecipeIngredients = view.getUint8(off++);
+                const recipe = {};
+                for (let j = 0; j < numRecipeIngredients; j++) {
+                    const { s: ing, next: ingNext } = readString(view, off);
+                    off = ingNext;
+                    const amount = view.getUint8(off++);
+                    recipe[ing] = amount;
+                }
+                // Purchased
+                const numPurchasedIngredients = view.getUint8(off++);
+                const purchased = {};
+                for (let j = 0; j < numPurchasedIngredients; j++) {
+                    const { s: ing, next: ingNext } = readString(view, off);
+                    off = ingNext;
+                    const amount = view.getUint8(off++);
+                    purchased[ing] = amount;
+                }
+                mills.push({ id, petType, petCount, recipe, purchased, completed, x: mx, y: my });
+            }
+            bossMode = {
+                active: true,
+                startTick,
+                timeLimit,
+                mills,
+                tycoonX,
+                tycoonY,
+                tycoonTargetMill,
+                millsCleared,
+                mallX,
+                mallY,
+                playerAtMill,
+            };
+        }
+    }
     return {
         tick,
         matchEndAt,
@@ -483,5 +627,6 @@ function decodeSnapshot(buf) {
         shelters: shelters.length > 0 ? shelters : undefined,
         breederShelters: breederShelters.length > 0 ? breederShelters : undefined,
         adoptionEvents: adoptionEvents.length > 0 ? adoptionEvents : undefined,
+        bossMode,
     };
 }

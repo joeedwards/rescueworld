@@ -30,6 +30,7 @@ export type Inventory = {
   speedBoosts: number;
   sizeBoosts: number;
   shelterTier3Boosts: number;
+  adoptSpeedBoosts: number;
 };
 
 /**
@@ -39,7 +40,7 @@ export function getInventory(userId: string): Inventory {
   const conn = db();
   
   const row = conn.prepare(`
-    SELECT stored_rt, port_charges, shelter_port_charges, speed_boosts, size_boosts, shelter_tier3_boosts 
+    SELECT stored_rt, port_charges, shelter_port_charges, speed_boosts, size_boosts, shelter_tier3_boosts, adopt_speed_boosts 
     FROM inventory 
     WHERE user_id = ?
   `).get(userId) as {
@@ -49,6 +50,7 @@ export function getInventory(userId: string): Inventory {
     speed_boosts: number;
     size_boosts: number;
     shelter_tier3_boosts?: number;
+    adopt_speed_boosts?: number;
   } | undefined;
   
   if (!row) {
@@ -59,6 +61,7 @@ export function getInventory(userId: string): Inventory {
       speedBoosts: 0,
       sizeBoosts: 0,
       shelterTier3Boosts: 0,
+      adoptSpeedBoosts: 0,
     };
   }
   
@@ -69,6 +72,7 @@ export function getInventory(userId: string): Inventory {
     speedBoosts: row.speed_boosts,
     sizeBoosts: row.size_boosts,
     shelterTier3Boosts: row.shelter_tier3_boosts ?? 0,
+    adoptSpeedBoosts: row.adopt_speed_boosts ?? 0,
   };
 }
 
@@ -79,8 +83,8 @@ export function initializeInventory(userId: string, startingRt: number = 0): voi
   const conn = db();
   
   conn.prepare(`
-    INSERT OR IGNORE INTO inventory (user_id, stored_rt, port_charges, shelter_port_charges, speed_boosts, size_boosts, shelter_tier3_boosts)
-    VALUES (?, ?, 0, 0, 0, 0, 0)
+    INSERT OR IGNORE INTO inventory (user_id, stored_rt, port_charges, shelter_port_charges, speed_boosts, size_boosts, shelter_tier3_boosts, adopt_speed_boosts)
+    VALUES (?, ?, 0, 0, 0, 0, 0, 0)
   `).run(userId, startingRt);
 }
 
@@ -93,23 +97,25 @@ export function depositAfterMatch(
   portCharges: number = 0, 
   shelterPortCharges: number = 0,
   speedBoosts: number = 0, 
-  sizeBoosts: number = 0
+  sizeBoosts: number = 0,
+  adoptSpeedBoosts: number = 0
 ): Inventory {
   const conn = db();
   
   // Upsert - insert if not exists, otherwise update
   conn.prepare(`
-    INSERT INTO inventory (user_id, stored_rt, port_charges, shelter_port_charges, speed_boosts, size_boosts, shelter_tier3_boosts)
-    VALUES (?, ?, ?, ?, ?, ?, 0)
+    INSERT INTO inventory (user_id, stored_rt, port_charges, shelter_port_charges, speed_boosts, size_boosts, shelter_tier3_boosts, adopt_speed_boosts)
+    VALUES (?, ?, ?, ?, ?, ?, 0, ?)
     ON CONFLICT(user_id) DO UPDATE SET 
       stored_rt = stored_rt + ?,
       port_charges = port_charges + ?,
       shelter_port_charges = shelter_port_charges + ?,
       speed_boosts = speed_boosts + ?,
-      size_boosts = size_boosts + ?
-  `).run(userId, rt, portCharges, shelterPortCharges, speedBoosts, sizeBoosts, rt, portCharges, shelterPortCharges, speedBoosts, sizeBoosts);
+      size_boosts = size_boosts + ?,
+      adopt_speed_boosts = adopt_speed_boosts + ?
+  `).run(userId, rt, portCharges, shelterPortCharges, speedBoosts, sizeBoosts, adoptSpeedBoosts, rt, portCharges, shelterPortCharges, speedBoosts, sizeBoosts, adoptSpeedBoosts);
   
-  log(`Deposited for ${userId}: +${rt} RT, +${portCharges} ports, +${shelterPortCharges} home ports, +${speedBoosts} speed, +${sizeBoosts} size`);
+  log(`Deposited for ${userId}: +${rt} RT, +${portCharges} ports, +${shelterPortCharges} home ports, +${speedBoosts} speed, +${sizeBoosts} size, +${adoptSpeedBoosts} adopt speed`);
   
   return getInventory(userId);
 }
@@ -123,15 +129,15 @@ export function withdrawForMatch(userId: string): Inventory {
   // Get current inventory
   const inventory = getInventory(userId);
   
-  if (inventory.storedRt > 0 || inventory.portCharges > 0 || inventory.shelterPortCharges > 0 || inventory.speedBoosts > 0 || inventory.sizeBoosts > 0 || inventory.shelterTier3Boosts > 0) {
+  if (inventory.storedRt > 0 || inventory.portCharges > 0 || inventory.shelterPortCharges > 0 || inventory.speedBoosts > 0 || inventory.sizeBoosts > 0 || inventory.shelterTier3Boosts > 0 || inventory.adoptSpeedBoosts > 0) {
     // Clear the inventory
     conn.prepare(`
       UPDATE inventory 
-      SET stored_rt = 0, port_charges = 0, shelter_port_charges = 0, speed_boosts = 0, size_boosts = 0, shelter_tier3_boosts = 0
+      SET stored_rt = 0, port_charges = 0, shelter_port_charges = 0, speed_boosts = 0, size_boosts = 0, shelter_tier3_boosts = 0, adopt_speed_boosts = 0
       WHERE user_id = ?
     `).run(userId);
     
-    log(`Withdrew for ${userId}: ${inventory.storedRt} RT, ${inventory.portCharges} ports, ${inventory.shelterPortCharges} home ports, ${inventory.speedBoosts} speed, ${inventory.sizeBoosts} size, ${inventory.shelterTier3Boosts} tier3 shelter boosts`);
+    log(`Withdrew for ${userId}: ${inventory.storedRt} RT, ${inventory.portCharges} ports, ${inventory.shelterPortCharges} home ports, ${inventory.speedBoosts} speed, ${inventory.sizeBoosts} size, ${inventory.shelterTier3Boosts} tier3 shelter boosts, ${inventory.adoptSpeedBoosts} adopt speed`);
   }
   
   return inventory;
@@ -200,4 +206,57 @@ export function addSizeBoosts(userId: string, amount: number): void {
     VALUES (?, 0, 0, 0, 0, ?)
     ON CONFLICT(user_id) DO UPDATE SET size_boosts = size_boosts + ?
   `).run(userId, amount, amount);
+}
+
+/**
+ * Add adopt speed boosts to inventory
+ */
+export function addAdoptSpeedBoosts(userId: string, amount: number): void {
+  const conn = db();
+  
+  conn.prepare(`
+    INSERT INTO inventory (user_id, stored_rt, port_charges, shelter_port_charges, speed_boosts, size_boosts, shelter_tier3_boosts, adopt_speed_boosts)
+    VALUES (?, 0, 0, 0, 0, 0, 0, ?)
+    ON CONFLICT(user_id) DO UPDATE SET adopt_speed_boosts = adopt_speed_boosts + ?
+  `).run(userId, amount, amount);
+}
+
+/** Boost types that can be purchased */
+export type BoostType = 'adoptSpeed';
+
+/** Price for each boost type */
+export const BOOST_PRICES: Record<BoostType, number> = {
+  adoptSpeed: 40,
+};
+
+/**
+ * Purchase a boost using stored RT
+ * Returns the updated inventory or null if not enough RT
+ */
+export function purchaseBoost(userId: string, boostType: BoostType): { success: boolean; inventory: Inventory; error?: string } {
+  const conn = db();
+  const price = BOOST_PRICES[boostType];
+  
+  if (!price) {
+    return { success: false, inventory: getInventory(userId), error: 'Invalid boost type' };
+  }
+  
+  const inventory = getInventory(userId);
+  
+  if (inventory.storedRt < price) {
+    return { success: false, inventory, error: 'Not enough RT' };
+  }
+  
+  // Deduct RT and add boost in one transaction
+  if (boostType === 'adoptSpeed') {
+    conn.prepare(`
+      UPDATE inventory 
+      SET stored_rt = stored_rt - ?, adopt_speed_boosts = adopt_speed_boosts + 1
+      WHERE user_id = ?
+    `).run(price, userId);
+  }
+  
+  log(`${userId} purchased ${boostType} boost for ${price} RT`);
+  
+  return { success: true, inventory: getInventory(userId) };
 }

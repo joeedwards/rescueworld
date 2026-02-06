@@ -92,3 +92,56 @@ export declare const SHELTER_BUILD_COST = 250;
 export declare const VAN_BASE_SIZE = 50;
 /** Max pets a van can carry (before building shelter). */
 export declare const VAN_MAX_CAPACITY = 50;
+/** Boss mode time limit in seconds (5 minutes). */
+export declare const BOSS_MODE_TIME_LIMIT_SECONDS = 180;
+/** Boss mode time limit in ticks. */
+export declare const BOSS_MODE_TIME_LIMIT_TICKS: number;
+/** Tycoon patrol time at each mill (seconds). */
+export declare const BOSS_TYCOON_DWELL_SECONDS = 10;
+/** Tycoon patrol time at each mill (ticks). */
+export declare const BOSS_TYCOON_DWELL_TICKS: number;
+/** Tycoon movement speed (units per tick). */
+export declare const BOSS_TYCOON_SPEED = 8;
+/** Warning time before tycoon arrives (seconds). */
+export declare const BOSS_TYCOON_WARNING_SECONDS = 3;
+/** Tycoon detection radius at mill. */
+export declare const BOSS_TYCOON_DETECTION_RADIUS = 150;
+/** Ingredient costs in RT. */
+export declare const BOSS_INGREDIENT_COSTS: {
+    [ingredient: string]: number;
+};
+/** Pet counts per mill. */
+export declare const BOSS_MILL_PET_COUNTS: {
+    [millType: number]: number;
+};
+/** Mill names for display. */
+export declare const BOSS_MILL_NAMES: {
+    [millType: number]: string;
+};
+/** Recipes per pet for each mill type (ingredient -> amount per pet). */
+export declare const BOSS_MILL_RECIPES: {
+    [millType: number]: {
+        [ingredient: string]: number;
+    };
+};
+/** PetMall radius (mills arranged around center). */
+export declare const BOSS_PETMALL_RADIUS = 400;
+/** Mill visual radius. */
+export declare const BOSS_MILL_RADIUS = 100;
+/** Rewards for boss mode completion. */
+export declare const BOSS_MODE_REWARDS: {
+    /** KP awarded for clearing all 5 mills. */
+    fullClearKP: number;
+    /** RT bonus for clearing all 5 mills. */
+    fullClearRT: number;
+    /** RT bonus per mill cleared (3-4 mills). */
+    partialClearRT: number;
+    /** RT bonus per mill cleared (1-2 mills). */
+    minimalClearRT: number;
+    /** Speed bonus for clearing a mill in under 30 seconds. */
+    speedBonusRT: number;
+    /** Combo multiplier for consecutive mill clears. */
+    comboMultiplier: number;
+};
+/** Penalty for being caught by tycoon (lose this fraction of purchased ingredients). */
+export declare const BOSS_CAUGHT_PENALTY = 0.5;

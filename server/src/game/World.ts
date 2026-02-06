@@ -2,7 +2,7 @@
  * Authoritative world: shelters (players) move, collect strays, adopt at zones to grow.
  */
 
-import type { PlayerState, PetState, AdoptionZoneState, GameSnapshot, PickupState, ShelterState, AdoptionEvent } from 'shared';
+import type { PlayerState, PetState, AdoptionZoneState, GameSnapshot, PickupState, ShelterState, AdoptionEvent, BossModeState, BossMill } from 'shared';
 
 /** Timestamped log function for server output */
 function log(message: string): void {
@@ -52,10 +52,24 @@ import {
   TOKENS_PER_ADOPTION,
   SHELTER_BUILD_COST,
   VAN_MAX_CAPACITY,
+  // Boss Mode constants
+  BOSS_MODE_TIME_LIMIT_TICKS,
+  BOSS_TYCOON_DWELL_TICKS,
+  BOSS_TYCOON_SPEED,
+  BOSS_TYCOON_DETECTION_RADIUS,
+  BOSS_INGREDIENT_COSTS,
+  BOSS_MILL_PET_COUNTS,
+  BOSS_MILL_NAMES,
+  BOSS_MILL_RECIPES,
+  BOSS_PETMALL_RADIUS,
+  BOSS_MILL_RADIUS,
+  BOSS_MODE_REWARDS,
+  BOSS_CAUGHT_PENALTY,
 } from 'shared';
 import { INPUT_LEFT, INPUT_RIGHT, INPUT_UP, INPUT_DOWN } from 'shared';
 import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED, PICKUP_TYPE_PORT, PICKUP_TYPE_BREEDER, PICKUP_TYPE_SHELTER_PORT } from 'shared';
 import { PET_TYPE_CAT, PET_TYPE_DOG, PET_TYPE_BIRD, PET_TYPE_RABBIT } from 'shared';
+import { BOSS_MILL_HORSE, BOSS_MILL_CAT, BOSS_MILL_DOG, BOSS_MILL_BIRD, BOSS_MILL_RABBIT } from 'shared';
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -136,7 +150,12 @@ export class World {
   private spawnPetAt = 0;
   private spawnPickupAt = 0;
   private lastAdoptionTick = new Map<string, number>();
-  private adoptSpeedPlayerIds = new Set<string>();
+  /** Adopt speed boost: playerId -> tick when boost expires (0 = no active boost) */
+  private adoptSpeedUntil = new Map<string, number>();
+  /** Cumulative adopt speed usage per player (cap at 300 seconds = 7500 ticks) */
+  private adoptSpeedUsedSeconds = new Map<string, number>();
+  /** In-match adopt speed boost inventory: playerId -> number of boosts available */
+  private playerAdoptSpeedBoosts = new Map<string, number>();
   private groundedPlayerIds = new Set<string>(); // Players who chose to ground themselves
   private portCharges = new Map<string, number>(); // Random port charges per player
   private shelterPortCharges = new Map<string, number>(); // Shelter port charges per player
@@ -222,6 +241,33 @@ export class World {
   
   // Solo mode options
   private cpuCanShutdownBreeders = true; // Can be set via game options
+  private matchMode: 'ffa' | 'solo' | 'teams' = 'ffa'; // Match mode (set by GameServer)
+  
+  // Boss Mode state
+  private bossMode: {
+    active: boolean;
+    startTick: number;
+    timeLimit: number;
+    mills: Array<{
+      id: number;
+      petType: number;
+      petCount: number;
+      recipe: { [ingredient: string]: number };
+      purchased: { [ingredient: string]: number };
+      completed: boolean;
+      x: number;
+      y: number;
+    }>;
+    tycoonX: number;
+    tycoonY: number;
+    tycoonTargetMill: number;
+    tycoonMoveAtTick: number;
+    millsCleared: number;
+    mallX: number;
+    mallY: number;
+    playerAtMill: number;
+    lastMillClearTick: number; // For combo bonus tracking
+  } | null = null;
   
   // Match-wide announcements queue
   private pendingAnnouncements: string[] = [];
@@ -283,7 +329,11 @@ export class World {
       : (p.petsInside.length >= ADOPTION_FAST_PET_THRESHOLD ? ADOPTION_TICKS_INTERVAL_FAST : ADOPTION_TICKS_INTERVAL);
     if (!groundedAdoption) {
       interval = Math.max(8, Math.floor(interval / (1 + Math.floor(p.size) / 15)));
-      if (this.adoptSpeedPlayerIds.has(p.id)) interval = Math.max(5, Math.floor(interval * 0.5));
+      // Adopt speed boost: check if currently active (tick < adoptSpeedUntil)
+      const adoptSpeedUntil = this.adoptSpeedUntil.get(p.id) ?? 0;
+      if (this.tick < adoptSpeedUntil) {
+        interval = Math.max(5, Math.floor(interval * 0.5));
+      }
     } else {
       interval = Math.max(15, Math.floor(interval / (1 + Math.floor(p.size) / 20)));
     }
@@ -304,7 +354,7 @@ export class World {
     });
   }
 
-  addPlayer(id: string, displayName?: string, startingRT?: number, startingPorts?: number, shelterTier3Boosts?: number): void {
+  addPlayer(id: string, displayName?: string, startingRT?: number, startingPorts?: number, shelterTier3Boosts?: number, adoptSpeedBoosts?: number): void {
     const name = displayName ?? `rescue${String(100 + Math.floor(Math.random() * 900))}`;
     const x = MAP_WIDTH * (0.2 + Math.random() * 0.6);
     const y = MAP_HEIGHT * (0.2 + Math.random() * 0.6);
@@ -335,6 +385,11 @@ export class World {
     if (shelterTier3Boosts && shelterTier3Boosts > 0) {
       this.shelterTier3Boosts.set(id, shelterTier3Boosts);
       log(`Player ${name} starting with ${shelterTier3Boosts} tier-3 shelter boost(s)`);
+    }
+    // Adopt speed boosts from inventory (use during match for 60s each, max 5 min)
+    if (adoptSpeedBoosts && adoptSpeedBoosts > 0) {
+      this.playerAdoptSpeedBoosts.set(id, adoptSpeedBoosts);
+      log(`Player ${name} starting with ${adoptSpeedBoosts} adopt speed boost(s)`);
     }
   }
 
@@ -437,7 +492,7 @@ export class World {
     }
     this.players.delete(id);
     this.lastAdoptionTick.delete(id);
-    this.adoptSpeedPlayerIds.delete(id);
+    this.adoptSpeedUntil.delete(id);
     this.groundedPlayerIds.delete(id);
     this.portCharges.delete(id);
     this.playerColors.delete(id);
@@ -730,7 +785,7 @@ export class World {
     else this.disconnectedPlayerIds.delete(id);
   }
 
-  applyStartingBoosts(id: string, boosts: { sizeBonus?: number; speedBoost?: boolean; adoptSpeed?: boolean }): void {
+  applyStartingBoosts(id: string, boosts: { sizeBonus?: number; speedBoost?: boolean; adoptSpeedBoosts?: number }): void {
     const p = this.players.get(id);
     if (!p) return;
     if (typeof boosts.sizeBonus === 'number' && boosts.sizeBonus > 0) {
@@ -739,9 +794,54 @@ export class World {
     if (boosts.speedBoost) {
       p.speedBoostUntil = this.tick + SPEED_BOOST_DURATION_TICKS;
     }
-    if (boosts.adoptSpeed) {
-      this.adoptSpeedPlayerIds.add(id);
+    if (typeof boosts.adoptSpeedBoosts === 'number' && boosts.adoptSpeedBoosts > 0) {
+      const current = this.playerAdoptSpeedBoosts.get(id) ?? 0;
+      this.playerAdoptSpeedBoosts.set(id, current + boosts.adoptSpeedBoosts);
     }
+  }
+
+  /** Use one adopt speed boost: 60 seconds duration, max 5 minutes (300s) cumulative per match */
+  useAdoptSpeedBoost(playerId: string): { success: boolean; remainingBoosts: number; activeUntilTick: number; usedSeconds: number } {
+    const available = this.playerAdoptSpeedBoosts.get(playerId) ?? 0;
+    const usedSeconds = this.adoptSpeedUsedSeconds.get(playerId) ?? 0;
+    const currentUntil = this.adoptSpeedUntil.get(playerId) ?? 0;
+    
+    if (available <= 0) {
+      return { success: false, remainingBoosts: 0, activeUntilTick: currentUntil, usedSeconds };
+    }
+    
+    if (usedSeconds >= 300) {
+      // Max 5 minutes already used this match
+      return { success: false, remainingBoosts: available, activeUntilTick: currentUntil, usedSeconds };
+    }
+    
+    // Consume 1 boost, extend timer by 60 seconds (1500 ticks at 25Hz)
+    this.playerAdoptSpeedBoosts.set(playerId, available - 1);
+    const BOOST_DURATION_TICKS = 1500; // 60 seconds at 25 ticks/second
+    const newUntil = Math.max(currentUntil, this.tick) + BOOST_DURATION_TICKS;
+    this.adoptSpeedUntil.set(playerId, newUntil);
+    this.adoptSpeedUsedSeconds.set(playerId, usedSeconds + 60);
+    
+    return { 
+      success: true, 
+      remainingBoosts: available - 1, 
+      activeUntilTick: newUntil,
+      usedSeconds: usedSeconds + 60,
+    };
+  }
+
+  /** Get adopt speed boost status for a player */
+  getAdoptSpeedBoostStatus(playerId: string): { remainingBoosts: number; activeUntilTick: number; usedSeconds: number; isActive: boolean } {
+    const remainingBoosts = this.playerAdoptSpeedBoosts.get(playerId) ?? 0;
+    const activeUntilTick = this.adoptSpeedUntil.get(playerId) ?? 0;
+    const usedSeconds = this.adoptSpeedUsedSeconds.get(playerId) ?? 0;
+    const isActive = this.tick < activeUntilTick;
+    return { remainingBoosts, activeUntilTick, usedSeconds, isActive };
+  }
+
+  /** Get remaining adopt speed boosts for a player (for deposit back to inventory) */
+  getAdoptSpeedBoosts(playerId: string): number {
+    return this.playerAdoptSpeedBoosts.get(playerId) ?? 0;
   }
 
   private directionToward(px: number, py: number, tx: number, ty: number): number {
@@ -1134,6 +1234,9 @@ export class World {
     this.strayWarnings.clear();
     this.adoptionEvents.clear();
     this.nextAdoptionEventSpawnTick = this.tick + World.ADOPTION_EVENT_SPAWN_DELAY_MIN;
+    // Reset adopt speed boost tracking (but NOT playerAdoptSpeedBoosts which is loaded from inventory)
+    this.adoptSpeedUntil.clear();
+    this.adoptSpeedUsedSeconds.clear();
   }
   
   private spawnAdoptionEvent(now: number): void {
@@ -1226,6 +1329,21 @@ export class World {
     this.cpuCanShutdownBreeders = canShutdown;
   }
   
+  /** Set the match mode (ffa, solo, teams) */
+  setMatchMode(mode: 'ffa' | 'solo' | 'teams'): void {
+    this.matchMode = mode;
+  }
+  
+  /** Get the current match mode */
+  getMatchMode(): 'ffa' | 'solo' | 'teams' {
+    return this.matchMode;
+  }
+  
+  /** Check if boss mode is currently active */
+  isBossModeActive(): boolean {
+    return this.bossMode?.active ?? false;
+  }
+  
   /** Form an alliance between two players */
   formAlliance(playerId1: string, playerId2: string): void {
     if (playerId1 === playerId2) return;
@@ -1297,6 +1415,13 @@ export class World {
     const now = this.tick;
 
     if (this.isMatchOver()) return; // no movement, rescue, adoption, or spawns after match end
+
+    // Update boss mode if active
+    if (this.bossMode?.active) {
+      this.updateBossMode();
+      // During boss mode, skip normal gameplay (spawning, breeders, etc.)
+      // Only allow player movement and boss mode interaction
+    }
 
     const allyPairs = fightAllyChoices ? World.allyPairsFromChoices(fightAllyChoices) : new Set<string>();
 
@@ -2014,22 +2139,28 @@ export class World {
       log(`Match end: too many strays (${strayCountVictory}) - loss for all, no RT`);
     }
     // Victory check: zero strays AND all breeders cleared (no camps, no mills)
-    if (!this.matchEndedEarly && this.shelters.size > 0) {
+    if (!this.matchEndedEarly && this.shelters.size > 0 && !this.bossMode?.active) {
       const allBreedersCleared = this.breederShelters.size === 0 && this.breederCamps.size === 0;
       if (strayCountVictory === 0 && allBreedersCleared) {
-        this.matchEndedEarly = true;
-        this.matchEndAt = this.tick;
-        // Winner is the player with the most adoptions (FFA/Teams rule)
-        let winnerId: string | null = null;
-        let maxAdoptions = 0;
-        for (const p of this.players.values()) {
-          if (p.totalAdoptions > maxAdoptions) {
-            maxAdoptions = p.totalAdoptions;
-            winnerId = p.id;
+        // In solo mode, trigger boss mode instead of ending
+        if (this.matchMode === 'solo') {
+          this.enterBossMode();
+          log(`Boss Mode triggered in solo match at tick ${this.tick}`);
+        } else {
+          this.matchEndedEarly = true;
+          this.matchEndAt = this.tick;
+          // Winner is the player with the most adoptions (FFA/Teams rule)
+          let winnerId: string | null = null;
+          let maxAdoptions = 0;
+          for (const p of this.players.values()) {
+            if (p.totalAdoptions > maxAdoptions) {
+              maxAdoptions = p.totalAdoptions;
+              winnerId = p.id;
+            }
           }
+          this.winnerId = winnerId;
+          log(`Match end: zero strays and all breeders cleared at level ${this.breederCurrentLevel}, tick ${this.tick}. Winner: ${this.winnerId ?? 'co-op'} (${maxAdoptions} adoptions)`);
         }
-        this.winnerId = winnerId;
-        log(`Match end: zero strays and all breeders cleared at level ${this.breederCurrentLevel}, tick ${this.tick}. Winner: ${this.winnerId ?? 'co-op'} (${maxAdoptions} adoptions)`);
       }
     }
     
@@ -2505,6 +2636,7 @@ export class World {
           }))
         : undefined,
       adoptionEvents: this.adoptionEvents.size > 0 ? Array.from(this.adoptionEvents.values()) : undefined,
+      bossMode: this.getBossModeState(),
     };
   }
 
@@ -2657,7 +2789,7 @@ export class World {
   /** Complete a breeder mini-game and award rewards or apply penalties */
   completeBreederMiniGame(playerId: string, rescuedCount: number, totalPets: number, level: number = 1): { 
     tokenBonus: number; 
-    rewards: Array<{ type: 'size' | 'speed' | 'port' | 'shelterPort' | 'penalty'; amount: number }> 
+    rewards: Array<{ type: 'size' | 'speed' | 'port' | 'shelterPort' | 'penalty' | 'adoptSpeed'; amount: number }> 
   } {
     // Clear breeder claim before deleting the minigame entry
     const miniGame = this.pendingBreederMiniGames.get(playerId);
@@ -2672,7 +2804,7 @@ export class World {
     if (!player) return { tokenBonus: 0, rewards: [] };
 
     const unrescuedCount = totalPets - rescuedCount;
-    const rewards: Array<{ type: 'size' | 'speed' | 'port' | 'shelterPort' | 'penalty'; amount: number }> = [];
+    const rewards: Array<{ type: 'size' | 'speed' | 'port' | 'shelterPort' | 'penalty' | 'adoptSpeed'; amount: number }> = [];
     
     // PENALTY: Un-rescued pets escape and cost van capacity (size reduction)
     // Penalty scales with breeder level
@@ -2752,6 +2884,15 @@ export class World {
       }
       // No announcements for partial rescue or failure on mills
     }
+    
+    // Award adopt speed boost for level 15+ on 100% rescue (camps or mills)
+    if (level >= 15 && rescuedCount === totalPets) {
+      const currentBoosts = this.playerAdoptSpeedBoosts.get(playerId) ?? 0;
+      this.playerAdoptSpeedBoosts.set(playerId, currentBoosts + 1);
+      rewards.push({ type: 'adoptSpeed', amount: 1 });
+      log(`Player ${player.displayName} earned adopt speed boost from lv${level} breeder shutdown!`);
+    }
+    
     // No announcements for breeder camps (too spammy)
     log(`Player ${player.displayName} completed lv${level} breeder: ${rescuedCount}/${totalPets} rescued, +${tokenBonus} RT, ${numItems} boosts`);
     return { tokenBonus, rewards };
@@ -2801,6 +2942,390 @@ export class World {
     return { id: shelter.id, tier: shelter.tier, size: shelter.size };
   }
 
+  // ============================================
+  // BOSS MODE METHODS
+  // ============================================
+
+  /** Debug: Force enter boss mode for testing */
+  debugEnterBossMode(): boolean {
+    log(`[DEBUG] debugEnterBossMode called. bossMode.active: ${this.bossMode?.active}, matchMode: ${this.matchMode}`);
+    if (this.bossMode?.active) {
+      log(`[DEBUG] Already in boss mode`);
+      return false;
+    }
+    if (this.matchMode !== 'solo') {
+      log(`[DEBUG] Not in solo mode (matchMode: ${this.matchMode})`);
+      return false;
+    }
+    this.enterBossMode();
+    return true;
+  }
+
+  /** Enter boss mode - called when solo player clears all strays and breeders */
+  private enterBossMode(): void {
+    if (this.bossMode?.active) return; // Already in boss mode
+
+    // Find map center for PetMall
+    const mallX = MAP_WIDTH / 2;
+    const mallY = MAP_HEIGHT / 2;
+
+    // Create 5 mills arranged in a pentagon around the center
+    const mills: typeof this.bossMode extends null ? never : NonNullable<typeof this.bossMode>['mills'] = [];
+    const millTypes = [BOSS_MILL_HORSE, BOSS_MILL_CAT, BOSS_MILL_DOG, BOSS_MILL_BIRD, BOSS_MILL_RABBIT];
+    
+    for (let i = 0; i < 5; i++) {
+      const angle = (i / 5) * Math.PI * 2 - Math.PI / 2; // Start from top
+      const x = mallX + Math.cos(angle) * BOSS_PETMALL_RADIUS;
+      const y = mallY + Math.sin(angle) * BOSS_PETMALL_RADIUS;
+      const petType = millTypes[i];
+      const petCount = BOSS_MILL_PET_COUNTS[petType] ?? 5;
+      const recipePerPet = BOSS_MILL_RECIPES[petType] ?? {};
+      
+      // Calculate total recipe (per pet * pet count)
+      const recipe: { [ingredient: string]: number } = {};
+      for (const [ing, amount] of Object.entries(recipePerPet)) {
+        recipe[ing] = amount * petCount;
+      }
+
+      mills.push({
+        id: i,
+        petType,
+        petCount,
+        recipe,
+        purchased: {},
+        completed: false,
+        x,
+        y,
+      });
+    }
+
+    // Initialize boss mode state
+    this.bossMode = {
+      active: true,
+      startTick: this.tick,
+      timeLimit: BOSS_MODE_TIME_LIMIT_TICKS,
+      mills,
+      tycoonX: mallX,
+      tycoonY: mallY,
+      tycoonTargetMill: 0,
+      tycoonMoveAtTick: this.tick + BOSS_TYCOON_DWELL_TICKS,
+      millsCleared: 0,
+      mallX,
+      mallY,
+      playerAtMill: -1,
+      lastMillClearTick: 0,
+    };
+
+    this.pendingAnnouncements.push('BOSS MODE: The Breeder Tycoon has arrived with the PetMall! Prepare meals to rescue the pets!');
+    log(`Boss Mode started at tick ${this.tick}. PetMall at (${mallX}, ${mallY})`);
+  }
+
+  /** Update boss mode each tick */
+  private updateBossMode(): void {
+    if (!this.bossMode?.active) return;
+
+    const bm = this.bossMode;
+    const elapsed = this.tick - bm.startTick;
+
+    // Check for timeout
+    if (elapsed >= bm.timeLimit) {
+      this.endBossMode(false);
+      return;
+    }
+
+    // Check for full clear
+    if (bm.millsCleared >= 5) {
+      this.endBossMode(true);
+      return;
+    }
+
+    // Auto-detect player entering/exiting boss mills (proximity-based, like breeder camps)
+    this.updateBossMillProximity();
+
+    // Update tycoon patrol
+    this.updateTycoonPatrol();
+  }
+
+  /** Check if player van is near a boss mill and update playerAtMill accordingly */
+  private updateBossMillProximity(): void {
+    if (!this.bossMode?.active) return;
+    const bm = this.bossMode;
+
+    // Find the human player (non-CPU)
+    let humanPlayer: { id: string; x: number; y: number } | null = null;
+    for (const p of this.players.values()) {
+      if (!p.id.startsWith('cpu-') && !this.eliminatedPlayerIds.has(p.id)) {
+        humanPlayer = p;
+        break;
+      }
+    }
+
+    if (!humanPlayer) return;
+
+    // Check if player is near any uncompleted mill
+    let nearMillId = -1;
+    for (let i = 0; i < bm.mills.length; i++) {
+      const mill = bm.mills[i];
+      if (mill.completed) continue;
+      
+      const distance = dist(humanPlayer.x, humanPlayer.y, mill.x, mill.y);
+      if (distance <= BOSS_MILL_RADIUS + VAN_FIXED_RADIUS) {
+        nearMillId = i;
+        break;
+      }
+    }
+
+    // Update playerAtMill state
+    if (nearMillId >= 0 && bm.playerAtMill !== nearMillId) {
+      // Player entered a new mill
+      bm.playerAtMill = nearMillId;
+      log(`Player ${humanPlayer.id} entered boss mill ${nearMillId} (${BOSS_MILL_NAMES[bm.mills[nearMillId].petType]})`);
+    } else if (nearMillId < 0 && bm.playerAtMill >= 0) {
+      // Player left the mill
+      log(`Player ${humanPlayer.id} exited boss mill`);
+      bm.playerAtMill = -1;
+    }
+  }
+
+  /** Update the Breeder Tycoon patrol behavior */
+  private updateTycoonPatrol(): void {
+    if (!this.bossMode) return;
+    const bm = this.bossMode;
+
+    // Check if tycoon should move to next mill
+    if (this.tick >= bm.tycoonMoveAtTick) {
+      // Find next uncompleted mill to patrol
+      let nextMill = (bm.tycoonTargetMill + 1) % 5;
+      let attempts = 0;
+      while (bm.mills[nextMill].completed && attempts < 5) {
+        nextMill = (nextMill + 1) % 5;
+        attempts++;
+      }
+      
+      if (attempts < 5) {
+        bm.tycoonTargetMill = nextMill;
+        bm.tycoonMoveAtTick = this.tick + BOSS_TYCOON_DWELL_TICKS;
+      }
+    }
+
+    // Move tycoon toward target mill
+    const targetMill = bm.mills[bm.tycoonTargetMill];
+    if (targetMill && !targetMill.completed) {
+      const dx = targetMill.x - bm.tycoonX;
+      const dy = targetMill.y - bm.tycoonY;
+      const dist = Math.hypot(dx, dy);
+      
+      if (dist > BOSS_TYCOON_SPEED) {
+        // Move toward target
+        bm.tycoonX += (dx / dist) * BOSS_TYCOON_SPEED;
+        bm.tycoonY += (dy / dist) * BOSS_TYCOON_SPEED;
+      } else {
+        // Arrived at mill
+        bm.tycoonX = targetMill.x;
+        bm.tycoonY = targetMill.y;
+        
+        // Check if player is at this mill (caught!)
+        if (bm.playerAtMill === bm.tycoonTargetMill) {
+          this.handleTycoonCatchPlayer();
+        }
+      }
+    }
+  }
+
+  /** Handle player being caught by tycoon at a mill */
+  private handleTycoonCatchPlayer(): void {
+    if (!this.bossMode) return;
+    const bm = this.bossMode;
+    const mill = bm.mills[bm.playerAtMill];
+    if (!mill) return;
+
+    // Lose 50% of purchased ingredients
+    for (const ing of Object.keys(mill.purchased)) {
+      mill.purchased[ing] = Math.floor(mill.purchased[ing] * (1 - BOSS_CAUGHT_PENALTY));
+      if (mill.purchased[ing] <= 0) {
+        delete mill.purchased[ing];
+      }
+    }
+
+    // Force player out of mill
+    bm.playerAtMill = -1;
+    
+    this.pendingAnnouncements.push('Caught by the Breeder Tycoon! You lost half your prepared ingredients!');
+    log(`Player caught by tycoon at mill ${mill.id}, lost ${BOSS_CAUGHT_PENALTY * 100}% ingredients`);
+  }
+
+  /** End boss mode with victory or timeout */
+  private endBossMode(victory: boolean): void {
+    if (!this.bossMode) return;
+    
+    const bm = this.bossMode;
+    bm.active = false;
+    
+    // Calculate rewards
+    let rtBonus = 0;
+    if (bm.millsCleared >= 5) {
+      rtBonus = BOSS_MODE_REWARDS.fullClearRT;
+    } else if (bm.millsCleared >= 3) {
+      rtBonus = bm.millsCleared * BOSS_MODE_REWARDS.partialClearRT;
+    } else if (bm.millsCleared >= 1) {
+      rtBonus = bm.millsCleared * BOSS_MODE_REWARDS.minimalClearRT;
+    }
+
+    // Award RT to human player
+    for (const p of this.players.values()) {
+      if (!p.id.startsWith('cpu_')) {
+        this.addPlayerMoney(p.id, rtBonus);
+        break; // Solo mode only has one human
+      }
+    }
+
+    // End the match
+    this.matchEndedEarly = true;
+    this.matchEndAt = this.tick;
+    
+    // Find winner (the human player in solo)
+    for (const p of this.players.values()) {
+      if (!p.id.startsWith('cpu_')) {
+        this.winnerId = p.id;
+        break;
+      }
+    }
+
+    if (victory) {
+      this.pendingAnnouncements.push(`VICTORY! You rescued all pets from the PetMall! Bonus: ${rtBonus} RT + 1 Karma Point!`);
+      log(`Boss Mode ended with FULL VICTORY. Awarded ${rtBonus} RT + 1 KP`);
+    } else if (bm.millsCleared > 0) {
+      this.pendingAnnouncements.push(`Time's up! You rescued pets from ${bm.millsCleared} mills. Bonus: ${rtBonus} RT`);
+      log(`Boss Mode ended with partial victory (${bm.millsCleared}/5 mills). Awarded ${rtBonus} RT`);
+    } else {
+      this.pendingAnnouncements.push(`Time's up! The Breeder Tycoon escaped with all the pets.`);
+      log(`Boss Mode ended with no mills cleared.`);
+    }
+  }
+
+  // Player enters/exits boss mills automatically via proximity detection in updateBossMillProximity()
+
+  /** Purchase an ingredient for the current boss mill */
+  purchaseBossIngredient(playerId: string, ingredient: string, amount: number): { success: boolean; message: string } {
+    if (!this.bossMode?.active) return { success: false, message: 'Boss mode not active' };
+    
+    const millId = this.bossMode.playerAtMill;
+    if (millId < 0) return { success: false, message: 'Not at a mill' };
+    
+    const mill = this.bossMode.mills[millId];
+    if (!mill || mill.completed) return { success: false, message: 'Mill completed or invalid' };
+    
+    // Check if ingredient is in recipe
+    const needed = mill.recipe[ingredient] ?? 0;
+    if (needed <= 0) return { success: false, message: 'Ingredient not needed for this mill' };
+    
+    // Check how many more we need
+    const purchased = mill.purchased[ingredient] ?? 0;
+    const remaining = needed - purchased;
+    if (remaining <= 0) return { success: false, message: 'Already have enough of this ingredient' };
+    
+    // Clamp amount to remaining needed
+    const actualAmount = Math.min(amount, remaining);
+    
+    // Check cost
+    const costPer = BOSS_INGREDIENT_COSTS[ingredient] ?? 10;
+    const totalCost = costPer * actualAmount;
+    const playerMoney = this.getPlayerMoney(playerId);
+    
+    if (playerMoney < totalCost) {
+      return { success: false, message: `Not enough RT (need ${totalCost}, have ${playerMoney})` };
+    }
+    
+    // Deduct money and add ingredient
+    this.deductPlayerMoney(playerId, totalCost);
+    mill.purchased[ingredient] = purchased + actualAmount;
+    
+    log(`Player ${playerId} purchased ${actualAmount}x ${ingredient} for ${totalCost} RT at mill ${millId}`);
+    return { success: true, message: `Purchased ${actualAmount}x ${ingredient}` };
+  }
+
+  /** Submit the prepared meal to rescue pets from current mill */
+  submitBossMeal(playerId: string): { success: boolean; message: string; rtBonus: number; kpAwarded: boolean } {
+    if (!this.bossMode?.active) return { success: false, message: 'Boss mode not active', rtBonus: 0, kpAwarded: false };
+    
+    const millId = this.bossMode.playerAtMill;
+    if (millId < 0) return { success: false, message: 'Not at a mill', rtBonus: 0, kpAwarded: false };
+    
+    const mill = this.bossMode.mills[millId];
+    if (!mill || mill.completed) return { success: false, message: 'Mill completed or invalid', rtBonus: 0, kpAwarded: false };
+    
+    // Check if all ingredients are purchased
+    for (const [ing, needed] of Object.entries(mill.recipe)) {
+      const purchased = mill.purchased[ing] ?? 0;
+      if (purchased < needed) {
+        return { success: false, message: `Need ${needed - purchased} more ${ing}`, rtBonus: 0, kpAwarded: false };
+      }
+    }
+    
+    // Success! Mark mill as completed
+    mill.completed = true;
+    this.bossMode.millsCleared++;
+    this.bossMode.playerAtMill = -1;
+    
+    // Calculate bonus (speed bonus if cleared quickly)
+    let rtBonus = 0;
+    const ticksSinceStart = this.tick - this.bossMode.startTick;
+    const timeSinceLastClear = this.tick - this.bossMode.lastMillClearTick;
+    
+    // Speed bonus: cleared within 30 seconds (750 ticks) of entering
+    if (timeSinceLastClear < 750 && this.bossMode.lastMillClearTick > 0) {
+      rtBonus += BOSS_MODE_REWARDS.speedBonusRT;
+    }
+    
+    this.bossMode.lastMillClearTick = this.tick;
+    
+    // Check for full clear victory
+    const kpAwarded = this.bossMode.millsCleared >= 5;
+    
+    if (rtBonus > 0) {
+      this.addPlayerMoney(playerId, rtBonus);
+    }
+    
+    const millName = BOSS_MILL_NAMES[mill.petType] ?? 'Mill';
+    this.pendingAnnouncements.push(`${millName} cleared! (${this.bossMode.millsCleared}/5)`);
+    log(`Player ${playerId} cleared mill ${millId} (${millName}). Total cleared: ${this.bossMode.millsCleared}/5. Bonus RT: ${rtBonus}`);
+    
+    return { success: true, message: `${millName} rescued!`, rtBonus, kpAwarded };
+  }
+
+  /** Get boss mode state for snapshot */
+  getBossModeState(): BossModeState | undefined {
+    if (!this.bossMode?.active) return undefined;
+    const bm = this.bossMode;
+    return {
+      active: bm.active,
+      startTick: bm.startTick,
+      timeLimit: bm.timeLimit,
+      mills: bm.mills.map(m => ({
+        id: m.id,
+        petType: m.petType,
+        petCount: m.petCount,
+        recipe: { ...m.recipe },
+        purchased: { ...m.purchased },
+        completed: m.completed,
+        x: m.x,
+        y: m.y,
+      })),
+      tycoonX: bm.tycoonX,
+      tycoonY: bm.tycoonY,
+      tycoonTargetMill: bm.tycoonTargetMill,
+      millsCleared: bm.millsCleared,
+      mallX: bm.mallX,
+      mallY: bm.mallY,
+      playerAtMill: bm.playerAtMill,
+    };
+  }
+
+  /** Check if boss mode resulted in a full victory (for KP award) */
+  isBossModeFullVictory(): boolean {
+    return this.bossMode !== null && this.bossMode.millsCleared >= 5;
+  }
+
   /** Serialize world state for persistence (solo save/resume). */
   serialize(): string {
     const state = {
@@ -2824,7 +3349,9 @@ export class World {
       spawnPetAt: this.spawnPetAt,
       spawnPickupAt: this.spawnPickupAt,
       lastAdoptionTick: Array.from(this.lastAdoptionTick.entries()),
-      adoptSpeedPlayerIds: Array.from(this.adoptSpeedPlayerIds),
+      adoptSpeedUntil: Array.from(this.adoptSpeedUntil.entries()),
+      adoptSpeedUsedSeconds: Array.from(this.adoptSpeedUsedSeconds.entries()),
+      playerAdoptSpeedBoosts: Array.from(this.playerAdoptSpeedBoosts.entries()),
       groundedPlayerIds: Array.from(this.groundedPlayerIds),
       portCharges: Array.from(this.portCharges.entries()),
       shelterPortCharges: Array.from(this.shelterPortCharges.entries()),
@@ -2863,6 +3390,8 @@ export class World {
       adoptionEvents: Array.from(this.adoptionEvents.entries()),
       adoptionEventIdSeq: this.adoptionEventIdSeq,
       nextAdoptionEventSpawnTick: this.nextAdoptionEventSpawnTick,
+      matchMode: this.matchMode,
+      bossMode: this.bossMode,
     };
     return JSON.stringify(state);
   }
@@ -2877,7 +3406,8 @@ export class World {
       players: [string, PlayerState][]; pets: [string, PetState][]; adoptionZones: AdoptionZoneState[];
       pickups: [string, PickupState][]; petIdSeq: number; pickupIdSeq: number;
       spawnPetAt: number; spawnPickupAt: number; lastAdoptionTick: [string, number][];
-      adoptSpeedPlayerIds: string[]; groundedPlayerIds: string[];
+      adoptSpeedUntil?: [string, number][]; adoptSpeedUsedSeconds?: [string, number][]; playerAdoptSpeedBoosts?: [string, number][];
+      groundedPlayerIds: string[];
       portCharges: [string, number][]; shelterPortCharges: [string, number][]; shelterTier3Boosts?: [string, number][];
       playerColors: [string, string][]; playerMoney: [string, number][];
       eliminatedPlayerIds: string[]; lastAllyPairs: string[]; combatOverlapTicks: [string, number][];
@@ -2918,7 +3448,9 @@ export class World {
     w.spawnPetAt = state.spawnPetAt;
     w.spawnPickupAt = state.spawnPickupAt;
     w.lastAdoptionTick = new Map(state.lastAdoptionTick);
-    w.adoptSpeedPlayerIds = new Set(state.adoptSpeedPlayerIds);
+    w.adoptSpeedUntil = new Map(state.adoptSpeedUntil ?? []);
+    w.adoptSpeedUsedSeconds = new Map(state.adoptSpeedUsedSeconds ?? []);
+    w.playerAdoptSpeedBoosts = new Map(state.playerAdoptSpeedBoosts ?? []);
     w.groundedPlayerIds = new Set(state.groundedPlayerIds);
     w.portCharges = new Map(state.portCharges);
     w.shelterPortCharges = new Map(state.shelterPortCharges);
@@ -2957,6 +3489,8 @@ export class World {
     w.adoptionEvents = new Map(state.adoptionEvents);
     w.adoptionEventIdSeq = state.adoptionEventIdSeq;
     w.nextAdoptionEventSpawnTick = state.nextAdoptionEventSpawnTick;
+    w.matchMode = (state as { matchMode?: 'ffa' | 'solo' | 'teams' }).matchMode ?? 'ffa';
+    w.bossMode = (state as { bossMode?: typeof w.bossMode }).bossMode ?? null;
     return w;
   }
 }

@@ -84,6 +84,7 @@ function initSqlite(): void {
       speed_boosts INTEGER NOT NULL DEFAULT 0,
       size_boosts INTEGER NOT NULL DEFAULT 0,
       shelter_tier3_boosts INTEGER NOT NULL DEFAULT 0,
+      adopt_speed_boosts INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
     CREATE TABLE IF NOT EXISTS daily_leaderboard_rewards (
@@ -113,6 +114,13 @@ function initSqlite(): void {
   // Migration: add shelter_tier3_boosts column to inventory if missing
   try {
     sqlite.exec(`ALTER TABLE inventory ADD COLUMN shelter_tier3_boosts INTEGER NOT NULL DEFAULT 0`);
+  } catch {
+    // Column already exists, ignore
+  }
+
+  // Migration: add adopt_speed_boosts column to inventory if missing
+  try {
+    sqlite.exec(`ALTER TABLE inventory ADD COLUMN adopt_speed_boosts INTEGER NOT NULL DEFAULT 0`);
   } catch {
     // Column already exists, ignore
   }
