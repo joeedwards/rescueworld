@@ -97,6 +97,8 @@ import {
   playStrayCollected,
   playMatchEnd,
   playAttackWarning,
+  updateVanEngine,
+  playSpeedBoostWhoosh,
   getMusicEnabled,
   setMusicEnabled,
   getSfxEnabled,
@@ -1995,7 +1997,10 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           // Still play sound but don't show popup
           playPickupGrowth();
         }
-        if ((me.speedBoostUntil ?? 0) > lastSpeedBoostUntil) playPickupSpeed();
+        if ((me.speedBoostUntil ?? 0) > lastSpeedBoostUntil) {
+          playPickupSpeed();
+          playSpeedBoostWhoosh();
+        }
         lastSpeedBoostUntil = me.speedBoostUntil ?? 0;
         if (me.totalAdoptions > lastTotalAdoptions) {
           playAdoption();
@@ -2122,6 +2127,14 @@ function tick(now: number): void {
     lastInputSendTime = now;
     const buf = encodeInput(inputFlags, inputSeq++);
     gameWs.send(buf);
+  }
+
+  // Van engine: subtle rumble when moving, off when stopped
+  const isMoving = (inputFlags & (INPUT_LEFT | INPUT_RIGHT | INPUT_UP | INPUT_DOWN)) !== 0;
+  if (canMove && myPlayerId) {
+    updateVanEngine(isMoving);
+  } else {
+    updateVanEngine(false);
   }
 
   // Advance local player prediction every frame (smooth movement and camera) — freeze when lobby/countdown, match over, or in minigame

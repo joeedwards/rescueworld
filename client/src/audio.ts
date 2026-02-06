@@ -112,6 +112,88 @@ export function playAttackWarning(): void {
   setTimeout(() => playTone(220, 0.1, 'sawtooth', 0.25), 200);
 }
 
+// --- Van engine: subtle "good exhaust but silent" rumble when moving ---
+const VAN_ENGINE_VOLUME = 0.045;
+const VAN_ENGINE_FADE = 0.08;
+
+let vanEngineOsc1: OscillatorNode | null = null;
+let vanEngineOsc2: OscillatorNode | null = null;
+let vanEngineGain: GainNode | null = null;
+let vanEngineTargetGain = 0;
+
+function ensureVanEngineNodes(): boolean {
+  const ctx = getContext();
+  if (!ctx || !getSfxEnabled()) return false;
+  if (vanEngineGain) return true;
+  try {
+    vanEngineOsc1 = ctx.createOscillator();
+    vanEngineOsc2 = ctx.createOscillator();
+    vanEngineGain = ctx.createGain();
+    vanEngineOsc1.type = 'triangle';
+    vanEngineOsc2.type = 'sine';
+    vanEngineOsc1.frequency.value = 42;
+    vanEngineOsc2.frequency.value = 56;
+    vanEngineOsc1.detune.value = -8;
+    vanEngineOsc2.detune.value = 5;
+    vanEngineOsc1.connect(vanEngineGain);
+    vanEngineOsc2.connect(vanEngineGain);
+    vanEngineGain.gain.value = 0;
+    vanEngineGain.connect(ctx.destination);
+    vanEngineOsc1.start(0);
+    vanEngineOsc2.start(0);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Call every frame: active = van is moving (any direction pressed).
+ * Smooth low rumble like a car with good exhaust, but quiet.
+ */
+export function updateVanEngine(active: boolean): void {
+  vanEngineTargetGain = active ? VAN_ENGINE_VOLUME : 0;
+  if (!active && !vanEngineGain) return; // never started, nothing to fade
+  if (!ensureVanEngineNodes()) return;
+  const ctx = getContext();
+  if (!ctx || !vanEngineGain) return;
+  vanEngineGain.gain.setTargetAtTime(vanEngineTargetGain, ctx.currentTime, 0.05);
+}
+
+/**
+ * One-shot jet-engine whoosh when speed boost activates.
+ */
+export function playSpeedBoostWhoosh(): void {
+  if (!getSfxEnabled()) return;
+  const ctx = getContext();
+  if (!ctx) return;
+  try {
+    const duration = 0.4;
+    const bufferSize = ctx.sampleRate * duration;
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * 0.7;
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(3200, ctx.currentTime);
+    filter.frequency.exponentialRampToValueAtTime(180, ctx.currentTime + duration);
+    filter.Q.value = 0.7;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.22, ctx.currentTime + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    source.start(ctx.currentTime);
+    source.stop(ctx.currentTime + duration);
+  } catch {
+    // ignore
+  }
+}
+
 let musicAudio: HTMLAudioElement | null = null;
 function getMusicUrl(): string {
   // Prefer Vite's BASE_URL (from vite.config base), fallback to current path so
