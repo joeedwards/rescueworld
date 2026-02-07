@@ -25,6 +25,8 @@ function log(message: string): void {
 const GAME_WS_PORT = Number(process.env.GAME_WS_PORT) || 4001;
 const GAME_WS_URL = process.env.GAME_WS_URL || `ws://localhost:${GAME_WS_PORT}`;
 const SERVER_ID = process.env.SERVER_ID || `game-${GAME_WS_PORT}`;
+const EASTER_EGGS_ENABLED = process.env.ENABLE_EASTER_EGGS === 'true';
+const DEBUG_LOGGING = process.env.DEBUG === 'true';
 
 const FFA_COUNTDOWN_MS = 10000;
 
@@ -1654,26 +1656,44 @@ wss.on('connection', async (ws) => {
 
         // Boss Mode: Enter/Exit mills is now handled automatically via proximity detection in World.updateBossMillProximity()
 
-        // Debug: Force enter boss mode (for testing)
-        if (msg.type === 'debugBossMode') {
-          log(`[DEBUG] Boss mode trigger requested. Match mode: ${match.mode}`);
+        // Easter egg: Force enter boss mode (Ctrl+Shift+B)
+        if (msg.type === 'easterEggBossMode') {
+          if (!EASTER_EGGS_ENABLED) {
+            ws.send(JSON.stringify({ type: 'easterEggBossModeResult', success: false, reason: 'easter eggs disabled' }));
+            return;
+          }
           if (match.mode !== 'solo') {
-            log(`[DEBUG] Boss mode rejected - match mode is '${match.mode}', not 'solo'`);
+            ws.send(JSON.stringify({ type: 'easterEggBossModeResult', success: false, reason: 'not solo mode' }));
+            return;
+          }
+          if (DEBUG_LOGGING) log(`Easter egg boss mode trigger requested by ${effectivePlayerId}`);
+          const success = match.world.debugEnterBossMode();
+          if (DEBUG_LOGGING) log(`Easter egg boss mode result: ${success}`);
+          ws.send(JSON.stringify({ type: 'easterEggBossModeResult', success }));
+          return;
+        }
+        // Legacy support for old message name
+        if (msg.type === 'debugBossMode') {
+          if (!EASTER_EGGS_ENABLED) {
+            ws.send(JSON.stringify({ type: 'debugBossModeResult', success: false, reason: 'easter eggs disabled' }));
+            return;
+          }
+          if (match.mode !== 'solo') {
             ws.send(JSON.stringify({ type: 'debugBossModeResult', success: false, reason: 'not solo mode' }));
             return;
           }
+          if (DEBUG_LOGGING) log(`Easter egg boss mode (legacy) trigger requested by ${effectivePlayerId}`);
           const success = match.world.debugEnterBossMode();
-          log(`[DEBUG] Boss mode trigger result: ${success}`);
           ws.send(JSON.stringify({ type: 'debugBossModeResult', success }));
           return;
         }
 
         // Boss Mode: Purchase ingredient
         if (msg.type === 'bossPurchase' && typeof msg.ingredient === 'string' && typeof msg.amount === 'number') {
-          log(`[DEBUG] bossPurchase received: ingredient=${msg.ingredient}, amount=${msg.amount}`);
+          if (DEBUG_LOGGING) log(`bossPurchase received: ingredient=${msg.ingredient}, amount=${msg.amount}`);
           if (match.mode !== 'solo') return;
           const result = match.world.purchaseBossIngredient(effectivePlayerId, msg.ingredient, msg.amount);
-          log(`[DEBUG] bossPurchase result: ${JSON.stringify(result)}`);
+          if (DEBUG_LOGGING) log(`bossPurchase result: ${JSON.stringify(result)}`);
           ws.send(JSON.stringify({ type: 'bossPurchaseResult', ...result }));
           return;
         }

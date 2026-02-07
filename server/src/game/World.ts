@@ -2151,10 +2151,23 @@ export class World {
           this.combatOverlapTicks.delete(key);
           continue;
         }
-        // Check ally: only ally if BOTH chose 'ally' for each other
+        // Teams mode: teammates never fight (already allied); skip combat entirely for same team
+        if (this.matchMode === 'teams') {
+          const teamA = this.playerTeams.get(a.id);
+          const teamB = this.playerTeams.get(b.id);
+          if (teamA && teamB && teamA === teamB) {
+            this.combatOverlapTicks.delete(key);
+            continue;
+          }
+          // Opponents in Teams mode always fight - no ally popup, no ally negotiation
+          if (teamA && teamB && teamA !== teamB) {
+            // Skip ally logic entirely - go straight to combat
+          }
+        }
+        // Check ally: only ally if BOTH chose 'ally' for each other (FFA/Solo only in practice)
         const aIsCpu = a.id.startsWith('cpu-');
         const bIsCpu = b.id.startsWith('cpu-');
-        if (fightAllyChoices) {
+        if (fightAllyChoices && this.matchMode !== 'teams') {
           const aToB = fightAllyChoices.get(`${a.id},${b.id}`);
           const bToA = fightAllyChoices.get(`${b.id},${a.id}`);
           
@@ -2177,8 +2190,8 @@ export class World {
             continue;
           }
         }
-        // Check for mutual ally requests (clicked ally on each other before overlap)
-        if (!aIsCpu && !bIsCpu && hasMutualAllyRequest(a.id, b.id)) {
+        // Check for mutual ally requests (clicked ally on each other before overlap) - not in Teams
+        if (!aIsCpu && !bIsCpu && this.matchMode !== 'teams' && hasMutualAllyRequest(a.id, b.id)) {
           this.combatOverlapTicks.delete(key);
           continue;
         }
@@ -3262,17 +3275,10 @@ export class World {
   // BOSS MODE METHODS
   // ============================================
 
-  /** Debug: Force enter boss mode for testing */
+  /** Easter egg: Force enter boss mode */
   debugEnterBossMode(): boolean {
-    log(`[DEBUG] debugEnterBossMode called. bossMode.active: ${this.bossMode?.active}, matchMode: ${this.matchMode}`);
-    if (this.bossMode?.active) {
-      log(`[DEBUG] Already in boss mode`);
-      return false;
-    }
-    if (this.matchMode !== 'solo') {
-      log(`[DEBUG] Not in solo mode (matchMode: ${this.matchMode})`);
-      return false;
-    }
+    if (this.bossMode?.active) return false;
+    if (this.matchMode !== 'solo') return false;
     this.enterBossMode();
     return true;
   }
@@ -3535,35 +3541,37 @@ export class World {
       rtBonus = bm.millsCleared * BOSS_MODE_REWARDS.minimalClearRT;
     }
 
-    // Award RT to human player
-    for (const p of this.players.values()) {
-      if (!p.id.startsWith('cpu_')) {
-        this.addPlayerMoney(p.id, rtBonus);
-        break; // Solo mode only has one human
+    if (bm.millsCleared > 0) {
+      // Partial or full victory: award RT, end match as win
+      for (const p of this.players.values()) {
+        if (!p.id.startsWith('cpu_')) {
+          this.addPlayerMoney(p.id, rtBonus);
+          break; // Solo mode only has one human
+        }
       }
-    }
 
-    // End the match
-    this.matchEndedEarly = true;
-    this.matchEndAt = this.tick;
-    
-    // Find winner (the human player in solo)
-    for (const p of this.players.values()) {
-      if (!p.id.startsWith('cpu_')) {
-        this.winnerId = p.id;
-        break;
+      this.matchEndedEarly = true;
+      this.matchEndAt = this.tick;
+      
+      for (const p of this.players.values()) {
+        if (!p.id.startsWith('cpu_')) {
+          this.winnerId = p.id;
+          break;
+        }
       }
-    }
 
-    if (victory) {
-      this.pendingAnnouncements.push(`VICTORY! You rescued all pets from the PetMall! Bonus: ${rtBonus} RT + 1 Karma Point!`);
-      log(`Boss Mode ended with FULL VICTORY. Awarded ${rtBonus} RT + 1 KP`);
-    } else if (bm.millsCleared > 0) {
-      this.pendingAnnouncements.push(`Time's up! You rescued pets from ${bm.millsCleared} mills. Bonus: ${rtBonus} RT`);
-      log(`Boss Mode ended with partial victory (${bm.millsCleared}/5 mills). Awarded ${rtBonus} RT`);
+      if (victory) {
+        this.pendingAnnouncements.push(`VICTORY! You rescued all pets from the PetMall! Bonus: ${rtBonus} RT + 1 Karma Point!`);
+        log(`Boss Mode ended with FULL VICTORY. Awarded ${rtBonus} RT + 1 KP`);
+      } else {
+        this.pendingAnnouncements.push(`Time's up! You rescued pets from ${bm.millsCleared} mills. Bonus: ${rtBonus} RT`);
+        log(`Boss Mode ended with partial victory (${bm.millsCleared}/5 mills). Awarded ${rtBonus} RT`);
+      }
     } else {
-      this.pendingAnnouncements.push(`Time's up! The Breeder Tycoon escaped with all the pets.`);
-      log(`Boss Mode ended with no mills cleared.`);
+      // LOSS: 0 mills cleared - game continues, boss mode can re-trigger
+      this.bossMode = null;
+      this.pendingAnnouncements.push(`You lost the boss! The Breeder Tycoon escaped with all the pets.`);
+      log(`Boss Mode ended with LOSS (0 mills cleared). Game continues.`);
     }
   }
 

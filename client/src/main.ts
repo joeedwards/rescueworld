@@ -2924,9 +2924,8 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         if (msg.type === 'bossPurchaseResult' || msg.type === 'bossSubmitMealResult' || msg.type === 'karmaAwarded') {
           handleBossMessage(msg as { type: string; [key: string]: unknown });
         }
-        // Debug boss mode result
-        if (msg.type === 'debugBossModeResult') {
-          console.log('[DEBUG] Boss mode result:', msg);
+        // Easter egg boss mode result
+        if (msg.type === 'easterEggBossModeResult' || msg.type === 'debugBossModeResult') {
           if (msg.success) {
             showToast('Boss Mode activated!', 'success');
           } else {
@@ -3384,9 +3383,10 @@ function tick(now: number): void {
     }
     // Show Fight/Ally when my SHELTER overlaps another player's SHELTER — vans cannot attack
     // Show CPU warning when overlapping a CPU shelter (no prompt)
+    // In Teams mode: no fight/ally prompt — teammates are auto-allied, opponents auto-fight
     let overlappingId: string | null = null;
     let cpuOverlapping = false;
-    if (latestSnapshot) {
+    if (latestSnapshot && selectedMode !== 'teams') {
       const me = latestSnapshot.players.find(p => p.id === myPlayerId);
       const myShelter = me?.shelterId ? latestSnapshot.shelters?.find(s => s.id === me.shelterId) : null;
       
@@ -4068,10 +4068,15 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
   
   // Determine fill color/gradient
   let fillStyle: string | CanvasGradient;
+  const isBot = p.id.startsWith('cpu-');
   let baseColor = isMe ? '#7bed9f' : hashColor(p.id);
   if (p.eliminated) {
     fillStyle = 'rgba(100,100,100,0.5)';
     baseColor = '#666';
+  } else if (isBot && p.team) {
+    // Bots in Teams mode: entire van matches team color
+    baseColor = p.team === 'red' ? '#c0392b' : '#2980b9';
+    fillStyle = baseColor;
   } else if (p.shelterColor) {
     if (p.shelterColor.startsWith('gradient:')) {
       const parts = p.shelterColor.split(':');
@@ -4086,6 +4091,8 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
   } else {
     fillStyle = baseColor;
   }
+  // Team window color (used below when drawing the cabin window)
+  const teamWindowColor = p.team === 'red' ? 'rgba(231,76,60,0.75)' : p.team === 'blue' ? 'rgba(52,152,219,0.75)' : null;
   
   // Van dimensions - always van shape (shelters are separate entities now)
   const vanWidth = half * 2;
@@ -4125,11 +4132,11 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
   ctx.roundRect(-half + vanWidth - cabinWidth, -vanHeight * 0.5, cabinWidth, vanHeight, [0, cornerRadius, cornerRadius, 0]);
   ctx.fill();
   
-  // Window (in cabin)
+  // Window (in cabin) - tinted with team color in Teams mode
   const windowPad = 4;
   const windowWidth = cabinWidth - windowPad * 2;
   const windowHeight = vanHeight * 0.4;
-  ctx.fillStyle = 'rgba(135,206,250,0.7)';
+  ctx.fillStyle = teamWindowColor ?? 'rgba(135,206,250,0.7)';
   ctx.beginPath();
   ctx.roundRect(-half + vanWidth - cabinWidth + windowPad, -vanHeight * 0.5 + windowPad, windowWidth, windowHeight, 4);
   ctx.fill();
@@ -4432,12 +4439,13 @@ function drawShelterYard(rx: number, ry: number, w: number, h: number, label?: s
 function drawShelterWorker(
   x: number, y: number,
   isVolunteer: boolean,
-  phase: number
+  phase: number,
+  workerIndex: number = 0
 ): void {
   // Body color: workers wear blue, volunteers wear green
   const bodyColor = isVolunteer ? '#5ab87a' : '#4a8ec9';
-  // Pick a consistent skin tone based on position (seeded by x+y so it stays stable across frames)
-  const skinIdx = Math.abs(Math.round(x * 7 + y * 13)) % ADOPTER_APPEARANCES.length;
+  // Pick a consistent skin tone based on worker index (stable across frames)
+  const skinIdx = ((workerIndex * 3 + (isVolunteer ? 5 : 0)) % ADOPTER_APPEARANCES.length + ADOPTER_APPEARANCES.length) % ADOPTER_APPEARANCES.length;
   const workerSkin = ADOPTER_APPEARANCES[skinIdx];
 
   // Body (oval)
@@ -4745,7 +4753,7 @@ function drawShelter(shelter: ShelterState, isOwner: boolean, ownerColor?: strin
     const phase = (now / 2000 + i * 2.1);
     const wx = room.rx + room.w * 0.3 + Math.sin(phase) * room.w * 0.25;
     const wy = room.ry + room.h * 0.5 + Math.cos(phase * 0.7 + i) * room.h * 0.2;
-    drawShelterWorker(wx, wy, false, phase);
+    drawShelterWorker(wx, wy, false, phase, i);
   }
 
   // Volunteers patrol yards and other rooms
@@ -4755,7 +4763,7 @@ function drawShelter(shelter: ShelterState, isOwner: boolean, ownerColor?: strin
     const phase = (now / 2500 + i * 1.7 + 3.14);
     const vx = yard.rx + yard.w * 0.35 + Math.sin(phase) * yard.w * 0.2;
     const vy = yard.ry + yard.h * 0.5 + Math.cos(phase * 0.6 + i * 2) * yard.h * 0.15;
-    drawShelterWorker(vx, vy, true, phase);
+    drawShelterWorker(vx, vy, true, phase, i);
   }
 
   // ---- Entrance door / gate marker ----
@@ -7315,16 +7323,12 @@ document.addEventListener('keydown', (e) => {
     showToast(`Season switched to ${SEASON_NAMES_EE[currentSeason]} ${SEASON_ICONS_EE[currentSeason]}`, 'info');
     return;
   }
-  // Debug: Force boss mode (Ctrl+Shift+B) - check BEFORE regular B handler
+  // Easter egg: Force boss mode (Ctrl+Shift+B) - check BEFORE regular B handler
   if (e.ctrlKey && e.shiftKey && (e.key === 'b' || e.key === 'B')) {
     e.preventDefault();
-    console.log('[DEBUG] Ctrl+Shift+B pressed, sending debugBossMode');
     if (gameWs?.readyState === WebSocket.OPEN) {
-      gameWs.send(JSON.stringify({ type: 'debugBossMode' }));
+      gameWs.send(JSON.stringify({ type: 'easterEggBossMode' }));
       showToast('Triggering Boss Mode...', 'info');
-    } else {
-      console.log('[DEBUG] gameWs not open, readyState:', gameWs?.readyState);
-      showToast('Not connected to game server', 'error');
     }
     return;
   }
@@ -7666,13 +7670,13 @@ function showItemSelectionModal(): Promise<ItemSelection> {
       tier3: isSignedIn ? (currentInventory.shelterTier3Boosts ?? 0) : 0,
     };
 
-    // Selected quantities (default to all)
+    // Selected quantities (default to 0 so players opt-in)
     const selected = {
-      ports: avail.ports,
-      speed: avail.speed,
-      size: avail.size,
-      adopt: avail.adopt,
-      tier3: avail.tier3,
+      ports: 0,
+      speed: 0,
+      size: 0,
+      adopt: 0,
+      tier3: 0,
     };
 
     // Helper to update row visibility and display
@@ -8109,12 +8113,8 @@ function updateBossMillModal(): void {
 
 /** Purchase an ingredient for the current boss mill */
 function purchaseBossIngredient(ingredient: string, amount: number): void {
-  console.log('[DEBUG] purchaseBossIngredient called:', ingredient, amount);
   if (gameWs?.readyState === WebSocket.OPEN) {
-    console.log('[DEBUG] Sending bossPurchase message');
     gameWs.send(JSON.stringify({ type: 'bossPurchase', ingredient, amount }));
-  } else {
-    console.log('[DEBUG] gameWs not open');
   }
 }
 
@@ -8130,30 +8130,15 @@ bossMillClose?.addEventListener('click', closeBossMillModal);
 bossMillFlee?.addEventListener('click', closeBossMillModal);
 bossMillSubmit?.addEventListener('click', submitBossMeal);
 
-// Global click debugger for boss mode (temporary)
-document.addEventListener('click', (e) => {
-  const target = e.target as HTMLElement;
-  if (bossMillOpen) {
-    console.log('[DEBUG GLOBAL] Click detected, target:', target.tagName, target.className, target.id);
-  }
-}, true); // Use capture phase
-
 // Event delegation for ingredient buy buttons (since they're recreated on each update)
 // Use pointerdown instead of click because the modal is rebuilt on every snapshot,
 // which can destroy buttons between mousedown and mouseup, preventing click from firing
 bossMillIngredients?.addEventListener('pointerdown', (e) => {
-  console.log('[DEBUG] Ingredients container clicked, target:', e.target);
   const target = e.target as HTMLElement;
-  console.log('[DEBUG] Target classList:', target.classList, 'disabled:', target.hasAttribute('disabled'));
   if (target.classList.contains('ingredient-buy')) {
-    if (target.hasAttribute('disabled')) {
-      console.log('[DEBUG] Button is disabled, ignoring');
-      return;
-    }
+    if (target.hasAttribute('disabled')) return;
     const ingredient = target.getAttribute('data-ingredient');
-    console.log('[DEBUG] Ingredient:', ingredient);
     if (ingredient) {
-      console.log('[DEBUG] Calling purchaseBossIngredient');
       purchaseBossIngredient(ingredient, 1);
     }
   }
@@ -8161,10 +8146,8 @@ bossMillIngredients?.addEventListener('pointerdown', (e) => {
 
 // Handle server responses for boss mode
 function handleBossMessage(msg: { type: string; [key: string]: unknown }): void {
-  console.log('[DEBUG] handleBossMessage:', msg);
   switch (msg.type) {
     case 'bossPurchaseResult':
-      console.log('[DEBUG] bossPurchaseResult:', msg);
       if (!msg.success) {
         showToast(String(msg.message || 'Purchase failed'), 'error');
       }
@@ -8982,7 +8965,7 @@ function renderDailyGiftGrid(): void {
       dailyGiftClaimBtnEl.textContent = `Claim Day ${currentDay} Gift`;
       dailyGiftSubtitleEl.textContent = 'Play to unlock today\'s gift!';
     } else {
-      dailyGiftClaimBtnEl.disabled = true;
+      dailyGiftClaimBtnEl.disabled = false;
       dailyGiftClaimBtnEl.textContent = 'Come back tomorrow!';
       dailyGiftSubtitleEl.textContent = `Next gift: Day ${currentDay > 7 ? 1 : currentDay}`;
     }
@@ -9087,7 +9070,10 @@ async function claimDailyGiftAction(): Promise<void> {
     return;
   }
   
-  if (!dailyGiftStatus?.canClaimToday) return;
+  if (!dailyGiftStatus?.canClaimToday) {
+    closeDailyGiftModal();
+    return;
+  }
   
   try {
     const res = await fetch('/api/daily-gift/claim', {
