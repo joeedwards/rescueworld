@@ -240,10 +240,10 @@ export class World {
   /** Player ID -> breederShelterId for active mill games (so we know which shelter to remove on 100%). */
   private activeMillByPlayer = new Map<string, string>();
   private static readonly BREEDER_SHELTER_SPAWN_INTERVAL = 125; // Spawn wild stray every 5 seconds (5 * 25 ticks)
-  private static readonly BREEDER_STRAY_SPEED = 1.5; // Wild strays move 1.5x faster
+  private static readonly BREEDER_STRAY_SPEED = 3.5; // Wild strays move fast and spread across the map
   /** No strays inside this radius of breeder camps or shelters (clean map). */
   private static readonly BREEDER_NO_STRAY_RADIUS = 100;
-  private static readonly BREEDER_STRAY_MIN_SPAWN_DIST = 100; // Min distance from breeder shelter when spawning wild strays
+  private static readonly BREEDER_STRAY_MIN_SPAWN_DIST = 200; // Min distance from breeder shelter when spawning wild strays
   
   // Wild strays (from breeder shelters) - harder to catch, move around
   private wildStrayIds = new Set<string>();
@@ -1509,8 +1509,8 @@ export class World {
         continue;
       }
       
-      // Random movement with occasional direction changes
-      if (this.tick % 30 === 0 || (pet.vx === 0 && pet.vy === 0)) {
+      // Random movement with occasional direction changes (every ~3s so strays wander far)
+      if (this.tick % 75 === 0 || (pet.vx === 0 && pet.vy === 0)) {
         // Change direction randomly
         const angle = Math.random() * Math.PI * 2;
         const speed = World.BREEDER_STRAY_SPEED;
@@ -1774,17 +1774,19 @@ export class World {
         const numStrays = 1 + (shelter.level >= 6 ? 1 : 0);
         for (let i = 0; i < numStrays; i++) {
           const angle = Math.random() * Math.PI * 2;
-          const dist = World.BREEDER_STRAY_MIN_SPAWN_DIST + Math.random() * 80;
+          const dist = World.BREEDER_STRAY_MIN_SPAWN_DIST + Math.random() * 300; // 200-500 units from mill
           const sx = clamp(shelter.x + Math.cos(angle) * dist, 50, MAP_WIDTH - 50);
           const sy = clamp(shelter.y + Math.sin(angle) * dist, 50, MAP_HEIGHT - 50);
           
+          // Bias initial velocity AWAY from mill so strays naturally disperse
+          const awayAngle = Math.atan2(sy - shelter.y, sx - shelter.x);
           const petId = `pet-${++this.petIdSeq}`;
           this.pets.set(petId, {
             id: petId,
             x: sx,
             y: sy,
-            vx: (Math.random() - 0.5) * 2,
-            vy: (Math.random() - 0.5) * 2,
+            vx: Math.cos(awayAngle) * World.BREEDER_STRAY_SPEED,
+            vy: Math.sin(awayAngle) * World.BREEDER_STRAY_SPEED,
             insideShelterId: null,
             petType: randomPetType(),
           });

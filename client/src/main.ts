@@ -4868,15 +4868,41 @@ const STRAY_PET_EMOJIS: Record<number, string> = {
   [PET_TYPE_SPECIAL]: '⭐',
 };
 
+// --- Pre-rendered stray sprites (offscreen canvases) for fast drawImage ---
+const STRAY_SPRITE_SIZE = 40;
+const straySprites = new Map<number, HTMLCanvasElement>();
+
+/** Pre-render each pet-type emoji to an offscreen canvas (called once at startup).
+ *  Bakes shadow into the sprite so no per-frame shadowBlur cost. */
+function prerenderStraySprites(): void {
+  for (const [typeStr, emoji] of Object.entries(STRAY_PET_EMOJIS)) {
+    const petType = Number(typeStr);
+    const c = document.createElement('canvas');
+    c.width = STRAY_SPRITE_SIZE;
+    c.height = STRAY_SPRITE_SIZE;
+    const sctx = c.getContext('2d')!;
+    sctx.font = '30px sans-serif';
+    sctx.textAlign = 'center';
+    sctx.textBaseline = 'middle';
+    // Bake the shadow into the sprite (no per-frame blur cost)
+    sctx.shadowColor = 'rgba(0,0,0,0.8)';
+    sctx.shadowBlur = 4;
+    sctx.fillText(emoji, STRAY_SPRITE_SIZE / 2, STRAY_SPRITE_SIZE / 2);
+    // For special pets, add a gold glow layer
+    if (petType === PET_TYPE_SPECIAL) {
+      sctx.shadowColor = '#ffd700';
+      sctx.shadowBlur = 12;
+      sctx.fillText(emoji, STRAY_SPRITE_SIZE / 2, STRAY_SPRITE_SIZE / 2);
+    }
+    straySprites.set(petType, c);
+  }
+}
+prerenderStraySprites();
+
 /** Set up shared canvas state for batched stray drawing. Call before the stray loop. */
 function beginStrayBatch(): void {
   ctx.save();
   ctx.globalAlpha = 1;
-  ctx.font = '30px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.shadowColor = 'rgba(0,0,0,0.8)';
-  ctx.shadowBlur = 4;
 }
 
 /** Reset canvas state after batched stray drawing. Call after the stray loop. */
@@ -4884,18 +4910,10 @@ function endStrayBatch(): void {
   ctx.restore();
 }
 
-/** Draw a single stray. Must be called between beginStrayBatch/endStrayBatch. */
+/** Draw a single stray using pre-rendered sprite. Must be called between beginStrayBatch/endStrayBatch. */
 function drawStray(x: number, y: number, petType: number = PET_TYPE_CAT): void {
-  const emoji = STRAY_PET_EMOJIS[petType] ?? STRAY_PET_EMOJIS[PET_TYPE_CAT];
-  ctx.fillText(emoji, x, y);
-  if (petType === PET_TYPE_SPECIAL) {
-    ctx.shadowColor = '#ffd700';
-    ctx.shadowBlur = 12;
-    ctx.fillText(emoji, x, y);
-    // Restore default shadow for next pet
-    ctx.shadowColor = 'rgba(0,0,0,0.8)';
-    ctx.shadowBlur = 4;
-  }
+  const sprite = straySprites.get(petType) ?? straySprites.get(PET_TYPE_CAT)!;
+  ctx.drawImage(sprite, x - STRAY_SPRITE_SIZE / 2, y - STRAY_SPRITE_SIZE / 2);
 }
 
 /** Draw a breeder camp: bigger tent, small enclosed pen, random pets breeding inside */
