@@ -78,6 +78,8 @@ export function getKarmaInfo(userId: string): KarmaBalance | null {
  * Ensure player_stats row exists for user
  */
 function ensurePlayerStats(userId: string): void {
+  // Guest users don't have a row in the users table; skip to avoid FK violation
+  if (userId.startsWith('guest-')) return;
   db().prepare(`
     INSERT OR IGNORE INTO player_stats (user_id, total_wins, total_rt_earned, daily_wins, karma_points)
     VALUES (?, 0, 0, 0, 0)
@@ -98,6 +100,8 @@ export function awardKarmaPoints(
   reason: string,
   source: string = 'rescueworld'
 ): number {
+  // Guest users don't have a row in the users table; skip to avoid FK violation
+  if (userId.startsWith('guest-')) return 0;
   if (amount <= 0) {
     log(`Attempted to award non-positive karma (${amount}) to ${userId} - ignored`);
     return getKarmaBalance(userId);

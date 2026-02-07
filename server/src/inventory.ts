@@ -100,6 +100,10 @@ export function depositAfterMatch(
   sizeBoosts: number = 0,
   adoptSpeedBoosts: number = 0
 ): Inventory {
+  // Guest users don't have a row in the users table; skip to avoid FK violation
+  if (userId.startsWith('guest-')) {
+    return { storedRt: 0, portCharges: 0, shelterPortCharges: 0, speedBoosts: 0, sizeBoosts: 0, shelterTier3Boosts: 0, adoptSpeedBoosts: 0 };
+  }
   const conn = db();
   
   // Upsert - insert if not exists, otherwise update

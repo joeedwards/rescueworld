@@ -1846,6 +1846,9 @@ async function saveNickname(): Promise<void> {
       const data = await res.json();
       if (data.success) {
         currentDisplayName = data.displayName;
+        if (data.guestId && !currentUserId) {
+          currentUserId = data.guestId;
+        }
         landingProfileName.textContent = data.displayName;
         landingProfileAvatar.textContent = data.displayName.charAt(0).toUpperCase();
         if (nickSaveBtn) {
@@ -1892,6 +1895,22 @@ async function getOrCreateDisplayName(): Promise<string> {
           credentials: 'include',
           body: JSON.stringify({ nickname: nickInput }),
         });
+      } catch {
+        // Ignore errors
+      }
+    } else if (!isSignedIn) {
+      // Save guest nickname and ensure we have a guest_id for rejoin
+      try {
+        const res = await fetch('/auth/guest/name', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ nickname: nickInput }),
+        });
+        const data = await res.json();
+        if (data.guestId && !currentUserId) {
+          currentUserId = data.guestId;
+        }
       } catch {
         // Ignore errors
       }

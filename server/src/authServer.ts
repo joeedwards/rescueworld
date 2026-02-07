@@ -192,8 +192,19 @@ app.post('/auth/guest/name', (req: Request, res: Response) => {
     signed: true,
     sameSite: 'lax',
   });
-  log(`guest renamed to: ${trimmed}`);
-  res.json({ success: true, displayName: trimmed });
+  // Ensure guest_id exists so the client can track this player for rejoin
+  let guestId = req.signedCookies?.guest_id ?? req.cookies?.guest_id;
+  if (!guestId) {
+    guestId = `guest-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    res.cookie('guest_id', guestId, {
+      httpOnly: true,
+      maxAge: 365 * 24 * 60 * 60 * 1000,
+      signed: true,
+      sameSite: 'lax',
+    });
+  }
+  log(`guest renamed to: ${trimmed} guestId=${guestId}`);
+  res.json({ success: true, displayName: trimmed, guestId });
 });
 
 app.get('/auth/google', (req: Request, res: Response) => {
