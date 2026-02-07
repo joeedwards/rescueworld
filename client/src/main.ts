@@ -210,7 +210,8 @@ let myPlayerId: string | null = null;
 // --- Game state (from server + interpolation) ---
 let latestSnapshot: GameSnapshot | null = null;
 const interpolatedPlayers = new Map<string, { prev: PlayerState; next: PlayerState; t: number }>();
-const interpolatedPets = new Map<string, { prev: PetState; next: PetState; startTime: number }>();
+const interpolatedPets = new Map<string, { prev: PetState; next: PetState; startTime: number; gen: number }>();
+let interpPetGen = 0; // Incremented each snapshot; entries with old gen are stale
 const INTERP_BUFFER_MS = 100;
 
 // --- Local prediction (for my player) ---
@@ -881,6 +882,7 @@ interface ActiveMultiplayerMatch {
   mode: 'ffa' | 'teams';
   durationMs: number;
   isPaused: boolean;
+  botsEnabled?: boolean;
   fetchedAt: number;
 }
 let activeMultiplayerMatches: ActiveMultiplayerMatch[] = [];
@@ -947,11 +949,12 @@ async function fetchActiveMatchesInfo(): Promise<void> {
     const data = await res.json();
     if (data.matches && Array.isArray(data.matches)) {
       const now = Date.now();
-      const matches: ActiveMultiplayerMatch[] = data.matches.map((m: { matchId: string; mode: 'ffa' | 'teams'; durationMs: number; isPaused: boolean }) => ({
+      const matches: ActiveMultiplayerMatch[] = data.matches.map((m: { matchId: string; mode: 'ffa' | 'teams'; durationMs: number; isPaused: boolean; botsEnabled?: boolean }) => ({
         matchId: m.matchId,
         mode: m.mode,
         durationMs: m.durationMs,
         isPaused: m.isPaused,
+        botsEnabled: m.botsEnabled,
         fetchedAt: now,
       }));
       setActiveMultiplayerMatches(matches);
@@ -1035,11 +1038,13 @@ function updateMatchListDisplay(): void {
     const timeStr = formatMatchDuration(currentDurationMs);
     const shortId = getShortMatchId(match.matchId);
     const pausedBadge = match.isPaused ? '<span class="match-paused">PAUSED</span>' : '';
+    const botsBadge = match.botsEnabled ? '<span class="match-bots-badge">w/bots</span>' : '';
     
     return `<div class="active-match-item" data-match-id="${match.matchId}" data-mode="${match.mode}">
       <div class="match-info">
         <span class="match-mode">${match.mode.toUpperCase()}</span>
         <span class="match-id">${shortId}</span>
+        ${botsBadge}
         ${pausedBadge}
       </div>
       <span class="match-time">${timeStr}</span>
@@ -1077,6 +1082,13 @@ function getShortMatchId(matchId: string): string {
 
 // Track current matchId for FFA/Teams
 let currentMatchId: string | null = null;
+
+// Auto-reconnect state for unexpected disconnects (mobile sleep, network blip)
+const MAX_RECONNECT_ATTEMPTS = 3;
+const RECONNECT_BASE_DELAY_MS = 1500;
+let matchDisconnectInfo: { matchId: string; mode: 'ffa' | 'teams' | 'solo'; attempts: number } | null = null;
+let matchEndedNormally = false; // Set true when match ends via matchOver/elimination, prevents auto-reconnect
+let reconnectTimeoutId: number | null = null;
 
 /** Format number for human-readable display (1K, 1.1K, 252.2K, 3M, etc.) */
 function formatNumber(n: number): string {
@@ -1733,19 +1745,32 @@ async function saveNickname(): Promise<void> {
       if (nickHintEl) nickHintEl.textContent = 'Failed to save';
     }
   } else {
-    // Guest - just update locally
-    currentDisplayName = nickname;
-    landingProfileName.textContent = nickname;
-    landingProfileAvatar.textContent = nickname.charAt(0).toUpperCase();
-    if (nickSaveBtn) {
-      nickSaveBtn.textContent = 'Saved!';
-      nickSaveBtn.classList.add('saved');
-      setTimeout(() => {
-        nickSaveBtn.textContent = 'Save';
-        nickSaveBtn.classList.remove('saved');
-      }, 2000);
+    // Guest - persist via cookie
+    try {
+      const res = await fetch('/auth/guest/name', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ nickname }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        currentDisplayName = data.displayName;
+        landingProfileName.textContent = data.displayName;
+        landingProfileAvatar.textContent = data.displayName.charAt(0).toUpperCase();
+        if (nickSaveBtn) {
+          nickSaveBtn.textContent = 'Saved!';
+          nickSaveBtn.classList.add('saved');
+          setTimeout(() => {
+            nickSaveBtn.textContent = 'Save';
+            nickSaveBtn.classList.remove('saved');
+          }, 2000);
+        }
+        if (nickHintEl) nickHintEl.textContent = 'Sign in to save permanently';
+      }
+    } catch {
+      if (nickHintEl) nickHintEl.textContent = 'Failed to save';
     }
-    if (nickHintEl) nickHintEl.textContent = 'Sign in to save permanently';
   }
 }
 
@@ -1794,6 +1819,10 @@ async function getOrCreateDisplayName(): Promise<string> {
     const data = await res.json();
     if (data.displayName) {
       currentDisplayName = data.displayName;
+      // Set guest ID so the server can track this player for rejoin
+      if (data.guestId && !currentUserId) {
+        currentUserId = data.guestId;
+      }
       // Update the UI
       landingProfileName.textContent = data.displayName;
       landingProfileAvatar.textContent = data.displayName.charAt(0).toUpperCase();
@@ -2319,8 +2348,78 @@ function showConnectionError(message: string): void {
   `;
 }
 
+// --- Auto-reconnect for unexpected disconnects ---
+function attemptAutoReconnect(): void {
+  if (!matchDisconnectInfo) return;
+  
+  const info = matchDisconnectInfo;
+  info.attempts++;
+  
+  if (info.attempts > MAX_RECONNECT_ATTEMPTS) {
+    // Give up — return to lobby and let user manually rejoin from match list
+    matchDisconnectInfo = null;
+    connectionOverlayEl.classList.add('hidden');
+    gameWrapEl.classList.remove('visible');
+    landingEl.classList.remove('hidden');
+    authAreaEl.classList.remove('hidden');
+    exitMobileFullscreen();
+    
+    // Add match to the active list for manual rejoin
+    if (currentUserId || isSignedIn) {
+      addActiveMultiplayerMatch({
+        matchId: info.matchId,
+        mode: info.mode as 'ffa' | 'teams',
+        durationMs: 0,
+        isPaused: false,
+      });
+    }
+    currentMatchId = null;
+    updateResumeMatchUI();
+    startMatchClockUpdates();
+    startMatchPolling();
+    fetchActiveMatchesInfo();
+    connectLobbyLeaderboard();
+    startServerClockWhenOnLobby();
+    startGameStatsPolling();
+    showToast('Disconnected. You can rejoin from the match list.', 'info');
+    return;
+  }
+  
+  // Show reconnecting overlay
+  connectionOverlayEl.classList.remove('hidden');
+  connectionOverlayEl.innerHTML = `<h2>Reconnecting\u2026</h2><p>Attempt ${info.attempts} of ${MAX_RECONNECT_ATTEMPTS}</p>`;
+  gameWrapEl.classList.add('visible');
+  landingEl.classList.add('hidden');
+  
+  connect({ mode: info.mode, rejoinMatchId: info.matchId })
+    .then(() => {
+      // Success — clear disconnect info
+      matchDisconnectInfo = null;
+      connectionOverlayEl.classList.add('hidden');
+      gameWrapEl.classList.add('visible');
+      requestAnimationFrame(tick);
+    })
+    .catch(() => {
+      // Retry with exponential backoff
+      const delay = RECONNECT_BASE_DELAY_MS * Math.pow(2, info.attempts - 1);
+      reconnectTimeoutId = window.setTimeout(() => {
+        reconnectTimeoutId = null;
+        attemptAutoReconnect();
+      }, delay);
+    });
+}
+
+function cancelAutoReconnect(): void {
+  matchDisconnectInfo = null;
+  if (reconnectTimeoutId !== null) {
+    clearTimeout(reconnectTimeoutId);
+    reconnectTimeoutId = null;
+  }
+}
+
 // --- Connect flow ---
 async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 'solo'; abandon?: boolean; rejoinMatchId?: string }): Promise<void> {
+  matchEndedNormally = false;
   disconnectLobbyLeaderboard();
   stopGameStatsPolling();
   if (pingIntervalId) {
@@ -2409,6 +2508,51 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     if (typeof e.data === 'string') {
       try {
         const msg = JSON.parse(e.data);
+        if (msg.type === 'pendingNoBots' && typeof msg.mode === 'string') {
+          // Server found a no-bots lobby with waiting players — prompt user
+          const modeLabel = msg.mode === 'teams' ? 'Teams' : 'FFA';
+          const textEl = document.getElementById('join-nobots-text');
+          if (textEl) {
+            const count = typeof msg.playerCount === 'number' ? msg.playerCount : 1;
+            textEl.textContent = `There's a ${modeLabel} match pending with no bots — ${count} player${count > 1 ? 's' : ''} waiting! Join them?`;
+          }
+          const popup = document.getElementById('join-nobots-popup');
+          if (popup) popup.classList.remove('hidden');
+          // Hide connecting overlay while prompt is shown
+          connectionOverlayEl.classList.add('hidden');
+          landingEl.classList.remove('hidden');
+          
+          const joinBtn = document.getElementById('join-nobots-btn');
+          const skipBtn = document.getElementById('skip-nobots-btn');
+          const wsRef = gameWsLocal;
+          
+          const cleanup = () => {
+            if (popup) popup.classList.add('hidden');
+            joinBtn?.removeEventListener('click', onJoin);
+            skipBtn?.removeEventListener('click', onSkip);
+          };
+          const onJoin = () => {
+            cleanup();
+            landingEl.classList.add('hidden');
+            connectionOverlayEl.classList.remove('hidden');
+            connectionOverlayEl.innerHTML = '<h2>Joining…</h2><p>Joining the match lobby.</p>';
+            if (wsRef.readyState === WebSocket.OPEN) {
+              wsRef.send(JSON.stringify({ type: 'joinNoBotsResponse', join: true }));
+            }
+          };
+          const onSkip = () => {
+            cleanup();
+            landingEl.classList.add('hidden');
+            connectionOverlayEl.classList.remove('hidden');
+            connectionOverlayEl.innerHTML = '<h2>Connecting…</h2><p>Starting match with bots.</p>';
+            if (wsRef.readyState === WebSocket.OPEN) {
+              wsRef.send(JSON.stringify({ type: 'joinNoBotsResponse', join: false }));
+            }
+          };
+          joinBtn?.addEventListener('click', onJoin);
+          skipBtn?.addEventListener('click', onSkip);
+          return;
+        }
         if (msg.type === 'welcome' && msg.playerId) {
           myPlayerId = msg.playerId;
           playerIdToUserId.clear(); // Reset mapping for new match
@@ -2460,6 +2604,8 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           fetchActiveMatchesInfo(); // Will refresh the match list from server
           const reason = typeof msg.reason === 'string' ? msg.reason : 'Match already ended';
           showToast(reason, 'info');
+          cancelAutoReconnect();
+          currentMatchId = null;
           if (gameWs) {
             gameWs.close();
             gameWs = null;
@@ -2467,7 +2613,6 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           // Return to lobby
           myPlayerId = null;
           latestSnapshot = null;
-          currentMatchId = null;
           leaderboardEl.classList.remove('show');
           matchEndPlayed = false;
           matchEndTokensAwarded = false;
@@ -2501,13 +2646,14 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
               updateShutdownToast();
             }
           }, 1000);
+          cancelAutoReconnect();
+          currentMatchId = null;
           if (gameWs) {
             gameWs.close();
             gameWs = null;
           }
           myPlayerId = null;
           latestSnapshot = null;
-          currentMatchId = null;
           leaderboardEl.classList.remove('show');
           matchEndPlayed = false;
           matchEndTokensAwarded = false;
@@ -2743,9 +2889,34 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         lastShelterPortCharges = currentShelterPorts;
       }
       const petSnapTime = performance.now();
+      const curGen = ++interpPetGen;
       for (const pet of snap.pets) {
-        const prev = interpolatedPets.get(pet.id)?.next ?? pet;
-        interpolatedPets.set(pet.id, { prev, next: { ...pet }, startTime: petSnapTime });
+        const existing = interpolatedPets.get(pet.id);
+        if (existing) {
+          // Reuse objects: swap prev/next references, copy fields onto next
+          const tmp = existing.prev;
+          existing.prev = existing.next;
+          existing.next = tmp;
+          tmp.id = pet.id; tmp.x = pet.x; tmp.y = pet.y;
+          tmp.vx = pet.vx; tmp.vy = pet.vy;
+          tmp.insideShelterId = pet.insideShelterId;
+          tmp.petType = pet.petType;
+          existing.startTime = petSnapTime;
+          existing.gen = curGen;
+        } else {
+          interpolatedPets.set(pet.id, {
+            prev: pet,
+            next: { ...pet },
+            startTime: petSnapTime,
+            gen: curGen,
+          });
+        }
+      }
+      // Sweep stale entries (pets no longer in snapshot) — zero allocations
+      if (interpolatedPets.size > snap.pets.length + 50) {
+        for (const [id, entry] of interpolatedPets) {
+          if (entry.gen !== curGen) interpolatedPets.delete(id);
+        }
       }
       const me = snap.players.find((q) => q.id === myPlayerId);
       if (me) {
@@ -2804,11 +2975,18 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         lastTotalAdoptions = me.totalAdoptions;
         if (me.petsInside.length > lastPetsInsideLength) playStrayCollected();
         lastPetsInsideLength = me.petsInside.length;
-        // Track van and shelter pet IDs + all pet types for next frame (so we know types of adopted pets)
+        // Track van and shelter pet IDs + pet types for adoption animations
+        // Only track types for pets in own van/shelter — not all 2000+ strays
         lastPetsInsideIds = [...me.petsInside];
         const mySh = latestSnapshot?.shelters?.find((s) => s.ownerId === myPlayerId);
         lastShelterPetsInsideIds = mySh ? [...mySh.petsInside] : [];
-        for (const p of snap.pets) lastPetTypesById.set(p.id, p.petType ?? PET_TYPE_CAT);
+        const trackIds = new Set(lastPetsInsideIds);
+        if (mySh) for (const id of mySh.petsInside) trackIds.add(id);
+        if (trackIds.size > 0) {
+          for (const p of snap.pets) {
+            if (trackIds.has(p.id)) lastPetTypesById.set(p.id, p.petType ?? PET_TYPE_CAT);
+          }
+        }
         lastKnownSize = me.size;
         const prevX = predictedPlayer?.x ?? me.x;
         const prevY = predictedPlayer?.y ?? me.y;
@@ -2868,6 +3046,11 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     }
   };
   gameWsLocal.onclose = () => {
+    const wasMatchId = currentMatchId;
+    const wasMode = selectedMode;
+    const wasMatchEnded = matchEndedNormally;
+    const wasObserver = isObserver;
+    
     gameWs = null;
     myPlayerId = null;
     latestSnapshot = null;
@@ -2879,6 +3062,14 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     isObserver = false;
     observerOverlayEl.classList.add('hidden');
     wasBossModeActive = false;
+    
+    // Auto-reconnect if this was an unexpected disconnect during an active FFA/Teams match
+    if (wasMatchId && !wasMatchEnded && !wasObserver && (wasMode === 'ffa' || wasMode === 'teams')) {
+      if (!matchDisconnectInfo) {
+        matchDisconnectInfo = { matchId: wasMatchId, mode: wasMode, attempts: 0 };
+      }
+      attemptAutoReconnect();
+    }
   };
   await new Promise<void>((resolve, reject) => {
     const deadline = Date.now() + CONNECT_TIMEOUT_MS;
@@ -2911,6 +3102,8 @@ let targetFps: 30 | 60 = getStoredFps();
 let targetFrameMs = 1000 / targetFps;
 let lastTickTime = 0;
 let lastInputSendTime = 0;
+/** Cached performance.now() for the current frame — avoids repeated syscalls in interpolation. */
+let frameNow = 0;
 let lastRenderTime = 0;
 
 function tick(now: number): void {
@@ -2923,6 +3116,7 @@ function tick(now: number): void {
   }
   
   if (!lastTickTime) lastTickTime = now;
+  frameNow = performance.now(); // Cache for all interpolation this frame
   const dt = Math.min((now - lastTickTime) / 1000, 0.1);
   lastTickTime = now;
   lastRenderTime = now;
@@ -3116,15 +3310,22 @@ function getInterpolatedPlayer(id: string): PlayerState | null {
   };
 }
 
+/** Reusable buffer for interpolated pet — mutated and returned, consumed immediately by caller. */
+const _interpPetBuf: PetState = { id: '', x: 0, y: 0, vx: 0, vy: 0, insideShelterId: null, petType: 0 };
+
 function getInterpolatedPet(id: string): PetState | null {
   const entry = interpolatedPets.get(id);
   if (!entry) return null;
-  const t = Math.min(1, (performance.now() - entry.startTime) / INTERP_BUFFER_MS);
-  return {
-    ...entry.next,
-    x: lerp(entry.prev.x, entry.next.x, t),
-    y: lerp(entry.prev.y, entry.next.y, t),
-  };
+  const t = Math.min(1, (frameNow - entry.startTime) / INTERP_BUFFER_MS);
+  const n = entry.next;
+  _interpPetBuf.id = n.id;
+  _interpPetBuf.x = lerp(entry.prev.x, n.x, t);
+  _interpPetBuf.y = lerp(entry.prev.y, n.y, t);
+  _interpPetBuf.vx = n.vx;
+  _interpPetBuf.vy = n.vy;
+  _interpPetBuf.insideShelterId = n.insideShelterId;
+  _interpPetBuf.petType = n.petType;
+  return _interpPetBuf;
 }
 
 // --- World rendering (agar.io / territorial.io style) ---
@@ -5245,12 +5446,12 @@ function render(dt: number): void {
   beginStrayBatch();
   for (const pet of latestSnapshot?.pets ?? []) {
     if (pet.insideShelterId !== null) continue;
+    // Skip uninitialized pets at (0,0) - ghost stray fix
+    if (pet.x === 0 && pet.y === 0) continue;
+    // Cull BEFORE interpolation using raw snapshot position (within ~4 units of true pos)
+    if (pet.x < viewL || pet.x > viewR || pet.y < viewT || pet.y > viewB) continue;
     const p = getInterpolatedPet(pet.id) ?? pet;
     if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
-    // Skip uninitialized pets at (0,0) - ghost stray fix
-    if (p.x === 0 && p.y === 0) continue;
-    // Skip pets outside the viewport
-    if (p.x < viewL || p.x > viewR || p.y < viewT || p.y > viewB) continue;
     drawStray(p.x, p.y, pet.petType ?? PET_TYPE_CAT);
   }
   endStrayBatch();
@@ -5470,11 +5671,14 @@ function render(dt: number): void {
     }
     // Only draw stray pets if hideStraysOnMinimap is false
     if (!hideStraysOnMinimap) {
-      for (const pet of latestSnapshot.pets) {
+      minimapCtx.fillStyle = '#c9a86c';
+      // When many pets, draw every Nth to keep minimap responsive
+      const petCount = latestSnapshot.pets.length;
+      const step = petCount > 1000 ? 4 : petCount > 500 ? 2 : 1;
+      for (let pi = 0; pi < petCount; pi += step) {
+        const pet = latestSnapshot.pets[pi];
         if (pet.insideShelterId !== null) continue;
-        // Skip uninitialized pets at (0,0)
         if (pet.x === 0 && pet.y === 0) continue;
-        minimapCtx.fillStyle = '#c9a86c';
         minimapCtx.fillRect(pet.x * scale - 2, pet.y * scale - 2, 4, 4);
       }
     }
@@ -5942,7 +6146,8 @@ function render(dt: number): void {
   // Vans always capped at VAN_MAX_CAPACITY (shelter capacity shown on shelter building)
   const capacity = Math.min(rawCapacity, VAN_MAX_CAPACITY);
   const inside = me?.petsInside.length ?? 0;
-  const strayCount = latestSnapshot?.pets.filter((p) => p.insideShelterId === null).length ?? 0;
+  // Use server-provided total (pets array may be capped for performance)
+  const strayCount = latestSnapshot?.totalOutdoorStrays ?? 0;
   scoreEl.textContent = me?.eliminated ? 'Observer Mode' : `Size: ${rawCapacity}`;
   carriedEl.textContent = me?.eliminated ? 'WASD to pan | Drag to move' : `Pets: ${inside}/${capacity}`;
   
@@ -6155,6 +6360,7 @@ function render(dt: number): void {
     }
     if (!matchEndPlayed) {
       matchEndPlayed = true;
+      matchEndedNormally = true;
       playMatchEnd();
     }
     leaderboardEl.classList.add('show');
@@ -6368,6 +6574,8 @@ observerBackBtnEl.addEventListener('click', () => {
 
 // --- Lobby: Back to lobby (same as end-match lobby button) ---
 lobbyBackBtnEl.addEventListener('click', () => {
+  cancelAutoReconnect();
+  currentMatchId = null;
   if (gameWs) {
     gameWs.close();
     gameWs = null;
@@ -6761,6 +6969,9 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
   const exitMatchDurationMs = latestSnapshot?.matchDurationMs ?? 0;
   
   // Always close and return to lobby (even if WebSocket is already closed)
+  cancelAutoReconnect();
+  const exitMatchId = currentMatchId;
+  currentMatchId = null; // Clear before close to prevent auto-reconnect
   settingsPanelEl.classList.add('hidden');
   if (gameWs) {
     gameWs.close();
@@ -6783,10 +6994,11 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
   if (selectedMode === 'solo' && wasConnected) {
     hasSavedMatch = true;
     updateResumeMatchUI();
-  } else if ((selectedMode === 'ffa' || selectedMode === 'teams') && currentMatchId && isSignedIn) {
+  } else if ((selectedMode === 'ffa' || selectedMode === 'teams') && exitMatchId && (isSignedIn || currentUserId)) {
     // For FFA/Teams, add the match to the list (don't replace existing matches)
+    // Works for both registered users and guests (who now have a guest_id)
     addActiveMultiplayerMatch({ 
-      matchId: currentMatchId, 
+      matchId: exitMatchId, 
       mode: selectedMode, 
       durationMs: exitMatchDurationMs,
       isPaused: false, // Will update on next poll
@@ -6797,7 +7009,6 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
     fetchSavedMatchStatus();
     fetchActiveMatchesInfo();
   }
-  currentMatchId = null;
   startServerClockWhenOnLobby();
   connectLobbyLeaderboard();
   startGameStatsPolling();
@@ -6808,6 +7019,8 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
   }
 });
 switchServerBtnEl.addEventListener('click', () => {
+  cancelAutoReconnect();
+  currentMatchId = null;
   if (gameWs) {
     gameWs.close();
     gameWs = null;
@@ -8297,7 +8510,11 @@ function renderLobbyLeaderboard(entries: { rank: number; userId?: string; displa
     const colorSpan = entry.shelterColor
       ? `<span class="leaderboard-color" style="background:${escapeHtml(entry.shelterColor)}"></span>`
       : '';
-    return `<div class="lobby-leaderboard-entry${highlight}">
+    const isMe = entry.userId === myId;
+    const clickAttr = (!isMe && isSignedIn && entry.userId && entry.userId !== currentUserId)
+      ? ` data-user-id="${escapeHtml(entry.userId)}" data-display-name="${escapeHtml(entry.displayName)}" onclick="window.__showRelPopup(event)" style="cursor:pointer"`
+      : '';
+    return `<div class="lobby-leaderboard-entry${highlight}"${clickAttr}>
       <span class="lobby-leaderboard-rank ${rankClass}">#${entry.rank}</span>
       ${colorSpan}
       <span class="lobby-leaderboard-name">${escapeHtml(entry.displayName)}</span>
@@ -8554,8 +8771,12 @@ function renderLeaderboard(entries: LeaderboardEntry[], myRank: number): void {
     const colorBadge = entry.shelterColor 
       ? `<span class="leaderboard-color" style="background:${entry.shelterColor}"></span>` 
       : '';
+    const isMe = entry.userId === currentUserId;
+    const clickAttr = (!isMe && isSignedIn && entry.userId && entry.userId !== currentUserId)
+      ? ` data-user-id="${escapeHtml(entry.userId)}" data-display-name="${escapeHtml(entry.displayName)}" onclick="window.__showRelPopup(event)" style="cursor:pointer"`
+      : '';
     return `
-      <div class="leaderboard-entry ${highlight}">
+      <div class="leaderboard-entry ${highlight}"${clickAttr}>
         <div class="leaderboard-rank ${rankClass}">#${entry.rank}</div>
         ${colorBadge}
         <div class="leaderboard-name">${escapeHtml(entry.displayName)}</div>
@@ -8829,3 +9050,23 @@ updateLandingTokens();
 startServerClockWhenOnLobby();
 window.addEventListener('resize', resize);
 resize();
+
+// --- Page Visibility API: detect browser wake-from-sleep (mobile hibernation) ---
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  
+  // Check if we have an active match but the websocket is dead
+  if (currentMatchId && (!gameWs || gameWs.readyState !== WebSocket.OPEN) && !matchEndedNormally) {
+    const mode = selectedMode;
+    if (mode === 'ffa' || mode === 'teams') {
+      // The websocket died while the page was hidden (mobile sleep)
+      if (!matchDisconnectInfo) {
+        matchDisconnectInfo = { matchId: currentMatchId, mode, attempts: 0 };
+      }
+      // Only start reconnect if not already in progress
+      if (reconnectTimeoutId === null) {
+        attemptAutoReconnect();
+      }
+    }
+  }
+});

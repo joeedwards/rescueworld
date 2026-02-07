@@ -262,6 +262,8 @@ export interface GameSnapshot {
     scarcityLevel?: number;
     /** Match duration in milliseconds since start. */
     matchDurationMs?: number;
+    /** True outdoor stray count (pets array may be capped for performance). */
+    totalOutdoorStrays?: number;
     players: PlayerState[];
     pets: PetState[];
     adoptionZones: AdoptionZoneState[];

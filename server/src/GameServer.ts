@@ -177,6 +177,8 @@ const userIdToFfaMatches = new Map<string, Array<{ matchId: string; playerId: st
 const MAX_SIMULTANEOUS_MATCHES = 5;
 // FFA lobby match (waiting for players)
 let ffaLobbyMatchId: string | null = null;
+// Teams lobby match (waiting for players)
+let teamsLobbyMatchId: string | null = null;
 
 // Online presence tracking: userId -> Set of WebSocket connections (a user may have multiple tabs)
 const onlineUsers = new Map<string, Set<WebSocket>>();
@@ -276,6 +278,12 @@ export function getActiveMatchForUser(userId: string): { matchId: string; player
 export function isMatchPaused(matchId: string): boolean {
   const match = matches.get(matchId);
   return match?.frozen ?? false;
+}
+
+/** Check if a match has bots enabled */
+export function isMatchBotsEnabled(matchId: string): boolean {
+  const match = matches.get(matchId);
+  return match?.botsEnabled ?? false;
 }
 
 /** Get match duration in milliseconds for a given match ID */
@@ -452,6 +460,7 @@ function destroyMatch(matchId: string): void {
   deleteSavedFfaMatch(matchId);
   matches.delete(matchId);
   if (ffaLobbyMatchId === matchId) ffaLobbyMatchId = null;
+  if (teamsLobbyMatchId === matchId) teamsLobbyMatchId = null;
   log(`match destroyed id=${matchId}`);
 }
 
@@ -495,16 +504,6 @@ function ensureCpusForMatch(match: Match): void {
       const idx = match.cpuIds.size + 1;
       const cid = `cpu-${idx}`;
       if (!match.cpuIds.has(cid) && getMatchTotalPlayers(match) < MAX_FFA_PLAYERS) {
-        match.world.addPlayer(cid, pickBotName(match));
-        match.cpuIds.add(cid);
-      }
-    }
-  } else if (match.mode === 'ffa' && match.players.size >= 2) {
-    const humanCount = match.players.size;
-    const snapshot = match.world.getSnapshot();
-    if (humanCount === 2 && snapshot.players.filter((p) => !p.id.startsWith('cpu-')).length < 3) {
-      const cid = 'cpu-1';
-      if (!match.cpuIds.has(cid)) {
         match.world.addPlayer(cid, pickBotName(match));
         match.cpuIds.add(cid);
       }
@@ -731,6 +730,8 @@ wss.on('connection', async (ws) => {
   let startingPorts = 0;
   let startingShelterTier3Boosts = 0;
   let startingInventory: Inventory | null = null;
+  // Pending no-bots prompt: stored when player has bots enabled but a no-bots lobby exists
+  let pendingNoBotsInfo: { mode: 'ffa' | 'teams'; displayName: string } | null = null;
   
   const addPlayerToMatch = (match: Match, name: string) => {
     if (playerAdded) return;
@@ -841,14 +842,18 @@ wss.on('connection', async (ws) => {
           const name = typeof msg.displayName === 'string' && msg.displayName ? msg.displayName : null;
           const rejoinMatchId = typeof msg.rejoinMatchId === 'string' ? msg.rejoinMatchId : null;
           
-          // Check if client sent userId for registered user
+          // Check if client sent userId (registered user or guest with guest_id)
           // NOTE: Don't withdraw inventory here! We need to validate the match first.
           // Inventory withdrawal happens in addPlayerToMatch after confirming match is valid.
-          if (typeof msg.userId === 'string' && msg.userId.startsWith('u-')) {
+          if (typeof msg.userId === 'string' && (msg.userId.startsWith('u-') || msg.userId.startsWith('guest-'))) {
             playerUserId = msg.userId as string;
-            log(`Registered user ${playerUserId} connecting...`);
+            if (msg.userId.startsWith('u-')) {
+              log(`Registered user ${playerUserId} connecting...`);
+            } else {
+              log(`Guest ${playerUserId} connecting...`);
+            }
           } else {
-            // Fallback: accept from client for backwards compatibility (guests)
+            // Fallback: accept from client for backwards compatibility
             if (typeof msg.startingRT === 'number' && msg.startingRT > 0) {
               startingRT = Math.floor(msg.startingRT);
             }
@@ -1025,64 +1030,34 @@ wss.on('connection', async (ws) => {
               
               const clientBotsEnabled = !!msg.botsEnabled;
               
-              // FFA: try to join an in-progress match that is not full
-              let joinedMidMatch = false;
-              for (const [, m] of matches) {
-                if (m.mode === 'ffa' && m.phase === 'playing' && !m.world.isMatchOver() && !m.frozen) {
-                  if (getMatchTotalPlayers(m) < MAX_FFA_PLAYERS) {
-                    addPlayerToMatch(m, displayNameToUse);
-                    if (clientBotsEnabled) m.botsEnabled = true;
-                    joinedMidMatch = true;
-                    log(`FFA mid-match join: player joined playing match ${m.id}`);
-                    break;
-                  }
+              // Check if player has bots enabled but there's a no-bots lobby with waiting players
+              if (clientBotsEnabled) {
+                const existingLobby = ffaLobbyMatchId ? matches.get(ffaLobbyMatchId) : null;
+                if (existingLobby && existingLobby.phase === 'lobby' && !existingLobby.botsEnabled && existingLobby.players.size > 0) {
+                  // Prompt the player: there's a no-bots match waiting
+                  pendingNoBotsInfo = { mode: 'ffa', displayName: displayNameToUse };
+                  const waitingCount = existingLobby.players.size;
+                  ws.send(JSON.stringify({ type: 'pendingNoBots', mode: 'ffa', playerCount: waitingCount }));
+                  log(`FFA no-bots lobby prompt sent to ${displayNameToUse} (${waitingCount} waiting)`);
+                  return;
                 }
               }
               
-              if (!joinedMidMatch) {
-                // Check if all in-progress FFA matches are full -> observer mode
-                let fullMatch: Match | null = null;
-                for (const [, m] of matches) {
-                  if (m.mode === 'ffa' && m.phase === 'playing' && !m.world.isMatchOver() && !m.frozen) {
-                    if (getMatchTotalPlayers(m) >= MAX_FFA_PLAYERS) {
-                      fullMatch = m;
-                      break;
-                    }
-                  }
-                }
-                
-                // Join lobby or create one
-                let match = ffaLobbyMatchId ? matches.get(ffaLobbyMatchId) : null;
-                if (!match || match.phase === 'playing') {
-                  // If all matches are full and no lobby, offer observer mode on the full match
-                  if (fullMatch && !match) {
-                    // Add as observer
-                    const obsId = `obs-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-                    fullMatch.observers.set(obsId, ws);
-                    currentMatchId = fullMatch.id;
-                    playerAdded = true;
-                    effectivePlayerId = obsId;
-                    ws.send(JSON.stringify({ type: 'observing', matchId: fullMatch.id }));
-                    log(`Observer ${obsId} watching full match ${fullMatch.id}`);
-                    // When match ends or slot opens, we handle promotion in tick loop
-                    ws.on('close', () => {
-                      fullMatch!.observers.delete(obsId);
-                    });
-                    return;
-                  }
-                  // Create new lobby if none exists or current is already playing
-                  match = createMatch('ffa');
-                  ffaLobbyMatchId = match.id;
-                }
-                if (clientBotsEnabled) match.botsEnabled = true;
-                addPlayerToMatch(match, displayNameToUse);
-                
-                if (match.players.size >= 2 && match.phase === 'lobby') {
-                  ensureCpusForMatch(match);
-                  match.phase = 'countdown';
-                  match.countdownEndAt = Date.now() + FFA_COUNTDOWN_MS;
-                  match.readySet.clear();
-                }
+              // Join lobby or create one (no mid-match joining — only original players can rejoin via rejoinMatchId)
+              let match = ffaLobbyMatchId ? matches.get(ffaLobbyMatchId) : null;
+              if (!match || match.phase === 'playing') {
+                // Create new lobby if none exists or current is already playing
+                match = createMatch('ffa');
+                ffaLobbyMatchId = match.id;
+              }
+              if (clientBotsEnabled) match.botsEnabled = true;
+              addPlayerToMatch(match, displayNameToUse);
+              
+              if (match.players.size >= 2 && match.phase === 'lobby') {
+                ensureCpusForMatch(match);
+                match.phase = 'countdown';
+                match.countdownEndAt = Date.now() + FFA_COUNTDOWN_MS;
+                match.readySet.clear();
               }
             } else {
               // Teams: check if player wants to rejoin a specific teams match
@@ -1157,31 +1132,97 @@ wss.on('connection', async (ws) => {
               
               const teamsBotsEnabled = !!msg.botsEnabled;
               
-              // Teams: try to join an in-progress match that is not full
-              let teamsJoinedMid = false;
-              for (const [, m] of matches) {
-                if (m.mode === 'teams' && m.phase === 'playing' && !m.world.isMatchOver() && !m.frozen) {
-                  if (getMatchTotalPlayers(m) < MAX_FFA_PLAYERS) {
-                    addPlayerToMatch(m, displayNameToUse);
-                    if (teamsBotsEnabled) m.botsEnabled = true;
-                    teamsJoinedMid = true;
-                    log(`Teams mid-match join: player joined playing match ${m.id}`);
-                    break;
-                  }
+              // Check if player has bots enabled but there's a no-bots lobby with waiting players
+              if (teamsBotsEnabled) {
+                const existingLobby = teamsLobbyMatchId ? matches.get(teamsLobbyMatchId) : null;
+                if (existingLobby && existingLobby.phase === 'lobby' && !existingLobby.botsEnabled && existingLobby.players.size > 0) {
+                  pendingNoBotsInfo = { mode: 'teams', displayName: displayNameToUse };
+                  const waitingCount = existingLobby.players.size;
+                  ws.send(JSON.stringify({ type: 'pendingNoBots', mode: 'teams', playerCount: waitingCount }));
+                  log(`Teams no-bots lobby prompt sent to ${displayNameToUse} (${waitingCount} waiting)`);
+                  return;
                 }
               }
               
-              if (!teamsJoinedMid) {
-                let match = ffaLobbyMatchId ? matches.get(ffaLobbyMatchId) : null;
-                if (!match) {
-                  match = createMatch('teams');
-                  ffaLobbyMatchId = match.id;
-                }
-                if (teamsBotsEnabled) match.botsEnabled = true;
-                addPlayerToMatch(match, displayNameToUse);
+              // Join teams lobby or create one (no mid-match joining — only original players can rejoin via rejoinMatchId)
+              let match = teamsLobbyMatchId ? matches.get(teamsLobbyMatchId) : null;
+              if (!match || match.phase === 'playing') {
+                match = createMatch('teams');
+                teamsLobbyMatchId = match.id;
               }
+              if (teamsBotsEnabled) match.botsEnabled = true;
+              addPlayerToMatch(match, displayNameToUse);
             }
           })();
+          return;
+        }
+        
+        // Handle response to no-bots lobby prompt
+        if (msg.type === 'joinNoBotsResponse' && pendingNoBotsInfo) {
+          const info = pendingNoBotsInfo;
+          pendingNoBotsInfo = null;
+          
+          const joinNoBots = !!msg.join;
+          const lobbyId = info.mode === 'ffa' ? ffaLobbyMatchId : teamsLobbyMatchId;
+          
+          if (joinNoBots) {
+            // Re-check that the no-bots lobby still exists and is valid
+            const lobby = lobbyId ? matches.get(lobbyId) : null;
+            if (lobby && lobby.phase === 'lobby' && !lobby.botsEnabled) {
+              // Join the existing no-bots lobby
+              addPlayerToMatch(lobby, info.displayName);
+              if (lobby.players.size >= 2 && lobby.phase === 'lobby') {
+                ensureCpusForMatch(lobby);
+                lobby.phase = 'countdown';
+                lobby.countdownEndAt = Date.now() + FFA_COUNTDOWN_MS;
+                lobby.readySet.clear();
+              }
+              log(`Player ${info.displayName} joined no-bots ${info.mode} lobby`);
+              return;
+            }
+            // Lobby gone — fall through to create a new one (without bots since they chose to join no-bots)
+            let match: Match;
+            if (info.mode === 'ffa') {
+              match = createMatch('ffa');
+              ffaLobbyMatchId = match.id;
+            } else {
+              match = createMatch('teams');
+              teamsLobbyMatchId = match.id;
+            }
+            addPlayerToMatch(match, info.displayName);
+            log(`No-bots lobby expired, created new ${info.mode} lobby for ${info.displayName}`);
+          } else {
+            // Player declined — start with bots as originally intended
+            let match: Match;
+            if (info.mode === 'ffa') {
+              let existing = ffaLobbyMatchId ? matches.get(ffaLobbyMatchId) : null;
+              // Don't join the no-bots lobby they declined; create a separate bots lobby
+              if (!existing || existing.phase === 'playing' || !existing.botsEnabled) {
+                match = createMatch('ffa');
+                // Don't overwrite ffaLobbyMatchId if a no-bots lobby is still waiting
+                if (!existing || existing.phase === 'playing') {
+                  ffaLobbyMatchId = match.id;
+                }
+              } else {
+                match = existing;
+              }
+            } else {
+              let existing = teamsLobbyMatchId ? matches.get(teamsLobbyMatchId) : null;
+              if (!existing || existing.phase === 'playing' || !existing.botsEnabled) {
+                match = createMatch('teams');
+                if (!existing || existing.phase === 'playing') {
+                  teamsLobbyMatchId = match.id;
+                }
+              } else {
+                match = existing;
+              }
+            }
+            match.botsEnabled = true;
+            addPlayerToMatch(match, info.displayName);
+            
+            // Single player with bots — they can press "Ready with Bots" from the lobby
+            log(`Player ${info.displayName} declined no-bots, created ${info.mode} lobby with bots`);
+          }
           return;
         }
         
@@ -1205,6 +1246,7 @@ wss.on('connection', async (ws) => {
               ensureCpusForMatch(match);
               transitionToPlaying(match);
               if (ffaLobbyMatchId === match.id) ffaLobbyMatchId = null;
+              if (teamsLobbyMatchId === match.id) teamsLobbyMatchId = null;
               log(`Ready with bots: match ${match.id} started with ${humanCount} human(s) + ${match.cpuIds.size} bot(s)`);
             }
           }
@@ -1736,16 +1778,20 @@ setInterval(() => {
           match.world.clearPendingAnnouncements();
         }
         
-        const buf = encodeSnapshot(snapshot);
-        for (const ws of match.players.values()) {
-          if (ws.readyState === 1) ws.send(buf);
-        }
-        // Broadcast to observers too
-        for (const [obsId, obsWs] of match.observers.entries()) {
-          if (obsWs.readyState === 1) {
-            obsWs.send(buf);
-          } else {
-            match.observers.delete(obsId);
+        // Send binary snapshots every 2nd tick (12.5 Hz) — halves encode + network cost
+        // Game logic still runs at 25 Hz; client interpolation (100ms buffer) smooths the gap
+        if (snapshot.tick % 2 === 0) {
+          const buf = encodeSnapshot(snapshot);
+          for (const ws of match.players.values()) {
+            if (ws.readyState === 1) ws.send(buf);
+          }
+          // Broadcast to observers too
+          for (const [obsId, obsWs] of match.observers.entries()) {
+            if (obsWs.readyState === 1) {
+              obsWs.send(buf);
+            } else {
+              match.observers.delete(obsId);
+            }
           }
         }
         

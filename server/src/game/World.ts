@@ -68,6 +68,7 @@ import {
   BOSS_TYCOON_REBUILD_TICKS,
 } from 'shared';
 import { INPUT_LEFT, INPUT_RIGHT, INPUT_UP, INPUT_DOWN } from 'shared';
+import { SpatialGrid } from './SpatialGrid';
 import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED, PICKUP_TYPE_PORT, PICKUP_TYPE_BREEDER, PICKUP_TYPE_SHELTER_PORT } from 'shared';
 import { PET_TYPE_CAT, PET_TYPE_DOG, PET_TYPE_BIRD, PET_TYPE_RABBIT } from 'shared';
 import { BOSS_MILL_HORSE, BOSS_MILL_CAT, BOSS_MILL_DOG, BOSS_MILL_BIRD, BOSS_MILL_RABBIT } from 'shared';
@@ -86,7 +87,16 @@ function randomPetType(): number {
 }
 
 function dist(ax: number, ay: number, bx: number, by: number): number {
-  return Math.hypot(bx - ax, by - ay);
+  const dx = bx - ax;
+  const dy = by - ay;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/** Squared distance — use instead of dist() when comparing against a radius. */
+function distSq(ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  return dx * dx + dy * dy;
 }
 
 function shelterRadius(size: number): number {
@@ -247,6 +257,11 @@ export class World {
   
   // Wild strays (from breeder shelters) - harder to catch, move around
   private wildStrayIds = new Set<string>();
+  
+  // Spatial grid for fast proximity queries (rebuilt every tick)
+  private petGrid = new SpatialGrid<PetState>(200);
+  /** Reusable buffer for spatial-grid query results (avoids per-query allocation) */
+  private gridQueryBuf: PetState[] = [];
   
   // Solo mode options
   private cpuCanShutdownBreeders = true; // Can be set via game options
@@ -1502,6 +1517,8 @@ export class World {
     }
     
     // Wild strays (from breeder shelters) move around randomly - harder to catch!
+    // Direction changes are staggered across ticks so we don't spike CPU every 75th tick
+    const tickMod75 = this.tick % 75;
     for (const petId of this.wildStrayIds) {
       const pet = this.pets.get(petId);
       if (!pet || pet.insideShelterId !== null) {
@@ -1509,9 +1526,9 @@ export class World {
         continue;
       }
       
-      // Random movement with occasional direction changes (every ~3s so strays wander far)
-      if (this.tick % 75 === 0 || (pet.vx === 0 && pet.vy === 0)) {
-        // Change direction randomly
+      // Staggered direction change: use pet's sequence number to distribute across 75 ticks
+      const seq = parseInt(petId.slice(4), 10) || 0; // "pet-123" → 123
+      if ((seq % 75) === tickMod75 || (pet.vx === 0 && pet.vy === 0)) {
         const angle = Math.random() * Math.PI * 2;
         const speed = World.BREEDER_STRAY_SPEED;
         pet.vx = Math.cos(angle) * speed;
@@ -1527,29 +1544,44 @@ export class World {
       if (pet.y <= 50 || pet.y >= MAP_HEIGHT - 50) pet.vy *= -1;
     }
     
-    // Keep strays outside breeder camp/shelter radius (clean map)
-    const R = World.BREEDER_NO_STRAY_RADIUS;
+    // Rebuild spatial grid for outdoor pets (used by all proximity queries below)
+    this.petGrid.clear();
     for (const pet of this.pets.values()) {
-      if (pet.insideShelterId !== null) continue;
-      for (const pickup of this.pickups.values()) {
-        if (pickup.type !== PICKUP_TYPE_BREEDER) continue;
+      if (pet.insideShelterId === null) {
+        this.petGrid.insert(pet);
+      }
+    }
+
+    // Keep strays outside breeder camp/shelter radius (clean map)
+    // Inverted loop: iterate breeders and query nearby pets from spatial grid
+    const R = World.BREEDER_NO_STRAY_RADIUS;
+    const buf = this.gridQueryBuf;
+    for (const pickup of this.pickups.values()) {
+      if (pickup.type !== PICKUP_TYPE_BREEDER) continue;
+      buf.length = 0;
+      this.petGrid.queryRadius(pickup.x, pickup.y, R, buf);
+      for (let i = 0; i < buf.length; i++) {
+        const pet = buf[i];
         const d = dist(pet.x, pet.y, pickup.x, pickup.y);
-        if (d < R && d > 0) {
+        if (d > 0) {
           const dx = (pet.x - pickup.x) / d;
           const dy = (pet.y - pickup.y) / d;
           pet.x = pickup.x + dx * R;
           pet.y = pickup.y + dy * R;
-          break; // one correction per pet per tick
         }
       }
-      for (const shelter of this.breederShelters.values()) {
+    }
+    for (const shelter of this.breederShelters.values()) {
+      buf.length = 0;
+      this.petGrid.queryRadius(shelter.x, shelter.y, R, buf);
+      for (let i = 0; i < buf.length; i++) {
+        const pet = buf[i];
         const d = dist(pet.x, pet.y, shelter.x, shelter.y);
-        if (d < R && d > 0) {
+        if (d > 0) {
           const dx = (pet.x - shelter.x) / d;
           const dy = (pet.y - shelter.y) / d;
           pet.x = shelter.x + dx * R;
           pet.y = shelter.y + dy * R;
-          break;
         }
       }
     }
@@ -1614,7 +1646,8 @@ export class World {
     const ticksSinceLastWave = now - this.lastBreederWaveTick;
     
     // Check if victory conditions are met (don't spawn new waves if we've won)
-    const currentStrayCount = Array.from(this.pets.values()).filter((p) => p.insideShelterId === null).length;
+    let currentStrayCount = 0;
+    for (const pet of this.pets.values()) { if (pet.insideShelterId === null) currentStrayCount++; }
     const allBreedersClearedNow = this.breederShelters.size === 0 && this.breederCamps.size === 0;
     const victoryConditionsMet = this.shelters.size > 0 && currentStrayCount === 0 && allBreedersClearedNow;
     
@@ -1790,7 +1823,14 @@ export class World {
             insideShelterId: null,
             petType: randomPetType(),
           });
-          this.wildStrayIds.add(petId); // Mark as wild stray
+          // Cap wandering strays at 300 — excess spawn as stationary (no client interp cost)
+          if (this.wildStrayIds.size < 300) {
+            this.wildStrayIds.add(petId);
+          } else {
+            // Spawn as stationary stray (no velocity)
+            const pet = this.pets.get(petId);
+            if (pet) { pet.vx = 0; pet.vy = 0; }
+          }
         }
       }
     }
@@ -1809,8 +1849,9 @@ export class World {
         // Skip if player is on retreat cooldown (just retreated from a camp/mill)
         const millRetreatEnd = this.retreatCooldownUntilTick.get(p.id) ?? 0;
         if (this.tick < millRetreatEnd) continue;
-        const d = dist(p.x, p.y, breederShelter.x, breederShelter.y);
-        if (d > VAN_FIXED_RADIUS + bsr) continue;
+        const d2 = distSq(p.x, p.y, breederShelter.x, breederShelter.y);
+        const combatR = VAN_FIXED_RADIUS + bsr;
+        if (d2 > combatR * combatR) continue;
         this.millInCombat.add(shelterId);
         this.activeMillByPlayer.set(p.id, shelterId);
         this.pendingBreederMiniGames.set(p.id, {
@@ -2008,7 +2049,10 @@ export class World {
 
     // Combat: overlapping shelters can fight after sustained overlap time
     const playerList = Array.from(this.players.values());
-    const strayCountForCombat = Array.from(this.pets.values()).filter((p) => p.insideShelterId === null).length;
+    let strayCountForCombat = 0;
+    for (const pet of this.pets.values()) {
+      if (pet.insideShelterId === null) strayCountForCombat++;
+    }
     for (let i = 0; i < playerList.length; i++) {
       const a = playerList[i];
       if (this.eliminatedPlayerIds.has(a.id)) continue;
@@ -2157,7 +2201,8 @@ export class World {
     // Vans can push each other away from shelters but cannot attack
     
     // Stray count for loss and warnings
-    const strayCountVictory = Array.from(this.pets.values()).filter((p) => p.insideShelterId === null).length;
+    let strayCountVictory = 0;
+    for (const pet of this.pets.values()) { if (pet.insideShelterId === null) strayCountVictory++; }
     if (!this.matchEndedEarly) {
       if (strayCountVictory >= 400 && !this.strayWarnings.has(400)) {
         this.strayWarnings.add(400);
@@ -2206,16 +2251,18 @@ export class World {
       }
     }
     
-    // Shelters with gravity upgrade pull strays toward them
+    // Shelters with gravity upgrade pull strays toward them (spatial-grid accelerated)
     for (const shelter of this.shelters.values()) {
       if (!shelter.hasGravity) continue;
       const sr = shelterVisualRadius(shelter.size);
       const gravityRadius = Math.min(sr + 550, 900);
       const pullPerTick = 3;
-      for (const pet of this.pets.values()) {
-        if (pet.insideShelterId !== null) continue;
+      buf.length = 0;
+      this.petGrid.queryRadius(shelter.x, shelter.y, gravityRadius, buf);
+      for (let i = 0; i < buf.length; i++) {
+        const pet = buf[i];
         const d = dist(shelter.x, shelter.y, pet.x, pet.y);
-        if (d > gravityRadius || d < 1) continue;
+        if (d < 1) continue;
         const dx = (shelter.x - pet.x) / d;
         const dy = (shelter.y - pet.y) / d;
         pet.x += dx * pullPerTick;
@@ -2223,7 +2270,7 @@ export class World {
       }
     }
     
-    // Shelter auto-collect: shelters with adoption center collect strays directly
+    // Shelter auto-collect: shelters with adoption center collect strays directly (spatial-grid accelerated)
     for (const shelter of this.shelters.values()) {
       if (!shelter.hasAdoptionCenter) continue;
       const owner = this.players.get(shelter.ownerId);
@@ -2233,21 +2280,21 @@ export class World {
       const sr = shelterVisualRadius(shelter.size);
       const collectRadius = Math.min(sr + 30, 350); // Capped so large shelters don't vacuum the whole map
       
-      for (const pet of this.pets.values()) {
-        if (pet.insideShelterId !== null) continue;
+      buf.length = 0;
+      this.petGrid.queryRadius(shelter.x, shelter.y, collectRadius, buf);
+      for (let i = 0; i < buf.length; i++) {
+        const pet = buf[i];
+        if (pet.insideShelterId !== null) continue; // may have been collected by another shelter this tick
         if (shelter.petsInside.length >= maxPets) break;
         
-        const d = dist(shelter.x, shelter.y, pet.x, pet.y);
-        if (d <= collectRadius) {
-          // Check owner can afford upkeep
-          const ownerMoney = this.playerMoney.get(shelter.ownerId) ?? 0;
-          if (ownerMoney < SHELTER_PET_UPKEEP) continue;
-          
-          // Collect the pet
-          pet.insideShelterId = shelter.id;
-          shelter.petsInside.push(pet.id);
-          this.playerMoney.set(shelter.ownerId, ownerMoney - SHELTER_PET_UPKEEP);
-        }
+        // Check owner can afford upkeep
+        const ownerMoney = this.playerMoney.get(shelter.ownerId) ?? 0;
+        if (ownerMoney < SHELTER_PET_UPKEEP) continue;
+        
+        // Collect the pet
+        pet.insideShelterId = shelter.id;
+        shelter.petsInside.push(pet.id);
+        this.playerMoney.set(shelter.ownerId, ownerMoney - SHELTER_PET_UPKEEP);
       }
     }
     
@@ -2264,8 +2311,7 @@ export class World {
         
         // Van must be physically close to the shelter building to deliver (not the full territory radius)
         const deliveryDistance = Math.min(shelterVisualRadius(shelter.size), 300);
-        const d = dist(p.x, p.y, shelter.x, shelter.y);
-        if (d > deliveryDistance) continue;
+        if (distSq(p.x, p.y, shelter.x, shelter.y) > deliveryDistance * deliveryDistance) continue;
         const shelterOwner = this.players.get(shelter.ownerId);
         const maxPets = shelterOwner ? shelterMaxPets(shelterOwner.size) : 25;
         if (shelter.petsInside.length >= maxPets) continue;
@@ -2316,7 +2362,8 @@ export class World {
         continue;
       }
       const radius = effectiveRadius(player);
-      if (dist(player.x, player.y, u.x, u.y) > radius + GROWTH_ORB_RADIUS) {
+      const cpuBreederR = radius + GROWTH_ORB_RADIUS;
+      if (distSq(player.x, player.y, u.x, u.y) > cpuBreederR * cpuBreederR) {
         this.cpuAtBreeder.delete(playerId);
         this.breederClaimedBy.delete(data.breederUid);
         continue;
@@ -2365,7 +2412,8 @@ export class World {
       if (this.eliminatedPlayerIds.has(p.id)) continue;
       const radius = effectiveRadius(p);
       for (const [uid, u] of Array.from(this.pickups.entries())) {
-        if (dist(p.x, p.y, u.x, u.y) > radius + GROWTH_ORB_RADIUS) continue;
+        const pickupR = radius + GROWTH_ORB_RADIUS;
+        if (distSq(p.x, p.y, u.x, u.y) > pickupR * pickupR) continue;
         if (u.type === PICKUP_TYPE_BREEDER) {
           const isCpu = cpuIds?.has(p.id);
           if (isCpu) {
@@ -2466,29 +2514,35 @@ export class World {
       }
     }
 
+    // Van rescue: pick up nearby strays (spatial-grid accelerated)
     for (const p of this.players.values()) {
       if (this.eliminatedPlayerIds.has(p.id)) continue;
       // Vans (not grounded) are capped at VAN_MAX_CAPACITY; shelters use full size capacity
       const isGrounded = this.groundedPlayerIds.has(p.id);
       const capacity = isGrounded ? Math.floor(p.size) : Math.min(Math.floor(p.size), VAN_MAX_CAPACITY);
+      if (p.petsInside.length >= capacity) continue;
       const sr = effectiveRadius(p);
       const rescueRadius = Math.max(RESCUE_RADIUS, sr + PET_RADIUS);
-      while (p.petsInside.length < capacity) {
-        let best: PetState | null = null;
-        let bestD = rescueRadius + 1;
-        for (const pet of this.pets.values()) {
-          if (pet.insideShelterId !== null) continue;
-          const d = dist(p.x, p.y, pet.x, pet.y);
-          if (d < bestD) {
-            bestD = d;
-            best = pet;
-          }
-        }
-        if (!best) break;
-        best.insideShelterId = p.id;
-        p.petsInside.push(best.id);
-        p.speedBoostUntil = 0; // end speed boost when picking up a stray
+      buf.length = 0;
+      this.petGrid.queryRadius(p.x, p.y, rescueRadius, buf);
+      // Sort candidates by distance (nearest first) so rescue order matches old behaviour
+      const px = p.x, py = p.y;
+      if (buf.length > 1) {
+        buf.sort((a, b) => {
+          const da = (a.x - px) * (a.x - px) + (a.y - py) * (a.y - py);
+          const db = (b.x - px) * (b.x - px) + (b.y - py) * (b.y - py);
+          return da - db;
+        });
       }
+      let pickedAny = false;
+      for (let i = 0; i < buf.length && p.petsInside.length < capacity; i++) {
+        const pet = buf[i];
+        if (pet.insideShelterId !== null) continue; // may have been collected by another van/shelter this tick
+        pet.insideShelterId = p.id;
+        p.petsInside.push(pet.id);
+        pickedAny = true;
+      }
+      if (pickedAny) p.speedBoostUntil = 0; // end speed boost when picking up strays
     }
 
     // Adoption at central adoption zone (van delivers pets there)
@@ -2578,8 +2632,7 @@ export class World {
       for (const p of this.players.values()) {
         if (this.eliminatedPlayerIds.has(p.id)) continue;
         if (p.petsInside.length === 0) continue;
-        const d = dist(p.x, p.y, ev.x, ev.y);
-        if (d > ev.radius) continue;
+        if (distSq(p.x, p.y, ev.x, ev.y) > ev.radius * ev.radius) continue;
         while (p.petsInside.length > 0) {
           const pid = p.petsInside.pop()!;
           const pet = this.pets.get(pid);
@@ -2631,7 +2684,13 @@ export class World {
     return this.strayLoss;
   }
 
-  /** Build reusable array of outdoor strays only (pets not inside any shelter). */
+  /** True outdoor stray count (before snapshot cap). */
+  private outdoorStrayCount = 0;
+  /** Max strays included in a single snapshot (caps decode + network cost). */
+  private static readonly SNAPSHOT_STRAY_CAP = 500;
+
+  /** Build reusable array of outdoor strays only (pets not inside any shelter).
+   *  Capped at SNAPSHOT_STRAY_CAP to keep snapshots small; prioritises strays near players. */
   private getSnapshotStrays(): PetState[] {
     this.snapshotStrays.length = 0;
     for (const pet of this.pets.values()) {
@@ -2639,8 +2698,65 @@ export class World {
         this.snapshotStrays.push(pet);
       }
     }
+    this.outdoorStrayCount = this.snapshotStrays.length;
+
+    // If within cap, send everything
+    if (this.snapshotStrays.length <= World.SNAPSHOT_STRAY_CAP) {
+      return this.snapshotStrays;
+    }
+
+    // Too many strays — keep only those nearest to any player van.
+    // Score each stray by squared distance to its closest player.
+    const players = Array.from(this.players.values()).filter(
+      p => !this.eliminatedPlayerIds.has(p.id)
+    );
+    if (players.length === 0) {
+      // No active players — just truncate
+      this.snapshotStrays.length = World.SNAPSHOT_STRAY_CAP;
+      return this.snapshotStrays;
+    }
+
+    // Compute min-squared-distance to any player for each stray
+    const len = this.snapshotStrays.length;
+    // Reuse a typed array to avoid allocations (grown once, persisted on class)
+    if (!this._strayScores || this._strayScores.length < len) {
+      this._strayScores = new Float64Array(len);
+    }
+    const scores = this._strayScores;
+    for (let i = 0; i < len; i++) {
+      const s = this.snapshotStrays[i];
+      let minD2 = Infinity;
+      for (let j = 0; j < players.length; j++) {
+        const dx = s.x - players[j].x;
+        const dy = s.y - players[j].y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < minD2) minD2 = d2;
+      }
+      scores[i] = minD2;
+    }
+
+    // Partial sort: keep the SNAPSHOT_STRAY_CAP closest strays
+    // Use selection-style partitioning via index sorting
+    const indices = this._strayIndices && this._strayIndices.length >= len
+      ? this._strayIndices
+      : (this._strayIndices = new Uint32Array(len));
+    for (let i = 0; i < len; i++) indices[i] = i;
+    // Sort indices by score ascending (closest first)
+    const idxSlice = Array.from(indices.subarray(0, len));
+    idxSlice.sort((a, b) => scores[a] - scores[b]);
+    // Build capped array
+    const cap = World.SNAPSHOT_STRAY_CAP;
+    const capped: PetState[] = new Array(cap);
+    for (let i = 0; i < cap; i++) {
+      capped[i] = this.snapshotStrays[idxSlice[i]];
+    }
+    // Overwrite the reusable array
+    this.snapshotStrays.length = 0;
+    for (let i = 0; i < cap; i++) this.snapshotStrays.push(capped[i]);
     return this.snapshotStrays;
   }
+  private _strayScores: Float64Array | null = null;
+  private _strayIndices: Uint32Array | null = null;
 
   getSnapshot(): GameSnapshot {
     return {
@@ -2652,6 +2768,7 @@ export class World {
       totalMatchAdoptions: this.totalMatchAdoptions,
       scarcityLevel: this.scarcityLevel > 0 ? this.scarcityLevel : undefined,
       matchDurationMs: this.getMatchDurationMs(),
+      totalOutdoorStrays: this.outdoorStrayCount,
       players: Array.from(this.players.values()).map((p) => {
         const eliminated = this.eliminatedPlayerIds.has(p.id);
         const hasShelter = this.hasShelter(p.id);
@@ -3140,8 +3257,8 @@ export class World {
       const mill = bm.mills[i];
       if (mill.completed) continue;
       
-      const distance = dist(humanPlayer.x, humanPlayer.y, mill.x, mill.y);
-      if (distance <= BOSS_MILL_RADIUS + VAN_FIXED_RADIUS) {
+      const bossMillR = BOSS_MILL_RADIUS + VAN_FIXED_RADIUS;
+      if (distSq(humanPlayer.x, humanPlayer.y, mill.x, mill.y) <= bossMillR * bossMillR) {
         nearMillId = i;
         break;
       }

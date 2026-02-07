@@ -29,7 +29,7 @@ import { getInventory, depositAfterMatch, withdrawForMatch, purchaseBoost, Boost
 import { recordMatchWin, recordRtEarned, updateReputationOnQuit } from './leaderboard.js';
 import { getGameStats } from './gameStats.js';
 import { getKarmaBalance, getKarmaInfo, awardKarmaPoints, getKarmaHistory } from './karmaService.js';
-import { getRealtimeStats, getActiveMatchForUser, getActiveMatchesForUser, getMatchDurationMs, isMatchPaused } from './GameServer.js';
+import { getRealtimeStats, getActiveMatchForUser, getActiveMatchesForUser, getMatchDurationMs, isMatchPaused, isMatchBotsEnabled } from './GameServer.js';
 
 /** Timestamped log function for server output */
 function log(message: string): void {
@@ -92,9 +92,20 @@ app.get('/auth/me', (req, res) => {
     }
   }
   const guestName = req.signedCookies?.guest_name ?? req.cookies?.guest_name;
+  let guestId = req.signedCookies?.guest_id ?? req.cookies?.guest_id;
   if (guestName) {
-    log(`auth/me guest cookie displayName=${guestName}`);
-    res.json({ displayName: guestName, signedIn: false, userId: null, shelterColor: null });
+    // Auto-create guest_id for existing guests who don't have one yet
+    if (!guestId) {
+      guestId = `guest-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      res.cookie('guest_id', guestId, {
+        httpOnly: true,
+        maxAge: 365 * 24 * 60 * 60 * 1000,
+        signed: true,
+        sameSite: 'lax',
+      });
+    }
+    log(`auth/me guest cookie displayName=${guestName} guestId=${guestId}`);
+    res.json({ displayName: guestName, signedIn: false, userId: guestId, shelterColor: null });
     return;
   }
   log('auth/me no session');
@@ -139,6 +150,7 @@ app.post('/auth/profile', (req: Request, res: Response) => {
 app.get('/auth/signout', (req: Request, res: Response) => {
   res.clearCookie('session');
   res.clearCookie('guest_name');
+  res.clearCookie('guest_id');
   //const gamePath = API_ORIGIN.includes('localhost') ? '/' : '/rescueworld/';
   const gamePath = '/';
   res.redirect(`${API_ORIGIN.replace(/\/$/, '')}${gamePath}`);
@@ -146,14 +158,42 @@ app.get('/auth/signout', (req: Request, res: Response) => {
 
 app.post('/auth/guest', async (req: Request, res: Response) => {
   const displayName = await getNextGuestName();
-  log(`auth guest assigned displayName=${displayName}`);
+  // Reuse existing guest_id if present, otherwise generate a new one
+  const existingGuestId = req.signedCookies?.guest_id ?? req.cookies?.guest_id;
+  const guestId = existingGuestId ?? `guest-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  log(`auth guest assigned displayName=${displayName} guestId=${guestId}`);
   res.cookie('guest_name', displayName, {
     httpOnly: true,
     maxAge: 365 * 24 * 60 * 60 * 1000,
     signed: true,
     sameSite: 'lax',
   });
-  res.json({ displayName });
+  if (!existingGuestId) {
+    res.cookie('guest_id', guestId, {
+      httpOnly: true,
+      maxAge: 365 * 24 * 60 * 60 * 1000,
+      signed: true,
+      sameSite: 'lax',
+    });
+  }
+  res.json({ displayName, guestId });
+});
+
+app.post('/auth/guest/name', (req: Request, res: Response) => {
+  const { nickname } = req.body as { nickname?: string };
+  const trimmed = typeof nickname === 'string' ? nickname.trim().slice(0, 20) : '';
+  if (!trimmed) {
+    res.status(400).json({ error: 'invalid_nickname' });
+    return;
+  }
+  res.cookie('guest_name', trimmed, {
+    httpOnly: true,
+    maxAge: 365 * 24 * 60 * 60 * 1000,
+    signed: true,
+    sameSite: 'lax',
+  });
+  log(`guest renamed to: ${trimmed}`);
+  res.json({ success: true, displayName: trimmed });
 });
 
 app.get('/auth/google', (req: Request, res: Response) => {
@@ -383,7 +423,7 @@ app.delete('/api/saved-match', (req: Request, res: Response) => {
 
 // Get all active FFA/Teams matches for a user (for lobby display with multiple matches)
 app.get('/api/active-matches', (req: Request, res: Response) => {
-  const userId = req.signedCookies?.session;
+  const userId = req.signedCookies?.session ?? req.signedCookies?.guest_id ?? req.cookies?.guest_id;
   if (!userId) {
     res.json({ matches: [] });
     return;
@@ -394,13 +434,14 @@ app.get('/api/active-matches', (req: Request, res: Response) => {
     mode: info.mode,
     durationMs: getMatchDurationMs(info.matchId),
     isPaused: isMatchPaused(info.matchId),
+    botsEnabled: isMatchBotsEnabled(info.matchId),
   }));
   res.json({ matches });
 });
 
 // Get first active FFA/Teams match info for a user (backward compatibility)
 app.get('/api/active-match', (req: Request, res: Response) => {
-  const userId = req.signedCookies?.session;
+  const userId = req.signedCookies?.session ?? req.signedCookies?.guest_id ?? req.cookies?.guest_id;
   if (!userId) {
     res.json({ hasActiveMatch: false });
     return;

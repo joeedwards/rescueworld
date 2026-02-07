@@ -65,8 +65,8 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
   const shelters = snap.shelters ?? [];
   const breederShelters = snap.breederShelters ?? [];
   const adoptionEvents = snap.adoptionEvents ?? [];
-  // msg(1), tick(4), matchEndAt(4), matchEndedEarly(1), winnerId(string), totalMatchAdoptions(4), scarcityLevel(1), matchDurationMs(4), numPlayers(1)
-  let size = 1 + 4 + 4 + 1 + 1 + encoder.encode(snap.winnerId ?? '').length + 4 + 1 + 4 + 1;
+  // msg(1), tick(4), matchEndAt(4), matchEndedEarly(1), winnerId(string), totalMatchAdoptions(4), scarcityLevel(1), matchDurationMs(4), totalOutdoorStrays(2), numPlayers(1)
+  let size = 1 + 4 + 4 + 1 + 1 + encoder.encode(snap.winnerId ?? '').length + 4 + 1 + 4 + 2 + 1;
   for (const p of players) {
     size += 1 + encoder.encode(p.id).length + 1 + encoder.encode(p.displayName ?? p.id).length + 4 * 4 + 4 + 4 + 1; // id, displayName, x,y,vx,vy, size(4), totalAdoptions(4), numPets
     for (const pid of p.petsInside) size += 1 + encoder.encode(pid).length;
@@ -153,6 +153,8 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
   view.setUint8(off++, (snap.scarcityLevel ?? 0) & 0xff);
   view.setUint32(off, (snap.matchDurationMs ?? 0) >>> 0, true);
   off += 4;
+  view.setUint16(off, (snap.totalOutdoorStrays ?? snap.pets.length) & 0xffff, true);
+  off += 2;
   view.setUint8(off++, players.length);
   for (const p of players) {
     off = writeString(view, off, p.id);
@@ -342,6 +344,8 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
   const scarcityLevel = view.getUint8(off++);
   const matchDurationMs = view.getUint32(off, true);
   off += 4;
+  const totalOutdoorStrays = view.getUint16(off, true);
+  off += 2;
   const numPlayers = view.getUint8(off++);
   const players: PlayerState[] = [];
   for (let i = 0; i < numPlayers; i++) {
@@ -617,6 +621,7 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
     totalMatchAdoptions,
     scarcityLevel: scarcityLevel > 0 ? scarcityLevel : undefined,
     matchDurationMs,
+    totalOutdoorStrays,
     players, 
     pets, 
     adoptionZones, 
