@@ -1,6 +1,6 @@
 # Adoptar.io -- Marketing Kit
 
-> **Adoptar.io -- Pet Rescue** is a multiplayer .io game where players drive rescue vans to save stray pets, dismantle breeder mills, and place animals into forever homes. Compete on seasonal leaderboards, build shelters, and earn Karma Points that carry over to our upcoming companion game, **Shelter Sim**.
+> **Adoptar.io** is a multiplayer .io game where players drive rescue vans to save stray pets, dismantle breeder mills, and place animals into forever homes. Compete on seasonal leaderboards, build shelters, and earn Karma Points that carry over to our upcoming companion game, **Shelter Sim**.
 
 Play now at **[adoptar.io](https://adoptar.io)**
 
@@ -186,6 +186,7 @@ Both tracks are original compositions.
 | `adoptario-promo-9s.mp4` | 9s | Compact seasons + Boss Mode promo with music crossfade |
 | `adoptario-promo-7s.mp4` | 7s | Original promo clip |
 | `adoptario-promo-mixed-7s.mp4` | 7s | Mixed gameplay promo clip |
+| `adoptario-promo-io.mp4` | 7.5s | IO games library thumbnail -- 276x158, 2x speed, silent, under 500KB |
 | `adoptario-video.mp3` | 3:16 | "Forever Home Rush" -- main game music |
 | `music.mp3` | 3:16 | Main gameplay music (same track, source file) |
 | `boss.mp3` | 3:09 | "Boss Mode in D Minor" -- boss battle music |

@@ -627,6 +627,7 @@
       border-bottom: 2px solid rgba(255,255,255,0.12);
     }
     .landing-top .logo { font: 700 20px/1 Rubik, sans-serif; color: #7bed9f; letter-spacing: 0.08em; }
+    .landing-top .logo .logo-icon { display: none; }
     .landing-top .policy-links { display: flex; gap: 16px; flex-wrap: wrap; }
     .landing-top .policy-links a { font: 600 12px/1 Rubik, sans-serif; color: rgba(255,255,255,0.8); text-decoration: none; }
     .landing-top .policy-links a:hover { color: #7bed9f; }
@@ -647,6 +648,10 @@
       .landing-center { order: 1; max-width: 100%; width: 100%; }
       .landing-left { order: 2; max-width: 100%; width: 100%; }
       .landing-right { order: 3; max-width: 100%; width: 100%; }
+      /* Mobile header: show logo icon instead of text, right-justify nav */
+      .landing-top .logo { font-size: 0; display: flex; align-items: center; }
+      .landing-top .logo .logo-icon { display: block; width: 28px; height: 28px; }
+      .landing-top .policy-links { justify-content: flex-end; margin-left: auto; }
     }
     .game-mode-center { margin-top: 16px; text-align: center; }
     .game-mode-center h3 { font: 700 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 10px; }
@@ -850,13 +855,15 @@
   
   <div id="landing">
     <header class="landing-top">
-      <span class="logo">Adoptar.io</span>
+      <span class="logo"><img src="favicon.svg" alt="Adoptar.io" class="logo-icon" />Adoptar.io</span>
       <nav class="policy-links">
         <a href="privacy.html">Privacy</a>
         <a href="cookies.html">Cookies</a>
         <a href="terms.html">Terms</a>
         <a href="contact.html">Contact</a>
         <a href="privacy-settings.html">Privacy settings</a>
+        <a href="https://iogames.party/">IO Party</a>
+        <a href="https://iogames.space/games/adoptario">IO Space</a>
       </nav>
     </header>
     <main class="landing-main">
