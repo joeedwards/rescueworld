@@ -269,6 +269,18 @@ function initSqlite(): void {
     );
   `);
 
+  // Player relationships (friend/foe) table
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS player_relationships (
+      user_id TEXT NOT NULL,
+      target_user_id TEXT NOT NULL,
+      relationship TEXT NOT NULL CHECK(relationship IN ('friend', 'foe')),
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, target_user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_rel_target ON player_relationships(target_user_id);
+  `);
+
   // Game counts table for tracking all games (including guests) - mode-agnostic totals
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS game_counts (
@@ -615,4 +627,55 @@ export function getGameCounts(): { solo: number; ffa: number; teams: number } {
     else if (row.mode === 'teams') result.teams = row.total_games;
   }
   return result;
+}
+
+// --- Player Relationships (friend/foe) ---
+
+export type RelationshipType = 'friend' | 'foe';
+
+export interface RelationshipRow {
+  user_id: string;
+  target_user_id: string;
+  relationship: RelationshipType;
+  created_at: number;
+}
+
+/** Get all relationships for a user, joined with target display names. */
+export function getRelationships(userId: string): Array<{ targetUserId: string; displayName: string; relationship: RelationshipType }> {
+  const rows = db().prepare(
+    `SELECT pr.target_user_id, u.display_name, pr.relationship
+     FROM player_relationships pr
+     LEFT JOIN users u ON u.id = pr.target_user_id
+     WHERE pr.user_id = ?`,
+  ).all(userId) as Array<{ target_user_id: string; display_name: string | null; relationship: RelationshipType }>;
+  return rows.map(r => ({
+    targetUserId: r.target_user_id,
+    displayName: r.display_name ?? 'Unknown',
+    relationship: r.relationship,
+  }));
+}
+
+/** Set (upsert) a relationship. */
+export function setRelationship(userId: string, targetUserId: string, relationship: RelationshipType): void {
+  if (userId === targetUserId) return; // Can't mark yourself
+  db().prepare(
+    `INSERT INTO player_relationships (user_id, target_user_id, relationship, created_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(user_id, target_user_id) DO UPDATE SET relationship = excluded.relationship`,
+  ).run(userId, targetUserId, relationship, Date.now());
+}
+
+/** Remove a relationship. */
+export function removeRelationship(userId: string, targetUserId: string): void {
+  db().prepare(
+    `DELETE FROM player_relationships WHERE user_id = ? AND target_user_id = ?`,
+  ).run(userId, targetUserId);
+}
+
+/** Get all userIds who have marked this user as a friend (for online notifications). */
+export function getFriendsOf(targetUserId: string): string[] {
+  const rows = db().prepare(
+    `SELECT user_id FROM player_relationships WHERE target_user_id = ? AND relationship = 'friend'`,
+  ).all(targetUserId) as Array<{ user_id: string }>;
+  return rows.map(r => r.user_id);
 }

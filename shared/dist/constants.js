@@ -1,7 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.BOSS_MODE_TIME_LIMIT_TICKS = exports.BOSS_MODE_TIME_LIMIT_SECONDS = exports.VAN_MAX_CAPACITY = exports.VAN_BASE_SIZE = exports.SHELTER_BUILD_COST = exports.TOKENS_PER_ADOPTION = exports.EVENT_MILESTONES = exports.SATELLITE_ZONE_MILESTONE = exports.SCARCITY_TRIGGER_TICKS = exports.ADOPTION_MILESTONE_WIN = exports.PICKUP_SPAWN_TICKS = exports.SPEED_BOOST_MULTIPLIER = exports.SPEED_BOOST_DURATION_TICKS = exports.GROWTH_ORB_VALUE = exports.GROWTH_ORB_RADIUS = exports.STRAY_SPAWN_COUNT = exports.STRAY_SPAWN_TICKS = exports.MAX_PLAYERS_PER_SHARD = exports.SESSION_DURATION_MS = exports.INITIAL_SHELTER_SIZE = exports.EARLY_GAME_PROTECTION_TICKS = exports.EARLY_GAME_PROTECTION_ADOPTIONS = exports.EARLY_GAME_PROTECTION_SIZE = exports.COMBAT_MAX_VARIANCE = exports.COMBAT_STRAY_VARIANCE = exports.COMBAT_STRENGTH_WEIGHT = exports.COMBAT_PET_WEIGHT = exports.COMBAT_TRANSFER_SIZE_RATIO_DIVISOR = exports.COMBAT_TRANSFER_PER_WIN = exports.COMBAT_GRACE_TICKS = exports.COMBAT_MIN_SIZE = exports.GROWTH_PER_ADOPTION = exports.ADOPTION_TICKS_GROUNDED = exports.ADOPTION_FAST_PET_THRESHOLD = exports.ADOPTION_TICKS_INTERVAL_FAST = exports.ADOPTION_TICKS_INTERVAL = exports.AUTO_JUMP_ADOPTIONS = exports.GROUNDED_ZONE_RATIO = exports.ADOPTION_ZONE_RADIUS = exports.PET_RADIUS = exports.RESCUE_RADIUS = exports.SHELTER_RADIUS_PER_SIZE = exports.SHELTER_BASE_RADIUS = exports.SHELTER_LARGE_SIZE_THRESHOLD = exports.SHELTER_SPEED_LARGE = exports.SHELTER_SPEED = exports.MAP_HEIGHT = exports.MAP_WIDTH = exports.TICK_MS = exports.TICK_RATE = void 0;
-exports.BOSS_CAUGHT_PENALTY = exports.BOSS_MODE_REWARDS = exports.BOSS_MILL_RADIUS = exports.BOSS_PETMALL_RADIUS = exports.BOSS_MILL_RECIPES = exports.BOSS_MILL_NAMES = exports.BOSS_MILL_PET_COUNTS = exports.BOSS_INGREDIENT_COSTS = exports.BOSS_TYCOON_DETECTION_RADIUS = exports.BOSS_TYCOON_WARNING_SECONDS = exports.BOSS_TYCOON_SPEED = exports.BOSS_TYCOON_DWELL_TICKS = exports.BOSS_TYCOON_DWELL_SECONDS = void 0;
+exports.BOSS_MODE_TIME_LIMIT_SECONDS = exports.VAN_MAX_CAPACITY = exports.VAN_BASE_SIZE = exports.SHELTER_BUILD_COST = exports.TOKENS_PER_ADOPTION = exports.EVENT_MILESTONES = exports.SATELLITE_ZONE_MILESTONE = exports.SCARCITY_TRIGGER_TICKS = exports.ADOPTION_MILESTONE_WIN = exports.PICKUP_SPAWN_TICKS = exports.SPEED_BOOST_MULTIPLIER = exports.SPEED_BOOST_DURATION_TICKS = exports.GROWTH_ORB_VALUE = exports.GROWTH_ORB_RADIUS = exports.STRAY_SPAWN_COUNT = exports.STRAY_SPAWN_TICKS = exports.MAX_FFA_PLAYERS = exports.MAX_PLAYERS_PER_SHARD = exports.SESSION_DURATION_MS = exports.INITIAL_SHELTER_SIZE = exports.EARLY_GAME_PROTECTION_TICKS = exports.EARLY_GAME_PROTECTION_ADOPTIONS = exports.EARLY_GAME_PROTECTION_SIZE = exports.COMBAT_MAX_VARIANCE = exports.COMBAT_STRAY_VARIANCE = exports.COMBAT_STRENGTH_WEIGHT = exports.COMBAT_PET_WEIGHT = exports.COMBAT_TRANSFER_SIZE_RATIO_DIVISOR = exports.COMBAT_TRANSFER_PER_WIN = exports.COMBAT_GRACE_TICKS = exports.COMBAT_MIN_SIZE = exports.GROWTH_PER_ADOPTION = exports.ADOPTION_TICKS_GROUNDED = exports.ADOPTION_FAST_PET_THRESHOLD = exports.ADOPTION_TICKS_INTERVAL_FAST = exports.ADOPTION_TICKS_INTERVAL = exports.AUTO_JUMP_ADOPTIONS = exports.GROUNDED_ZONE_RATIO = exports.ADOPTION_ZONE_RADIUS = exports.PET_RADIUS = exports.RESCUE_RADIUS = exports.SHELTER_RADIUS_PER_SIZE = exports.SHELTER_BASE_RADIUS = exports.SHELTER_LARGE_SIZE_THRESHOLD = exports.SHELTER_SPEED_LARGE = exports.SHELTER_SPEED = exports.MAP_HEIGHT = exports.MAP_WIDTH = exports.TICK_MS = exports.TICK_RATE = void 0;
+exports.BOSS_TYCOON_REBUILD_TICKS = exports.BOSS_TYCOON_REBUILD_SECONDS = exports.BOSS_CAUGHT_PENALTY = exports.BOSS_MODE_REWARDS = exports.BOSS_MILL_RADIUS = exports.BOSS_PETMALL_RADIUS = exports.BOSS_MILL_RECIPES = exports.BOSS_MILL_NAMES = exports.BOSS_MILL_PET_COUNTS = exports.BOSS_INGREDIENT_COSTS = exports.BOSS_TYCOON_DETECTION_RADIUS = exports.BOSS_TYCOON_WARNING_SECONDS = exports.BOSS_TYCOON_SPEED = exports.BOSS_TYCOON_DWELL_TICKS = exports.BOSS_TYCOON_DWELL_SECONDS = exports.BOSS_MODE_TIME_LIMIT_TICKS = void 0;
 /** Fixed tick rate (Hz). Server and client use same rate for prediction. */
 exports.TICK_RATE = 25;
 /** Tick interval in ms */
@@ -66,6 +66,8 @@ exports.INITIAL_SHELTER_SIZE = 1;
 exports.SESSION_DURATION_MS = 5 * 60 * 1000;
 /** Max players per shard. */
 exports.MAX_PLAYERS_PER_SHARD = 100;
+/** Max players per FFA/Teams match (including bots). */
+exports.MAX_FFA_PLAYERS = 8;
 /** Stray spawn interval (ticks); spawn multiple per tick for a race feel. */
 exports.STRAY_SPAWN_TICKS = 25;
 /** Strays spawned per spawn event. */
@@ -168,3 +170,7 @@ exports.BOSS_MODE_REWARDS = {
 };
 /** Penalty for being caught by tycoon (lose this fraction of purchased ingredients). */
 exports.BOSS_CAUGHT_PENALTY = 0.5;
+/** Time for tycoon to rebuild a cleared mill (seconds). */
+exports.BOSS_TYCOON_REBUILD_SECONDS = 10;
+/** Time for tycoon to rebuild a cleared mill (ticks). */
+exports.BOSS_TYCOON_REBUILD_TICKS = exports.BOSS_TYCOON_REBUILD_SECONDS * exports.TICK_RATE;

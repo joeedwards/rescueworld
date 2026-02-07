@@ -101,17 +101,24 @@ import {
   playMusic,
   playWelcome,
   playPickupBoost,
-  playDropOff,
   playStrayCollected,
   playMatchEnd,
   playAttackWarning,
   playPort,
+  playAdoptionSounds,
   getMusicEnabled,
   setMusicEnabled,
   getSfxEnabled,
   setSfxEnabled,
+  getVanSoundType,
+  setVanSoundType,
   updateEngineState,
+  updateEngineThrottle,
   stopEngineLoop,
+  playBossMusic,
+  stopBossMusic,
+  isBossMusicPlaying,
+  type VanSoundType,
 } from './audio';
 
 const SIGNALING_URL = (() => {
@@ -203,7 +210,7 @@ let myPlayerId: string | null = null;
 // --- Game state (from server + interpolation) ---
 let latestSnapshot: GameSnapshot | null = null;
 const interpolatedPlayers = new Map<string, { prev: PlayerState; next: PlayerState; t: number }>();
-const interpolatedPets = new Map<string, { prev: PetState; next: PetState; t: number }>();
+const interpolatedPets = new Map<string, { prev: PetState; next: PetState; startTime: number }>();
 const INTERP_BUFFER_MS = 100;
 
 // --- Local prediction (for my player) ---
@@ -239,6 +246,8 @@ const minimapCtx = minimap.getContext('2d')!;
 const scoreEl = document.getElementById('score')!;
 const eventPanelEl = document.getElementById('event-panel')!;
 const eventPanelListEl = document.getElementById('event-panel-list')!;
+const eventToggleBtnEl = document.getElementById('event-toggle-btn')!;
+let eventPanelOpen = false;
 const carriedEl = document.getElementById('carried')!;
 const tagCooldownEl = document.getElementById('tag-cooldown')!;
 const timerEl = document.getElementById('timer')!;
@@ -251,6 +260,7 @@ const settingsPanelEl = document.getElementById('settings-panel')!;
 const exitToLobbyBtnEl = document.getElementById('exit-to-lobby-btn')!;
 const musicToggleEl = document.getElementById('music-toggle') as HTMLInputElement;
 const sfxToggleEl = document.getElementById('sfx-toggle') as HTMLInputElement;
+const vanSoundSelectEl = document.getElementById('van-sound-select') as HTMLSelectElement;
 const hideStraysToggleEl = document.getElementById('hide-strays-toggle') as HTMLInputElement;
 const settingsCloseEl = document.getElementById('settings-close')!;
 const fpsSelectEl = document.getElementById('fps-select') as HTMLSelectElement | null;
@@ -314,6 +324,8 @@ const lobbyCountdownEl = document.getElementById('lobby-countdown')!;
 const lobbyReadyBtnEl = document.getElementById('lobby-ready-btn')!;
 const lobbyBackBtnEl = document.getElementById('lobby-back-btn')!;
 const lobbyGiftBtnEl = document.getElementById('lobby-gift-btn')!;
+const observerOverlayEl = document.getElementById('observer-overlay')!;
+const observerBackBtnEl = document.getElementById('observer-back-btn')!;
 
 // Breeder Mini-Game Elements
 const breederMinigameEl = document.getElementById('breeder-minigame')!;
@@ -543,7 +555,7 @@ const PORT_ANIMATION_DURATION = 400; // ms for each phase
 // Track previous positions to detect teleports
 const prevPlayerPositions = new Map<string, { x: number; y: number }>();
 
-// Adoption animation state: floating pets traveling to adoption center
+// Adoption animation state: people walking away with adopted pets
 interface AdoptionAnimation {
   id: string;
   startTime: number;
@@ -553,9 +565,13 @@ interface AdoptionAnimation {
   toY: number;
   /** Pet type (PET_TYPE_CAT etc.) so animation shows the actual adopted pet */
   petType: number;
+  /** Direction the adopter walks away (radians) */
+  walkAngle: number;
+  /** True if bird — flies free instead of leash walk */
+  isBird: boolean;
 }
 const adoptionAnimations: AdoptionAnimation[] = [];
-const ADOPTION_ANIMATION_DURATION = 800; // ms
+const ADOPTION_ANIMATION_DURATION = 2500; // ms - walking away is slower and more cinematic
 /** Emoji per pet type (PET_TYPE_CAT=0, DOG=1, BIRD=2, RABBIT=3, SPECIAL=4) */
 const ADOPTION_PET_EMOJIS: Record<number, string> = {
   [PET_TYPE_CAT]: '🐈',
@@ -566,14 +582,23 @@ const ADOPTION_PET_EMOJIS: Record<number, string> = {
 };
 let adoptionAnimationId = 0;
 
-/** Trigger adoption animation with the actual pet types that were adopted (from van or shelter). */
-function triggerAdoptionAnimation(fromX: number, fromY: number, toX: number, toY: number, petTypes: number[]): void {
+/** Trigger adoption animation: people walk away from shelter/center with their pet. */
+function triggerAdoptionAnimation(fromX: number, fromY: number, _toX: number, _toY: number, petTypes: number[]): void {
   const now = Date.now();
-  for (let i = 0; i < petTypes.length; i++) {
+  const count = petTypes.length;
+  for (let i = 0; i < count; i++) {
     const petType = petTypes[i] ?? PET_TYPE_CAT;
-    const delay = i * 100;
-    const offsetX = (Math.random() - 0.5) * 30;
-    const offsetY = (Math.random() - 0.5) * 30;
+    const delay = i * 150; // stagger so people leave one at a time
+    // Spread adopters evenly around the shelter with some jitter
+    const baseAngle = (i / Math.max(1, count)) * Math.PI * 2;
+    const jitter = (Math.random() - 0.5) * 0.8; // +/- 0.4 radians
+    const walkAngle = baseAngle + jitter;
+    // Walk 200px outward from shelter
+    const walkDist = 180 + Math.random() * 40;
+    const toX = fromX + Math.cos(walkAngle) * walkDist;
+    const toY = fromY + Math.sin(walkAngle) * walkDist;
+    const offsetX = (Math.random() - 0.5) * 15;
+    const offsetY = (Math.random() - 0.5) * 15;
     adoptionAnimations.push({
       id: `adopt-${adoptionAnimationId++}`,
       startTime: now + delay,
@@ -582,6 +607,8 @@ function triggerAdoptionAnimation(fromX: number, fromY: number, toX: number, toY
       toX,
       toY,
       petType,
+      walkAngle,
+      isBird: petType === PET_TYPE_BIRD,
     });
   }
 }
@@ -591,6 +618,8 @@ let matchPhase: MatchPhase = 'playing';
 let countdownRemainingSec = 0;
 let readyCount = 0;
 let iAmReady = false;
+let isObserver = false;
+let observerFollowIndex = 0;
 const TOKENS_KEY = 'rescueworld_tokens';
 const COLOR_KEY = 'rescueworld_color';
 const UNLOCKED_COLORS_KEY = 'rescueworld_unlocked_colors';
@@ -628,6 +657,223 @@ let currentDisplayName: string | null = null;
 let isSignedIn = false;
 let currentUserId: string | null = null;
 let currentShelterColor: string | null = null;
+
+// --- Friend/Foe relationships ---
+type RelationshipType = 'friend' | 'foe';
+const playerRelationships = new Map<string, RelationshipType>(); // targetUserId -> relationship
+const playerRelationshipNames = new Map<string, string>(); // targetUserId -> displayName
+// playerId (per-match) -> userId (persistent) mapping, populated from matchState/playerMap messages
+const playerIdToUserId = new Map<string, string>();
+
+async function fetchRelationships(): Promise<void> {
+  if (!isSignedIn) return;
+  try {
+    const res = await fetch('/auth/relationships', { credentials: 'include' });
+    if (!res.ok) return;
+    const data = await res.json();
+    playerRelationships.clear();
+    playerRelationshipNames.clear();
+    for (const r of data.relationships ?? []) {
+      playerRelationships.set(r.targetUserId, r.relationship);
+      playerRelationshipNames.set(r.targetUserId, r.displayName);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function setPlayerRelationship(targetUserId: string, relationship: RelationshipType, displayName: string): Promise<boolean> {
+  try {
+    const res = await fetch('/auth/relationships', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ targetUserId, relationship }),
+    });
+    if (res.ok) {
+      playerRelationships.set(targetUserId, relationship);
+      playerRelationshipNames.set(targetUserId, displayName);
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+async function removePlayerRelationship(targetUserId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/auth/relationships/${encodeURIComponent(targetUserId)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    if (res.ok) {
+      playerRelationships.delete(targetUserId);
+      playerRelationshipNames.delete(targetUserId);
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+/** Get relationship for a player by their per-match playerId. */
+function getRelationshipByPlayerId(playerId: string): RelationshipType | undefined {
+  const userId = playerIdToUserId.get(playerId);
+  if (!userId) return undefined;
+  return playerRelationships.get(userId);
+}
+
+/** Get userId from playerId mapping. */
+function getUserIdByPlayerId(playerId: string): string | undefined {
+  return playerIdToUserId.get(playerId);
+}
+
+// --- Relationship context popup (used in lobby, leaderboard, fight/ally overlay) ---
+let relPopupEl: HTMLDivElement | null = null;
+
+function hideRelPopup(): void {
+  if (relPopupEl) {
+    relPopupEl.remove();
+    relPopupEl = null;
+  }
+}
+
+function showRelPopup(targetUserId: string, displayName: string, anchorX: number, anchorY: number): void {
+  hideRelPopup();
+  const current = playerRelationships.get(targetUserId);
+  const popup = document.createElement('div');
+  popup.className = 'rel-popup';
+  popup.style.left = `${anchorX}px`;
+  popup.style.top = `${anchorY}px`;
+  
+  let html = `<div class="rel-popup-name">${escapeHtml(displayName)}</div><div class="rel-popup-actions">`;
+  if (current !== 'friend') {
+    html += `<button class="rel-popup-btn rel-popup-friend" data-action="friend">Mark Friend</button>`;
+  }
+  if (current !== 'foe') {
+    html += `<button class="rel-popup-btn rel-popup-foe" data-action="foe">Mark Foe</button>`;
+  }
+  if (current) {
+    html += `<button class="rel-popup-btn rel-popup-remove" data-action="remove">Remove</button>`;
+  }
+  html += `</div>`;
+  popup.innerHTML = html;
+  
+  popup.addEventListener('click', async (e) => {
+    const btn = (e.target as HTMLElement).closest('[data-action]') as HTMLElement | null;
+    if (!btn) return;
+    const action = btn.dataset.action;
+    if (action === 'friend' || action === 'foe') {
+      const ok = await setPlayerRelationship(targetUserId, action, displayName);
+      if (ok) showToast(`Marked ${displayName} as ${action}`, 'success');
+    } else if (action === 'remove') {
+      const ok = await removePlayerRelationship(targetUserId);
+      if (ok) showToast(`Removed mark for ${displayName}`, 'info');
+    }
+    hideRelPopup();
+  });
+  
+  document.body.appendChild(popup);
+  relPopupEl = popup;
+  
+  // Close on click outside
+  setTimeout(() => {
+    const closeHandler = (ev: MouseEvent) => {
+      if (relPopupEl && !relPopupEl.contains(ev.target as Node)) {
+        hideRelPopup();
+        document.removeEventListener('click', closeHandler);
+      }
+    };
+    document.addEventListener('click', closeHandler);
+  }, 0);
+}
+
+// --- Friends panel ---
+function renderFriendsPanel(): void {
+  const listEl = document.getElementById('friends-list');
+  if (!listEl) return;
+  
+  const friends: Array<{ userId: string; name: string }> = [];
+  const foes: Array<{ userId: string; name: string }> = [];
+  
+  for (const [userId, rel] of playerRelationships) {
+    const name = playerRelationshipNames.get(userId) ?? 'Unknown';
+    if (rel === 'friend') friends.push({ userId, name });
+    else foes.push({ userId, name });
+  }
+  
+  let html = '';
+  if (friends.length > 0) {
+    html += '<div class="friends-section"><h4 class="friends-section-title friends-title">Friends</h4>';
+    for (const f of friends) {
+      html += `<div class="friends-row">
+        <span class="rel-dot rel-dot-friend"></span>
+        <span class="friends-name">${escapeHtml(f.name)}</span>
+        <button class="friends-remove-btn" data-user-id="${escapeHtml(f.userId)}" title="Remove">&#10005;</button>
+      </div>`;
+    }
+    html += '</div>';
+  }
+  if (foes.length > 0) {
+    html += '<div class="friends-section"><h4 class="friends-section-title foes-title">Foes</h4>';
+    for (const f of foes) {
+      html += `<div class="friends-row">
+        <span class="rel-dot rel-dot-foe"></span>
+        <span class="friends-name">${escapeHtml(f.name)}</span>
+        <button class="friends-remove-btn" data-user-id="${escapeHtml(f.userId)}" title="Remove">&#10005;</button>
+      </div>`;
+    }
+    html += '</div>';
+  }
+  if (friends.length === 0 && foes.length === 0) {
+    html = '<p class="friends-empty">No friends or foes marked yet. Click on a player in the lobby or match results to mark them.</p>';
+  }
+  listEl.innerHTML = html;
+  
+  // Attach remove handlers
+  listEl.querySelectorAll('.friends-remove-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const userId = (btn as HTMLElement).dataset.userId;
+      if (!userId) return;
+      await removePlayerRelationship(userId);
+      renderFriendsPanel();
+      showToast('Relationship removed', 'info');
+    });
+  });
+}
+
+function showFriendsPanel(): void {
+  const panel = document.getElementById('friends-panel');
+  if (panel) {
+    panel.classList.remove('hidden');
+    renderFriendsPanel();
+  }
+}
+
+function hideFriendsPanel(): void {
+  const panel = document.getElementById('friends-panel');
+  if (panel) panel.classList.add('hidden');
+}
+
+// Wire up friends panel button and close
+document.getElementById('friends-panel-btn')?.addEventListener('click', () => showFriendsPanel());
+document.getElementById('friends-panel-close')?.addEventListener('click', () => hideFriendsPanel());
+
+// Expose for inline onclick in lobby player list and leaderboard HTML
+(window as any).__showRelPopup = (e: MouseEvent) => {
+  const target = e.target as HTMLElement;
+  // Try both lobby-player container and rel-mark-btn (leaderboard)
+  const el = target.closest('[data-user-id]') as HTMLElement | null;
+  if (!el) return;
+  const userId = el.dataset.userId;
+  const displayName = el.dataset.displayName;
+  if (!userId || !displayName) return;
+  e.stopPropagation();
+  const rect = el.getBoundingClientRect();
+  showRelPopup(userId, displayName, rect.right + 8, rect.top);
+};
 
 // Track active FFA/Teams match for rejoin
 interface ActiveMultiplayerMatch {
@@ -1423,6 +1669,13 @@ async function fetchAndRenderAuth(): Promise<void> {
     landingAuthButtons.innerHTML = `<a href="${buildAuthUrl('/auth/google')}">Sign in with Google</a>`;
     if (landingNickInput) landingNickInput.placeholder = 'Nickname';
   }
+  await fetchRelationships();
+  // Show/hide friends panel button based on sign-in status
+  const friendsPanelBtn = document.getElementById('friends-panel-btn');
+  if (friendsPanelBtn) {
+    if (isSignedIn) friendsPanelBtn.classList.remove('hidden');
+    else friendsPanelBtn.classList.add('hidden');
+  }
   await fetchReferralInfo();
   updateReferralUI();
   await fetchDailyGiftStatus();
@@ -1603,6 +1856,17 @@ function onKeyDown(e: KeyboardEvent): void {
   
   // Block movement during breeder mini-game or warning popup
   if (breederGame.active || breederWarningVisible) {
+    e.preventDefault();
+    return;
+  }
+  
+  // Full spectator mode: cycle players with left/right arrows
+  if (isObserver) {
+    if (e.code === 'ArrowRight' || e.code === 'KeyD') {
+      observerFollowIndex++;
+    } else if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
+      observerFollowIndex = Math.max(0, observerFollowIndex - 1);
+    }
     e.preventDefault();
     return;
   }
@@ -1921,12 +2185,26 @@ function getCamera(): { x: number; y: number; w: number; h: number } {
   const w = canvas.width;
   const h = canvas.height;
   
-  // Check if player is eliminated (observer mode)
+  // Check if player is eliminated (observer mode) or full spectator
   const me = latestSnapshot?.players.find((p) => p.id === myPlayerId);
-  const isObserver = me?.eliminated === true;
+  const isEliminated = me?.eliminated === true;
   
   if (isObserver) {
-    // Observer mode: free camera panning
+    // Full spectator mode: follow a player by index
+    const players = latestSnapshot?.players.filter(p => !p.eliminated) ?? [];
+    if (players.length > 0) {
+      const idx = observerFollowIndex % players.length;
+      const target = players[idx];
+      observerCameraX = target.x;
+      observerCameraY = target.y;
+    }
+    const camX = Math.max(0, Math.min(MAP_WIDTH - w, observerCameraX - w / 2));
+    const camY = Math.max(0, Math.min(MAP_HEIGHT - h, observerCameraY - h / 2));
+    return { x: camX, y: camY, w, h };
+  }
+  
+  if (isEliminated) {
+    // Eliminated observer mode: free camera panning
     const camX = Math.max(0, Math.min(MAP_WIDTH - w, observerCameraX - w / 2));
     const camY = Math.max(0, Math.min(MAP_HEIGHT - h, observerCameraY - h / 2));
     return { x: camX, y: camY, w, h };
@@ -2102,6 +2380,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
       userId: currentUserId, // For inventory tracking - server will withdraw
       abandon: options?.abandon,
       rejoinMatchId: options?.rejoinMatchId,
+      botsEnabled: (options?.mode === 'ffa' || options?.mode === 'teams') ? botsEnabled : undefined,
     }));
     if (pendingBoosts.sizeBonus > 0 || pendingBoosts.speedBoost) {
       gameWs.send(JSON.stringify({
@@ -2132,6 +2411,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         const msg = JSON.parse(e.data);
         if (msg.type === 'welcome' && msg.playerId) {
           myPlayerId = msg.playerId;
+          playerIdToUserId.clear(); // Reset mapping for new match
           // Initialize in-match boost state
           inMatchAdoptSpeedBoosts = typeof msg.adoptSpeedBoosts === 'number' ? msg.adoptSpeedBoosts : 0;
           adoptSpeedActiveUntilTick = 0;
@@ -2154,7 +2434,24 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
             // Store current match info for potential rejoin later
             currentMatchId = msg.matchId;
           }
+          isObserver = false;
+          observerOverlayEl.classList.add('hidden');
           playWelcome();
+        }
+        if (msg.type === 'observing') {
+          isObserver = true;
+          myPlayerId = null; // observer has no player entity
+          observerFollowIndex = 0;
+          currentMatchId = msg.matchId ?? null;
+          observerOverlayEl.classList.remove('hidden');
+          lobbyOverlayEl.classList.add('hidden');
+        }
+        if (msg.type === 'promoted') {
+          // Observer promoted to player
+          isObserver = false;
+          myPlayerId = msg.playerId;
+          observerOverlayEl.classList.add('hidden');
+          showToast('A slot opened! You are now playing.', 'success');
         }
         if (msg.type === 'savedMatchExpired') {
           hasSavedMatch = false;
@@ -2230,15 +2527,39 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           startServerClockWhenOnLobby();
           connectLobbyLeaderboard();
         }
+        // Handle playerMap message (playerId -> userId mapping for friend/foe)
+        if (msg.type === 'playerMap' && Array.isArray(msg.players)) {
+          for (const p of msg.players) {
+            if (p.userId) playerIdToUserId.set(p.playerId, p.userId);
+          }
+        }
+        // Handle friendOnline notification
+        if (msg.type === 'friendOnline' && typeof msg.displayName === 'string') {
+          showToast(`Your friend ${msg.displayName} is now online!`, 'success');
+        }
         if (msg.type === 'matchState' && typeof msg.phase === 'string') {
           matchPhase = msg.phase as MatchPhase;
           countdownRemainingSec = typeof msg.countdownRemainingSec === 'number' ? msg.countdownRemainingSec : 0;
           readyCount = typeof msg.readyCount === 'number' ? msg.readyCount : 0;
           
+          // Cache playerId -> userId from matchState players
+          if (Array.isArray(msg.players)) {
+            for (const p of msg.players) {
+              if (p.userId) playerIdToUserId.set(p.id, p.userId);
+            }
+          }
+          
           // Update player list (only show human players in FFA lobby)
           if (Array.isArray(msg.players) && msg.players.length > 0) {
             lobbyPlayerListEl.innerHTML = msg.players
-              .map((p: { displayName: string }) => `<div class="lobby-player">${escapeHtml(p.displayName)}</div>`)
+              .map((p: { displayName: string; id: string; userId?: string }) => {
+                const rel = p.userId ? playerRelationships.get(p.userId) : undefined;
+                const relClass = rel === 'friend' ? ' is-friend' : rel === 'foe' ? ' is-foe' : '';
+                const relIcon = rel === 'friend' ? '<span class="rel-icon friend-icon" title="Friend"></span>' : rel === 'foe' ? '<span class="rel-icon foe-icon" title="Foe"></span>' : '';
+                const isMe = p.id === myPlayerId;
+                const clickAttr = (!isMe && isSignedIn && p.userId && p.userId !== currentUserId) ? ` data-user-id="${escapeHtml(p.userId)}" data-display-name="${escapeHtml(p.displayName)}" onclick="window.__showRelPopup(event)"` : '';
+                return `<div class="lobby-player${relClass}"${clickAttr}>${relIcon}${escapeHtml(p.displayName)}</div>`;
+              })
               .join('');
           } else {
             lobbyPlayerListEl.innerHTML = '';
@@ -2249,9 +2570,15 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
               lobbyOverlayEl.classList.add('hidden');
             } else {
               lobbyOverlayEl.classList.remove('hidden');
-              lobbyMessageEl.textContent = 'Waiting for another player…';
+              if (botsEnabled && typeof msg.playerCount === 'number' && msg.playerCount <= 1) {
+                lobbyMessageEl.textContent = 'No other players yet.';
+                lobbyReadyBtnEl.classList.remove('hidden');
+                lobbyReadyBtnEl.textContent = 'Ready with Bots';
+              } else {
+                lobbyMessageEl.textContent = 'Waiting for another player…';
+                lobbyReadyBtnEl.classList.add('hidden');
+              }
               lobbyCountdownEl.classList.add('hidden');
-              lobbyReadyBtnEl.classList.add('hidden');
             }
           } else if (matchPhase === 'countdown') {
             lobbyOverlayEl.classList.remove('hidden');
@@ -2415,9 +2742,10 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         }
         lastShelterPortCharges = currentShelterPorts;
       }
+      const petSnapTime = performance.now();
       for (const pet of snap.pets) {
         const prev = interpolatedPets.get(pet.id)?.next ?? pet;
-        interpolatedPets.set(pet.id, { prev, next: { ...pet }, t: 0 });
+        interpolatedPets.set(pet.id, { prev, next: { ...pet }, startTime: petSnapTime });
       }
       const me = snap.players.find((q) => q.id === myPlayerId);
       if (me) {
@@ -2436,22 +2764,41 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         if ((me.speedBoostUntil ?? 0) > lastSpeedBoostUntil) playPickupBoost();
         lastSpeedBoostUntil = me.speedBoostUntil ?? 0;
         if (me.totalAdoptions > lastTotalAdoptions) {
-          const adoptionCount = me.totalAdoptions - lastTotalAdoptions;
           const myShelter = latestSnapshot?.shelters?.find(s => s.ownerId === myPlayerId);
-          // Which pet IDs were just adopted? (they were in our van/shelter last frame, now gone)
-          let adoptedIds: string[];
+
+          // 1. Shelter auto-adoption: pets that left the shelter
           if (myShelter?.hasAdoptionCenter) {
-            // Shelter auto-adoption - no sound, just visual
-            adoptedIds = lastShelterPetsInsideIds.filter((id) => !myShelter.petsInside.includes(id)).slice(0, adoptionCount);
-            const types = adoptedIds.map((id) => lastPetTypesById.get(id) ?? PET_TYPE_CAT);
-            triggerAdoptionAnimation(myShelter.x, myShelter.y, myShelter.x, myShelter.y - 100, types);
-          } else {
-            // Dropping off at adoption center - play drop off sound
-            playDropOff();
-            adoptedIds = lastPetsInsideIds.filter((id) => !me.petsInside.includes(id)).slice(0, adoptionCount);
-            const types = adoptedIds.map((id) => lastPetTypesById.get(id) ?? PET_TYPE_CAT);
-            const zone = latestSnapshot?.adoptionZones?.[0];
-            if (zone) triggerAdoptionAnimation(me.x, me.y, zone.x, zone.y, types);
+            const shelterAdoptedIds = lastShelterPetsInsideIds
+              .filter((id) => !myShelter.petsInside.includes(id));
+            if (shelterAdoptedIds.length > 0) {
+              const types = shelterAdoptedIds.map((id) => lastPetTypesById.get(id) ?? PET_TYPE_CAT);
+              playAdoptionSounds(types);
+              triggerAdoptionAnimation(myShelter.x, myShelter.y, myShelter.x, myShelter.y - 100, types);
+            }
+          }
+
+          // 2. Van drop-off adoption: pets that left the van (adoption center or event)
+          const vanAdoptedIds = lastPetsInsideIds
+            .filter((id) => !me.petsInside.includes(id));
+          if (vanAdoptedIds.length > 0) {
+            const types = vanAdoptedIds.map((id) => lastPetTypesById.get(id) ?? PET_TYPE_CAT);
+            playAdoptionSounds(types);
+            // Find nearest adoption event the van is inside
+            let animTarget: { x: number; y: number } | null = null;
+            for (const ev of latestSnapshot?.adoptionEvents ?? []) {
+              if (Math.hypot(me.x - ev.x, me.y - ev.y) <= ev.radius) {
+                animTarget = ev;
+                break;
+              }
+            }
+            // Fall back to central adoption zone
+            if (!animTarget) {
+              const zone = latestSnapshot?.adoptionZones?.[0];
+              if (zone) animTarget = zone;
+            }
+            if (animTarget) {
+              triggerAdoptionAnimation(me.x, me.y, animTarget.x, animTarget.y, types);
+            }
           }
         }
         lastTotalAdoptions = me.totalAdoptions;
@@ -2479,8 +2826,22 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
       }
       
       // Handle boss mode mill proximity changes (server-driven)
-      if (snap.bossMode?.active) {
-        const currentPlayerAtMill = snap.bossMode.playerAtMill;
+      const bossModeActive = !!snap.bossMode?.active;
+      
+      // Ensure boss music is playing whenever boss mode is active (handles
+      // reconnects, settings toggles, and normal transitions)
+      if (bossModeActive) {
+        if (!isBossMusicPlaying()) {
+          playBossMusic();
+        }
+      } else if (wasBossModeActive) {
+        // Boss mode just ended - switch back to regular music
+        stopBossMusic();
+      }
+      wasBossModeActive = bossModeActive;
+      
+      if (bossModeActive) {
+        const currentPlayerAtMill = snap.bossMode!.playerAtMill;
         
         // Detect when player enters a mill (proximity-based, server tells us)
         if (currentPlayerAtMill >= 0 && lastPlayerAtMill < 0) {
@@ -2515,7 +2876,9 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     matchPhase = 'playing';
     sentAllyRequests.clear();
     iAmReady = false;
-    stopEngineLoop(); // Stop engine sound when disconnecting
+    isObserver = false;
+    observerOverlayEl.classList.add('hidden');
+    wasBossModeActive = false;
   };
   await new Promise<void>((resolve, reject) => {
     const deadline = Date.now() + CONNECT_TIMEOUT_MS;
@@ -2586,18 +2949,22 @@ function tick(now: number): void {
   const canMove = gameActive && !breederGame.active && !breederWarningVisible; // Can't move during breeder minigame or warning
 
   // Send input at server tick rate (only when match is playing and not over, and not in minigame)
-  if (canMove && gameWs?.readyState === WebSocket.OPEN && now - lastInputSendTime >= TICK_MS) {
+  // Observers don't send input
+  if (canMove && !isObserver && gameWs?.readyState === WebSocket.OPEN && now - lastInputSendTime >= TICK_MS) {
     lastInputSendTime = now;
     const buf = encodeInput(inputFlags, inputSeq++);
     gameWs.send(buf);
   }
 
-  // Update engine sound state based on movement and speed boost
+  // Van engine sounds (Camaro purr / jet swoosh) when "Van sounds" is enabled
   {
     const isMoving = canMove && inputFlags !== 0;
     const currentTick = latestSnapshot?.tick ?? 0;
     const isBoosted = isMoving && predictedPlayer != null && (predictedPlayer.speedBoostUntil ?? 0) > currentTick;
     updateEngineState(isMoving, isBoosted);
+    // Throttle: 0 when idle/coasting, 1 when pressing movement keys (accelerating)
+    // For Beetle, this controls the "pea-shooter chirp" whistle intensity
+    updateEngineThrottle(isMoving ? 1 : 0);
   }
 
   // Advance local player prediction every frame (smooth movement and camera) — freeze when lobby/countdown, match over, or in minigame
@@ -2675,7 +3042,13 @@ function tick(now: number): void {
     if (overlappingId) {
       const other = latestSnapshot!.players.find((p) => p.id === overlappingId);
       fightAllyTargetId = overlappingId;
-      fightAllyNameEl.textContent = other?.displayName ?? overlappingId;
+      const otherName = other?.displayName ?? overlappingId;
+      const otherRel = getRelationshipByPlayerId(overlappingId);
+      const relLabel = otherRel === 'friend' ? ' (Friend)' : otherRel === 'foe' ? ' (Foe)' : '';
+      fightAllyNameEl.textContent = otherName + relLabel;
+      if (otherRel === 'friend') fightAllyNameEl.style.color = '#2ecc71';
+      else if (otherRel === 'foe') fightAllyNameEl.style.color = '#e74c3c';
+      else fightAllyNameEl.style.color = '';
       const wasHidden = fightAllyOverlayEl.classList.contains('hidden');
       fightAllyOverlayEl.classList.remove('hidden');
       // Play attack warning when first showing human fight overlay
@@ -2712,9 +3085,7 @@ function tick(now: number): void {
   for (const entry of interpolatedPlayers.values()) {
     entry.t = Math.min(1, entry.t + interpStep);
   }
-  for (const entry of interpolatedPets.values()) {
-    entry.t = Math.min(1, entry.t + interpStep);
-  }
+  // Pet interpolation is now lazy (computed on-demand in getInterpolatedPet)
 
   render(dt);
   // Note: requestAnimationFrame is now called at the start of tick() for frame rate limiting
@@ -2748,7 +3119,7 @@ function getInterpolatedPlayer(id: string): PlayerState | null {
 function getInterpolatedPet(id: string): PetState | null {
   const entry = interpolatedPets.get(id);
   if (!entry) return null;
-  const t = entry.t;
+  const t = Math.min(1, (performance.now() - entry.startTime) / INTERP_BUFFER_MS);
   return {
     ...entry.next,
     x: lerp(entry.prev.x, entry.next.x, t),
@@ -3191,7 +3562,20 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
   ctx.fillText(`Pets: ${p.petsInside.length}/${displayCapacity}`, 0, yOffset); // center of van
   // Show player name only for other players (not "You" for local player)
   if (!isMe) {
-    ctx.fillText(p.displayName ?? p.id, 0, -half - 24);
+    const nameText = p.displayName ?? p.id;
+    const nameY = -vanHeight * 0.5 - 10; // Just above the van top with small gap
+    ctx.fillText(nameText, 0, nameY);
+    // Draw friend/foe indicator dot next to name
+    const rel = getRelationshipByPlayerId(p.id);
+    if (rel) {
+      const nameWidth = ctx.measureText(nameText).width;
+      const dotX = nameWidth / 2 + 8;
+      ctx.beginPath();
+      ctx.arc(dotX, nameY, 5, 0, Math.PI * 2);
+      ctx.fillStyle = rel === 'friend' ? '#2ecc71' : '#e74c3c';
+      ctx.fill();
+      ctx.fillStyle = '#fff'; // Reset
+    }
   }
   if (hasAllyRequest) {
     ctx.fillStyle = '#7bed9f';
@@ -3206,211 +3590,1074 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
   ctx.restore();
 }
 
-/** Draw a stationary pet shelter building */
+// ============================================================
+// SHELTER TOP-DOWN FLOORPLAN RENDERER
+// ============================================================
+
+/** Room type determines floor color and label */
+type ShelterRoomType = 'kennel' | 'medical' | 'reception' | 'corridor' | 'grooming' | 'catRoom' | 'birdRoom' | 'education' | 'community' | 'breakRoom';
+/** Room definition for shelter layout */
+interface ShelterRoom {
+  /** Offset from shelter center */
+  rx: number; ry: number;
+  w: number; h: number;
+  type: ShelterRoomType;
+  label?: string;
+  /** Number of kennel cells in this room (only for kennel type) */
+  kennelSlots?: number;
+}
+/** Outdoor yard definition */
+interface ShelterYard {
+  rx: number; ry: number;
+  w: number; h: number;
+  label?: string;
+  /** Has exercise equipment (circles) */
+  hasEquipment?: boolean;
+  /** Has walking path */
+  hasPath?: boolean;
+}
+
+/** Floor colors per room type */
+const ROOM_FLOOR_COLORS: Record<ShelterRoomType, string> = {
+  kennel: '#f5e6c8',
+  medical: '#e0f0f5',
+  reception: '#f0dbb8',
+  corridor: '#d9d0c4',
+  grooming: '#e6d8ef',
+  catRoom: '#fce4d6',
+  birdRoom: '#daf0e0',
+  education: '#e2e8f0',
+  community: '#fff5e0',
+  breakRoom: '#e8f5e8',
+};
+
+/** Kennel pet mini-emojis (smaller text) */
+const KENNEL_PET_EMOJIS: Record<number, string> = {
+  [PET_TYPE_CAT]: '🐱',
+  [PET_TYPE_DOG]: '🐶',
+  [PET_TYPE_BIRD]: '🐦',
+  [PET_TYPE_RABBIT]: '🐰',
+  [PET_TYPE_SPECIAL]: '⭐',
+};
+
+/** Draw a single room (floor + walls) in shelter-local coordinates */
+function drawShelterRoom(rx: number, ry: number, w: number, h: number, type: ShelterRoomType, label?: string, hasKennels?: boolean): void {
+  // Floor
+  ctx.fillStyle = ROOM_FLOOR_COLORS[type] || '#d9d0c4';
+  ctx.beginPath();
+  ctx.roundRect(rx, ry, w, h, 3);
+  ctx.fill();
+
+  // Wall outline
+  ctx.strokeStyle = '#8a7b6b';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Room label -- position at bottom for kennel rooms so it doesn't overlap cells
+  if (label) {
+    ctx.fillStyle = 'rgba(100, 80, 60, 0.55)';
+    ctx.font = '7px Rubik, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    if (hasKennels) {
+      ctx.fillText(label, rx + w / 2, ry + h - 6);
+    } else {
+      ctx.fillText(label, rx + w / 2, ry + h / 2);
+    }
+  }
+}
+
+/** Draw individual kennel cells inside a kennel room, populating with pets */
+function drawShelterKennels(
+  rx: number, ry: number, roomW: number, roomH: number,
+  slots: number, petIds: string[], petStartIdx: number
+): number {
+  const cellW = 14;
+  const cellH = 14;
+  const pad = 3;
+  const cols = Math.max(1, Math.floor((roomW - 6) / (cellW + pad)));
+  let drawn = 0;
+
+  for (let i = 0; i < slots; i++) {
+    const row = Math.floor(i / cols);
+    const col = i % cols;
+    const kx = rx + 4 + col * (cellW + pad);
+    const ky = ry + 4 + row * (cellH + pad);
+    if (ky + cellH > ry + roomH - 2) break; // Don't draw outside room
+
+    const petIdx = petStartIdx + i;
+    const hasPet = petIdx < petIds.length;
+
+    // Cell background
+    ctx.fillStyle = hasPet ? '#f5e0b8' : '#e0d8cc';
+    ctx.fillRect(kx, ky, cellW, cellH);
+
+    // Cell bars/gate
+    ctx.strokeStyle = hasPet ? '#8a7050' : '#b0a898';
+    ctx.lineWidth = 0.8;
+    ctx.strokeRect(kx, ky, cellW, cellH);
+    // Gate line (bottom)
+    ctx.beginPath();
+    ctx.moveTo(kx + 2, ky + cellH);
+    ctx.lineTo(kx + cellW - 2, ky + cellH);
+    ctx.strokeStyle = '#a08060';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    // Pet emoji if occupied
+    if (hasPet) {
+      const petId = petIds[petIdx];
+      const petType = lastPetTypesById.get(petId) ?? PET_TYPE_CAT;
+      const emoji = KENNEL_PET_EMOJIS[petType] ?? KENNEL_PET_EMOJIS[PET_TYPE_CAT];
+      ctx.font = '9px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(emoji, kx + cellW / 2, ky + cellH / 2);
+    }
+    drawn++;
+  }
+  return drawn;
+}
+
+/** Draw an outdoor yard area with grass, fence posts, optional equipment and paths */
+function drawShelterYard(rx: number, ry: number, w: number, h: number, label?: string, hasEquipment?: boolean, hasPath?: boolean, accentColor?: string): void {
+  // Grass background
+  ctx.fillStyle = '#90c67c';
+  ctx.beginPath();
+  ctx.roundRect(rx, ry, w, h, 4);
+  ctx.fill();
+
+  // Grass texture - small darker patches
+  ctx.fillStyle = '#7db86a';
+  for (let i = 0; i < 6; i++) {
+    const gx = rx + 6 + ((i * 37 + 13) % (w - 12));
+    const gy = ry + 6 + ((i * 23 + 7) % (h - 12));
+    ctx.beginPath();
+    ctx.arc(gx, gy, 2 + (i % 2), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Fence posts around perimeter
+  const postColor = accentColor || '#8B6914';
+  ctx.fillStyle = postColor;
+  const postSpacing = 12;
+  // Top & bottom
+  for (let x = rx + 4; x < rx + w - 2; x += postSpacing) {
+    ctx.fillRect(x, ry, 2, 3);
+    ctx.fillRect(x, ry + h - 3, 2, 3);
+  }
+  // Left & right
+  for (let y = ry + 4; y < ry + h - 2; y += postSpacing) {
+    ctx.fillRect(rx, y, 3, 2);
+    ctx.fillRect(rx + w - 3, y, 3, 2);
+  }
+
+  // Fence wire
+  ctx.strokeStyle = accentColor || '#a08040';
+  ctx.lineWidth = 0.7;
+  ctx.setLineDash([3, 2]);
+  ctx.strokeRect(rx + 1, ry + 1, w - 2, h - 2);
+  ctx.setLineDash([]);
+
+  // Walking path
+  if (hasPath) {
+    ctx.strokeStyle = '#c8b898';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(rx + 8, ry + h / 2);
+    ctx.quadraticCurveTo(rx + w / 2, ry + 8, rx + w - 8, ry + h / 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Exercise equipment (agility circles)
+  if (hasEquipment) {
+    ctx.strokeStyle = '#6b8f5a';
+    ctx.lineWidth = 1.2;
+    // Jump hoop
+    ctx.beginPath();
+    ctx.arc(rx + w * 0.3, ry + h * 0.6, 5, 0, Math.PI * 2);
+    ctx.stroke();
+    // Tunnel (elongated)
+    ctx.beginPath();
+    ctx.ellipse(rx + w * 0.7, ry + h * 0.4, 8, 4, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    // Weave poles
+    for (let i = 0; i < 3; i++) {
+      ctx.fillStyle = '#6b8f5a';
+      ctx.beginPath();
+      ctx.arc(rx + w * 0.4 + i * 8, ry + h * 0.75, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Label
+  if (label) {
+    ctx.fillStyle = 'rgba(40, 80, 30, 0.5)';
+    ctx.font = '6px Rubik, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(label, rx + w / 2, ry + 3);
+  }
+}
+
+/** Draw an animated worker or volunteer at given position */
+function drawShelterWorker(
+  x: number, y: number,
+  isVolunteer: boolean,
+  phase: number
+): void {
+  // Body color: workers wear blue, volunteers wear green
+  const bodyColor = isVolunteer ? '#5ab87a' : '#4a8ec9';
+  const headColor = '#f5d5b8';
+
+  // Body (oval)
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.ellipse(x, y + 1, 3.5, 4.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = isVolunteer ? '#3a8a5a' : '#2a6a9a';
+  ctx.lineWidth = 0.6;
+  ctx.stroke();
+
+  // Head
+  ctx.fillStyle = headColor;
+  ctx.beginPath();
+  ctx.arc(x, y - 4, 2.8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#c8a888';
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+
+  // Arms (reaching toward animals - subtle animation)
+  const armAngle = Math.sin(phase * 3) * 0.3;
+  ctx.strokeStyle = bodyColor;
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(x - 3, y - 1);
+  ctx.lineTo(x - 6 + Math.cos(armAngle) * 2, y + 1);
+  ctx.moveTo(x + 3, y - 1);
+  ctx.lineTo(x + 6 - Math.cos(armAngle) * 2, y + 1);
+  ctx.stroke();
+}
+
+/** Get tier-specific room layouts (all coordinates relative to shelter center) */
+function getShelterRooms(tier: number, half: number): ShelterRoom[] {
+  const rooms: ShelterRoom[] = [];
+  const s = half / 100; // scale factor
+
+  // === TIER 1: Basic shelter ===
+  // Reception/lobby (center-left)
+  rooms.push({ rx: -50 * s, ry: -30 * s, w: 35 * s, h: 30 * s, type: 'reception', label: 'Lobby' });
+  // Main kennel wing (right side)
+  rooms.push({ rx: -10 * s, ry: -30 * s, w: 55 * s, h: 55 * s, type: 'kennel', label: 'Kennels', kennelSlots: 6 });
+  // Corridor connecting
+  rooms.push({ rx: -52 * s, ry: 2 * s, w: 100 * s, h: 12 * s, type: 'corridor' });
+
+  if (tier >= 2) {
+    // === TIER 2: Dog wing + grooming ===
+    // Second kennel wing (below corridor)
+    rooms.push({ rx: -10 * s, ry: 16 * s, w: 55 * s, h: 45 * s, type: 'kennel', label: 'Dog Wing', kennelSlots: 8 });
+    // Grooming room (left of corridor)
+    rooms.push({ rx: -50 * s, ry: 16 * s, w: 35 * s, h: 25 * s, type: 'grooming', label: 'Grooming' });
+  }
+
+  if (tier >= 3) {
+    // === TIER 3: Cat room + bird/rabbit room + medical ===
+    // Cat room (left wing)
+    rooms.push({ rx: -90 * s, ry: -30 * s, w: 36 * s, h: 30 * s, type: 'catRoom', label: 'Cat Room', kennelSlots: 5 });
+    // Bird/rabbit room (right of main kennels)
+    rooms.push({ rx: 50 * s, ry: -30 * s, w: 36 * s, h: 30 * s, type: 'birdRoom', label: 'Small Animals', kennelSlots: 4 });
+    // Medical/intake (far left, below cat room)
+    rooms.push({ rx: -90 * s, ry: 2 * s, w: 36 * s, h: 25 * s, type: 'medical', label: 'Medical' });
+    // Extended corridors connecting wings
+    rooms.push({ rx: -92 * s, ry: 2 * s, w: 40 * s, h: 12 * s, type: 'corridor' });
+    rooms.push({ rx: 48 * s, ry: 2 * s, w: 40 * s, h: 12 * s, type: 'corridor' });
+  }
+
+  if (tier >= 4) {
+    // === TIER 4: Education + staff room + right wing starts ===
+    // Education wing (right of small animals)
+    rooms.push({ rx: 50 * s, ry: 16 * s, w: 36 * s, h: 35 * s, type: 'education', label: 'Education' });
+    // Staff/volunteer break room (left bottom)
+    rooms.push({ rx: -90 * s, ry: 30 * s, w: 36 * s, h: 28 * s, type: 'breakRoom', label: 'Staff Room' });
+    // Lower corridor connecting left-to-right
+    rooms.push({ rx: -92 * s, ry: 28 * s, w: 182 * s, h: 10 * s, type: 'corridor' });
+  }
+
+  if (tier >= 5) {
+    // === TIER 5: Full facility with right wing, central courtyard, community ===
+    // -- RIGHT WING (fills the empty right side) --
+    // Community room (large, right wing)
+    rooms.push({ rx: 90 * s, ry: -30 * s, w: 42 * s, h: 40 * s, type: 'community', label: 'Community' });
+    // Overflow kennels (right wing, below community)
+    rooms.push({ rx: 90 * s, ry: 14 * s, w: 42 * s, h: 38 * s, type: 'kennel', label: 'Overflow', kennelSlots: 6 });
+    // Right wing corridor connecting to main building
+    rooms.push({ rx: 86 * s, ry: 2 * s, w: 48 * s, h: 12 * s, type: 'corridor' });
+
+    // -- TOP WING (adopt events + entrance) --
+    // Adoption event hall (top center)
+    rooms.push({ rx: -45 * s, ry: -68 * s, w: 50 * s, h: 34 * s, type: 'reception', label: 'Adopt Events' });
+    // Top corridor connecting adopt events to main
+    rooms.push({ rx: -47 * s, ry: -34 * s, w: 54 * s, h: 6 * s, type: 'corridor' });
+
+    // -- BOTTOM WING --
+    // Quarantine/isolation room (bottom left, below staff room)
+    rooms.push({ rx: -90 * s, ry: 60 * s, w: 36 * s, h: 26 * s, type: 'medical', label: 'Quarantine' });
+    // Supply/laundry room (bottom center-left)
+    rooms.push({ rx: -50 * s, ry: 60 * s, w: 35 * s, h: 26 * s, type: 'breakRoom', label: 'Supply' });
+    // Lower-lower corridor
+    rooms.push({ rx: -92 * s, ry: 56 * s, w: 182 * s, h: 8 * s, type: 'corridor' });
+  }
+
+  return rooms;
+}
+
+/** Get tier-specific outdoor yard layouts */
+function getShelterYards(tier: number, half: number): ShelterYard[] {
+  const yards: ShelterYard[] = [];
+  const s = half / 100;
+
+  if (tier < 2) {
+    // Tier 1 only: Small front yard (left side, below lobby - replaced by grooming at tier 2)
+    yards.push({ rx: -50 * s, ry: 16 * s, w: 35 * s, h: 30 * s, label: 'Yard' });
+  }
+
+  if (tier >= 2 && tier < 4) {
+    // Dog walk yard (right side) - only at tier 2-3 before education takes this spot
+    yards.push({ rx: 50 * s, ry: 16 * s, w: 36 * s, h: 40 * s, label: 'Dog Walk', hasEquipment: true, hasPath: true });
+    // Small yard below grooming
+    yards.push({ rx: -50 * s, ry: 44 * s, w: 35 * s, h: 22 * s, label: 'Yard' });
+  }
+
+  if (tier >= 3 && tier < 5) {
+    // Cat courtyard (left, above cat room)
+    yards.push({ rx: -90 * s, ry: -65 * s, w: 36 * s, h: 30 * s, label: 'Cat Yard' });
+    // Small animal outdoor area (right, above small animals room)
+    yards.push({ rx: 50 * s, ry: -65 * s, w: 36 * s, h: 30 * s, label: 'Play Area', hasEquipment: true });
+  }
+
+  if (tier >= 4) {
+    // Dog walk moves down-right when education takes its old spot
+    yards.push({ rx: 50 * s, ry: 55 * s, w: 36 * s, h: 30 * s, label: 'Dog Walk', hasEquipment: true, hasPath: true });
+    // Garden (left bottom)
+    yards.push({ rx: -90 * s, ry: 62 * s, w: 36 * s, h: 22 * s, label: 'Garden', hasPath: true });
+    // Small yard below grooming (carried forward from tier 2)
+    yards.push({ rx: -50 * s, ry: 44 * s, w: 35 * s, h: 12 * s, label: 'Yard' });
+  }
+
+  if (tier >= 5) {
+    // === Central courtyard: the heart of the complex, surrounded by rooms ===
+    yards.push({ rx: -10 * s, ry: 64 * s, w: 55 * s, h: 24 * s, label: 'Courtyard', hasPath: true });
+
+    // Entrance gardens (full width across the top)
+    yards.push({ rx: -90 * s, ry: -100 * s, w: 222 * s, h: 28 * s, label: 'Entrance Gardens', hasPath: true });
+
+    // Cat courtyard (expanded, left wing)
+    yards.push({ rx: -90 * s, ry: -68 * s, w: 40 * s, h: 34 * s, label: 'Cat Yard' });
+
+    // Play area (right wing, above community)
+    yards.push({ rx: 90 * s, ry: -68 * s, w: 42 * s, h: 34 * s, label: 'Play Area', hasEquipment: true });
+
+    // Agility course (right wing, bottom)
+    yards.push({ rx: 90 * s, ry: 56 * s, w: 42 * s, h: 30 * s, label: 'Agility', hasEquipment: true, hasPath: true });
+
+    // Garden expands (below quarantine, bottom-left)
+    yards.push({ rx: -90 * s, ry: 88 * s, w: 36 * s, h: 20 * s, label: 'Garden', hasPath: true });
+  }
+
+  return yards;
+}
+
+/** Draw a stationary pet shelter building - realistic top-down floorplan view */
 function drawShelter(shelter: ShelterState, isOwner: boolean, ownerColor?: string): void {
   const cx = shelter.x;
   const cy = shelter.y;
-  // Cap visual size to 200px (~2x a new shelter) to prevent overflow (logical size can be larger for win condition)
   const baseSize = SHELTER_BASE_RADIUS + shelter.size * SHELTER_RADIUS_PER_SIZE;
-  const half = Math.min(200, Math.max(40, baseSize));
-  
-  ctx.save();
-  ctx.shadowColor = 'rgba(0,0,0,0.4)';
-  ctx.shadowBlur = 12;
-  
-  // Main building body - use owner's van color (including gradients)
-  let buildingFill: string | CanvasGradient;
+  const half = Math.min(200, Math.max(100, baseSize));
+  const tier = shelter.tier ?? 1;
+  const now = Date.now();
+
+  // Resolve accent color from owner color
+  let accentColor: string;
   if (ownerColor?.startsWith('gradient:')) {
-    const parts = ownerColor.split(':');
-    const color1 = parts[1] || '#7bed9f';
-    const color2 = parts[2] || '#3cb371';
-    const grad = ctx.createLinearGradient(cx - half, cy, cx + half, cy);
-    grad.addColorStop(0, color1);
-    grad.addColorStop(1, color2);
-    buildingFill = grad;
+    accentColor = ownerColor.split(':')[1] || '#7bed9f';
   } else if (ownerColor) {
-    buildingFill = ownerColor;
+    accentColor = ownerColor;
   } else {
-    buildingFill = isOwner ? '#7bed9f' : hashColor(shelter.ownerId);
+    accentColor = isOwner ? '#7bed9f' : hashColor(shelter.ownerId);
   }
-  ctx.fillStyle = buildingFill;
-  const buildingW = half * 2;
-  const buildingH = half * 1.4;
-  const buildingL = cx - half;
-  const buildingT = cy - buildingH * 0.4;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // ---- Ground shadow beneath the whole complex ----
+  ctx.shadowColor = 'rgba(0,0,0,0.25)';
+  ctx.shadowBlur = 18;
+  ctx.shadowOffsetX = 4;
+  ctx.shadowOffsetY = 4;
+
+  // ---- Foundation / ground slab ----
+  const s = half / 100;
+  const foundW = (tier >= 5 ? 240 : tier >= 4 ? 185 : tier >= 3 ? 185 : tier >= 2 ? 110 : 110) * s;
+  const foundH = (tier >= 5 ? 200 : tier >= 4 ? 120 : tier >= 3 ? 100 : tier >= 2 ? 80 : 55) * s;
+  const foundX = (tier >= 3 ? -95 : -55) * s;
+  const foundY = (tier >= 5 ? -105 : tier >= 3 ? -70 : -35) * s;
+  ctx.fillStyle = '#e8e0d8';
   ctx.beginPath();
-  ctx.roundRect(buildingL, buildingT, buildingW, buildingH, 6);
+  ctx.roundRect(foundX, foundY, foundW, foundH, 6);
   ctx.fill();
-  
-  // Roof (triangle/peaked roof)
-  ctx.fillStyle = '#8B4513'; // Brown roof
-  ctx.beginPath();
-  ctx.moveTo(buildingL - 10, buildingT);
-  ctx.lineTo(cx, buildingT - half * 0.5);
-  ctx.lineTo(buildingL + buildingW + 10, buildingT);
-  ctx.closePath();
-  ctx.fill();
-  
-  // Roof outline
-  ctx.strokeStyle = '#654321';
+
+  // Foundation border (accent colored)
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+  ctx.strokeStyle = accentColor;
   ctx.lineWidth = 2;
   ctx.stroke();
-  
-  // Door
-  const doorW = buildingW * 0.2;
-  const doorH = buildingH * 0.5;
-  ctx.fillStyle = '#654321';
-  ctx.fillRect(cx - doorW / 2, buildingT + buildingH - doorH, doorW, doorH);
-  
-  // Kennels/cages (small squares representing pet cages)
-  const kennelSize = 12;
-  const kennelPad = 4;
-  const kennelsPerRow = Math.floor((buildingW - 40) / (kennelSize + kennelPad));
-  const numKennels = Math.min(shelter.petsInside.length + 2, kennelsPerRow * 2);
-  
-  for (let i = 0; i < numKennels; i++) {
-    const row = Math.floor(i / kennelsPerRow);
-    const col = i % kennelsPerRow;
-    const kx = buildingL + 20 + col * (kennelSize + kennelPad);
-    const ky = buildingT + 15 + row * (kennelSize + kennelPad);
-    
-    // Kennel background
-    const hasPet = i < shelter.petsInside.length;
-    ctx.fillStyle = hasPet ? '#c9a86c' : '#aaa';
-    ctx.fillRect(kx, ky, kennelSize, kennelSize);
-    
-    // Kennel bars
-    ctx.strokeStyle = '#666';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(kx, ky, kennelSize, kennelSize);
+
+  // ---- Draw outdoor yards FIRST (below rooms) ----
+  const yards = getShelterYards(tier, half);
+  for (const yard of yards) {
+    drawShelterYard(yard.rx, yard.ry, yard.w, yard.h, yard.label, yard.hasEquipment, yard.hasPath, accentColor);
   }
-  
-  // Fence around building
-  ctx.setLineDash([5, 5]);
-  ctx.strokeStyle = isOwner ? '#7bed9f' : 'rgba(255,255,255,0.5)';
-  ctx.lineWidth = 2;
-  const fenceMargin = 15;
-  ctx.strokeRect(
-    buildingL - fenceMargin,
-    buildingT - half * 0.5 - fenceMargin,
-    buildingW + fenceMargin * 2,
-    buildingH + half * 0.5 + fenceMargin * 2
-  );
-  ctx.setLineDash([]);
-  
-  // Upgrade indicators (icons)
-  const iconY = buildingT - half * 0.5 - 25;
-  let iconX = cx - 30;
+
+  // ---- Draw rooms ----
+  const rooms = getShelterRooms(tier, half);
+  let petIdx = 0;
+  for (const room of rooms) {
+    drawShelterRoom(room.rx, room.ry, room.w, room.h, room.type, room.label, (room.kennelSlots ?? 0) > 0);
+    // Populate kennel rooms with actual pets
+    if (room.kennelSlots && room.kennelSlots > 0) {
+      const drawn = drawShelterKennels(
+        room.rx, room.ry, room.w, room.h,
+        room.kennelSlots, shelter.petsInside, petIdx
+      );
+      petIdx += drawn;
+    }
+  }
+
+  // ---- Reception desk accent ----
+  const lobbyRoom = rooms.find(r => r.type === 'reception');
+  if (lobbyRoom) {
+    const deskX = lobbyRoom.rx + lobbyRoom.w * 0.2;
+    const deskY = lobbyRoom.ry + lobbyRoom.h * 0.6;
+    const deskW = lobbyRoom.w * 0.6;
+    const deskH = 5 * s;
+    ctx.fillStyle = accentColor;
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath();
+    ctx.roundRect(deskX, deskY, deskW, deskH, 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    // Chair behind desk
+    ctx.fillStyle = '#6b5b4b';
+    ctx.beginPath();
+    ctx.arc(deskX + deskW / 2, deskY + deskH + 4 * s, 3 * s, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ---- Medical room details ----
+  const medRoom = rooms.find(r => r.type === 'medical');
+  if (medRoom) {
+    // Exam table
+    ctx.fillStyle = '#c8d8e0';
+    const tableX = medRoom.rx + medRoom.w * 0.25;
+    const tableY = medRoom.ry + medRoom.h * 0.35;
+    ctx.fillRect(tableX, tableY, medRoom.w * 0.5, medRoom.h * 0.3);
+    ctx.strokeStyle = '#90a8b8';
+    ctx.lineWidth = 0.8;
+    ctx.strokeRect(tableX, tableY, medRoom.w * 0.5, medRoom.h * 0.3);
+    // Red cross
+    ctx.fillStyle = '#e05050';
+    const crossX = medRoom.rx + medRoom.w * 0.5;
+    const crossY = medRoom.ry + medRoom.h * 0.2;
+    ctx.fillRect(crossX - 2, crossY - 4, 4, 8);
+    ctx.fillRect(crossX - 4, crossY - 2, 8, 4);
+  }
+
+  // ---- Grooming room details ----
+  const groomRoom = rooms.find(r => r.type === 'grooming');
+  if (groomRoom) {
+    // Bath tub
+    ctx.fillStyle = '#b8d8e8';
+    ctx.beginPath();
+    ctx.roundRect(
+      groomRoom.rx + groomRoom.w * 0.15,
+      groomRoom.ry + groomRoom.h * 0.25,
+      groomRoom.w * 0.7,
+      groomRoom.h * 0.4,
+      3
+    );
+    ctx.fill();
+    ctx.strokeStyle = '#88a8b8';
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+    // Grooming table
+    ctx.fillStyle = '#d8c8b8';
+    ctx.fillRect(
+      groomRoom.rx + groomRoom.w * 0.3,
+      groomRoom.ry + groomRoom.h * 0.72,
+      groomRoom.w * 0.4,
+      groomRoom.h * 0.2
+    );
+  }
+
+  // ---- Workers and volunteers ----
+  const petCount = shelter.petsInside.length;
+  const workerCount = petCount > 0 ? Math.min(3, Math.ceil(petCount / 3)) : 0;
+  const volunteerCount = petCount > 0 ? Math.min(2, Math.ceil(petCount / 5)) : 0;
+
+  // Workers patrol the kennel areas
+  const kennelRooms = rooms.filter(r => r.type === 'kennel');
+  for (let i = 0; i < workerCount; i++) {
+    const room = kennelRooms[i % kennelRooms.length] || rooms[0];
+    const phase = (now / 2000 + i * 2.1);
+    const wx = room.rx + room.w * 0.3 + Math.sin(phase) * room.w * 0.25;
+    const wy = room.ry + room.h * 0.5 + Math.cos(phase * 0.7 + i) * room.h * 0.2;
+    drawShelterWorker(wx, wy, false, phase);
+  }
+
+  // Volunteers patrol yards and other rooms
+  const yardAreas = yards.length > 0 ? yards : [{ rx: -30 * s, ry: 16 * s, w: 30 * s, h: 25 * s }];
+  for (let i = 0; i < volunteerCount; i++) {
+    const yard = yardAreas[i % yardAreas.length];
+    const phase = (now / 2500 + i * 1.7 + 3.14);
+    const vx = yard.rx + yard.w * 0.35 + Math.sin(phase) * yard.w * 0.2;
+    const vy = yard.ry + yard.h * 0.5 + Math.cos(phase * 0.6 + i * 2) * yard.h * 0.15;
+    drawShelterWorker(vx, vy, true, phase);
+  }
+
+  // ---- Entrance door / gate marker ----
+  const doorX = -4 * s;
+  const doorY = foundY + foundH - 6 * s;
+  ctx.fillStyle = '#8B6914';
+  ctx.beginPath();
+  ctx.roundRect(doorX - 6 * s, doorY, 12 * s, 5 * s, 2);
+  ctx.fill();
+  ctx.fillStyle = accentColor;
+  ctx.beginPath();
+  ctx.roundRect(doorX - 4 * s, doorY + 1 * s, 8 * s, 3 * s, 1);
+  ctx.fill();
+
+  // ---- Owner label / name banner ----
+  const bannerY = foundY - 14;
+  // Banner background
+  ctx.fillStyle = accentColor;
+  ctx.globalAlpha = 0.85;
+  const ownerLabel = isOwner ? 'Your Shelter' : 'Shelter';
+  ctx.font = 'bold 11px Rubik, sans-serif';
+  ctx.textAlign = 'center';
+  const labelW = ctx.measureText(ownerLabel).width + 14;
+  ctx.beginPath();
+  ctx.roundRect(-labelW / 2, bannerY - 10, labelW, 16, 4);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  // Banner text
+  ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(ownerLabel, 0, bannerY - 2);
+  ctx.textBaseline = 'alphabetic';
+
+  // ---- Upgrade indicators (icons) ----
+  let iconX = -24;
+  const iconY = bannerY - 22;
   ctx.font = '14px sans-serif';
   ctx.textAlign = 'center';
-  
   if (shelter.hasAdoptionCenter) {
-    ctx.fillText('🐾', iconX, iconY); // Paw for adoption center
+    ctx.fillText('🐾', iconX, iconY);
     iconX += 20;
   }
   if (shelter.hasGravity) {
-    ctx.fillText('🧲', iconX, iconY); // Magnet for gravity
+    ctx.fillText('🧲', iconX, iconY);
     iconX += 20;
   }
   if (shelter.hasAdvertising) {
-    ctx.fillText('📢', iconX, iconY); // Megaphone for advertising
+    ctx.fillText('📢', iconX, iconY);
     iconX += 20;
   }
-  
-  // Owner label
-  ctx.fillStyle = '#333';
-  ctx.font = 'bold 11px Rubik, sans-serif';
-  ctx.textAlign = 'center';
-  const ownerLabel = isOwner ? 'Your Shelter' : `Shelter`;
-  ctx.fillText(ownerLabel, cx, buildingT - half * 0.5 - 8);
-  
-  // Tier badge - shows tier 1-5 with stars, or level number for higher
-  const tier = shelter.tier ?? 1;
-  const tierColors = ['#888', '#7bed9f', '#70a3ff', '#c77dff', '#ffd700']; // Gray, Green, Blue, Purple, Gold
+
+  // ---- Tier badge (top-right of foundation) ----
+  const tierColors = ['#888', '#7bed9f', '#70a3ff', '#c77dff', '#ffd700'];
   const tierColor = tierColors[Math.min(tier - 1, 4)];
-  
-  // Draw tier badge (top-right corner of shelter)
-  const badgeX = cx + half * 0.8;
-  const badgeY = buildingT - half * 0.3;
-  
-  // Badge background circle
+  const badgeX = foundX + foundW - 8;
+  const badgeY = foundY + 8;
+
   ctx.fillStyle = tierColor;
   ctx.beginPath();
-  ctx.arc(badgeX, badgeY, 14, 0, Math.PI * 2);
+  ctx.arc(badgeX, badgeY, 12, 0, Math.PI * 2);
   ctx.fill();
   ctx.strokeStyle = '#fff';
   ctx.lineWidth = 2;
   ctx.stroke();
-  
-  // Tier number or star
+
   ctx.fillStyle = tier >= 5 ? '#333' : '#fff';
-  ctx.font = 'bold 12px Rubik, sans-serif';
+  ctx.font = 'bold 11px Rubik, sans-serif';
   ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
   if (tier >= 5) {
     ctx.fillText('★' + tier, badgeX, badgeY);
   } else {
     ctx.fillText(String(tier), badgeX, badgeY);
   }
   ctx.textBaseline = 'alphabetic';
-  
-  // Pet count
+
+  // ---- Stats text below shelter ----
+  const statsY = foundY + foundH + 10;
   ctx.fillStyle = '#fff';
   ctx.font = '10px Rubik, sans-serif';
-  ctx.fillText(`Pets: ${shelter.petsInside.length}`, cx, buildingT + buildingH + 12);
-  
-  // Adoptions count
+  ctx.textAlign = 'center';
+  ctx.shadowColor = 'rgba(0,0,0,0.6)';
+  ctx.shadowBlur = 3;
+  ctx.fillText(`Pets: ${shelter.petsInside.length}`, 0, statsY);
   ctx.fillStyle = '#7bed9f';
-  ctx.fillText(`Adoptions: ${shelter.totalAdoptions}`, cx, buildingT + buildingH + 24);
-  
+  ctx.fillText(`Adoptions: ${shelter.totalAdoptions}`, 0, statsY + 13);
+  ctx.shadowBlur = 0;
+
   ctx.restore();
 }
 
 /** Draw a breeder mill - enemy structure that spawns wild strays */
+/** Sad pet emojis for breeder mill cages */
+const BREEDER_CAGE_PETS = ['🐱', '🐶', '🐰', '🐦', '🐱', '🐶', '🐰', '🐱'];
+
+/** Simple seeded PRNG so each mill looks unique but stable across frames */
+function millRng(seed: number): () => number {
+  let s = seed | 0;
+  return () => {
+    s = (s * 1103515245 + 12345) & 0x7fffffff;
+    return (s >>> 16) / 32768; // 0-1 range
+  };
+}
+
+/** Hash a shelter id string into a numeric seed */
+function millSeed(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = ((h << 5) - h + id.charCodeAt(i)) | 0;
+  return h;
+}
+
+/**
+ * Cell types for the breeder mill grid:
+ *  'cage1'  = single sad animal
+ *  'cage2'  = 2 animals crammed in
+ *  'cage3'  = 3 animals (worst)
+ *  'crate'  = sealed crate/box (no animal visible)
+ *  'empty'  = dirty empty floor space
+ *  'water'  = filthy water bowl / neglected supplies
+ */
+type MillCellType = 'cage1' | 'cage2' | 'cage3' | 'crate' | 'empty' | 'water';
+
 function drawBreederShelter(shelter: BreederShelterState): void {
   const cx = shelter.x;
   const cy = shelter.y;
-  const baseSize = 80 + shelter.size * 0.8; // Size scales with level
-  
+  const now = Date.now();
+  const pulse = 0.5 + 0.5 * Math.sin(now / 200);
+  const flickerDim = 0.85 + 0.15 * Math.sin(now / 400 + 1.3) * Math.sin(now / 170);
+
+  // Scale with level: more cages, bigger building
+  const lvl = shelter.level ?? 1;
+  const s = Math.min(2.2, 0.8 + lvl * 0.08);
+
+  // Seeded RNG for this specific mill
+  const rng = millRng(millSeed(shelter.id));
+
   ctx.save();
-  
-  // Pulsing red glow effect
-  const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
-  ctx.shadowColor = `rgba(255, 0, 0, ${0.4 + pulse * 0.3})`;
-  ctx.shadowBlur = 20 + pulse * 10;
-  
-  // Draw the breeder mill image if loaded, otherwise fallback to shape
-  if (breederMillImageLoaded) {
-    const imgW = baseSize * 1.5;
-    const imgH = baseSize * 1.2;
-    ctx.drawImage(breederMillImage, cx - imgW / 2, cy - imgH / 2, imgW, imgH);
-  } else {
-    // Fallback: draw a simple building shape
-    ctx.fillStyle = '#4a1a1a';
+  ctx.translate(cx, cy);
+
+  // ---- Ominous red glow beneath the complex ----
+  ctx.shadowColor = `rgba(180, 20, 0, ${0.35 + pulse * 0.25})`;
+  ctx.shadowBlur = 22 + pulse * 12;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+
+  // ---- Foundation: cracked dark concrete ----
+  const foundW = 120 * s;
+  const foundH = 100 * s;
+  ctx.fillStyle = '#2a2018';
+  ctx.beginPath();
+  ctx.roundRect(-foundW / 2, -foundH / 2, foundW, foundH, 4);
+  ctx.fill();
+
+  // Foundation border - rusty/bloodstained
+  ctx.strokeStyle = `rgba(140, 40, 20, ${0.6 + pulse * 0.3})`;
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  // Clear shadow for interior details
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+
+  // ---- Dirty floor stains ----
+  ctx.fillStyle = 'rgba(80, 40, 20, 0.3)';
+  for (let i = 0; i < 7; i++) {
+    const sx = -foundW / 2 + 12 + rng() * (foundW - 24);
+    const sy = -foundH / 2 + 10 + rng() * (foundH - 20);
     ctx.beginPath();
-    ctx.roundRect(cx - baseSize / 2, cy - baseSize / 2.5, baseSize, baseSize * 0.8, 6);
+    ctx.ellipse(sx, sy, 4 * s + rng() * 4 * s, 3 * s + rng() * 3 * s, rng() * 3, 0, Math.PI * 2);
     ctx.fill();
-    
-    ctx.strokeStyle = `rgba(255, 68, 68, ${0.6 + pulse * 0.4})`;
-    ctx.lineWidth = 3;
+  }
+
+  // ---- Flickering dim light overlay ----
+  ctx.globalAlpha = flickerDim;
+
+  // ---- Generate the cell grid (seeded per mill) ----
+  const cageW = 14 * s;
+  const cageH = 12 * s;
+  const cagePad = 2 * s;
+  const cageCols = Math.min(6, 3 + Math.floor(lvl / 3));
+  const cageRows = Math.min(5, 2 + Math.floor(lvl / 3));
+  const cageBlockW = cageCols * (cageW + cagePad);
+  const cageBlockH = cageRows * (cageH + cagePad);
+  const cageStartX = -cageBlockW / 2;
+  const cageStartY = -foundH / 2 + 10 * s;
+
+  // Pre-generate cell types: ~60% single, ~15% double, ~5% triple, ~10% crate, ~5% empty, ~5% water
+  const cells: MillCellType[] = [];
+  const totalCells = cageCols * cageRows;
+  for (let i = 0; i < totalCells; i++) {
+    const r = rng();
+    if (r < 0.55) cells.push('cage1');
+    else if (r < 0.72) cells.push('cage2');
+    else if (r < 0.78) cells.push('cage3');
+    else if (r < 0.88) cells.push('crate');
+    else if (r < 0.94) cells.push('empty');
+    else cells.push('water');
+  }
+
+  // Pre-generate random pet emoji index for each cell (seeded)
+  const cellPets: number[] = [];
+  for (let i = 0; i < totalCells; i++) {
+    cellPets.push(Math.floor(rng() * BREEDER_CAGE_PETS.length));
+  }
+
+  // Cage room floor (filthy)
+  ctx.fillStyle = '#3d2e1e';
+  ctx.beginPath();
+  ctx.roundRect(cageStartX - 4 * s, cageStartY - 4 * s, cageBlockW + 8 * s, cageBlockH + 8 * s, 2);
+  ctx.fill();
+  ctx.strokeStyle = '#5a3a20';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // ---- Draw each cell ----
+  for (let row = 0; row < cageRows; row++) {
+    for (let col = 0; col < cageCols; col++) {
+      const idx = row * cageCols + col;
+      const cellType = cells[idx];
+      const kx = cageStartX + col * (cageW + cagePad);
+      const ky = cageStartY + row * (cageH + cagePad);
+      const petIdx = cellPets[idx];
+      const petEmoji = BREEDER_CAGE_PETS[petIdx];
+      // Secondary pet (different from first) for overcrowded
+      const pet2Emoji = BREEDER_CAGE_PETS[(petIdx + 2) % BREEDER_CAGE_PETS.length];
+      const pet3Emoji = BREEDER_CAGE_PETS[(petIdx + 4) % BREEDER_CAGE_PETS.length];
+      const animalDim = flickerDim * (0.5 + 0.25 * Math.sin(now / 1200 + row * 1.3 + col * 0.7));
+      const emojiSize = 7 * s;
+
+      if (cellType === 'empty') {
+        // Dirty empty floor patch
+        ctx.fillStyle = '#3a2a1a';
+        ctx.fillRect(kx, ky, cageW, cageH);
+        ctx.strokeStyle = 'rgba(80, 55, 30, 0.3)';
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(kx, ky, cageW, cageH);
+        // Debris
+        ctx.fillStyle = 'rgba(90, 60, 30, 0.4)';
+        ctx.fillRect(kx + 3 * s, ky + 4 * s, 3 * s, 2 * s);
+      } else if (cellType === 'crate') {
+        // Sealed wooden crate
+        ctx.fillStyle = '#5a4228';
+        ctx.fillRect(kx, ky, cageW, cageH);
+        ctx.strokeStyle = '#7a5a38';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(kx, ky, cageW, cageH);
+        // Crate cross-slats
+        ctx.strokeStyle = 'rgba(120, 90, 50, 0.5)';
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(kx, ky + cageH / 2);
+        ctx.lineTo(kx + cageW, ky + cageH / 2);
+        ctx.moveTo(kx + cageW / 2, ky);
+        ctx.lineTo(kx + cageW / 2, ky + cageH);
+        ctx.stroke();
+        // Crate label
+        ctx.fillStyle = 'rgba(200, 150, 80, 0.3)';
+        ctx.font = `${4 * s}px Rubik, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('📦', kx + cageW / 2, ky + cageH / 2);
+      } else if (cellType === 'water') {
+        // Filthy water / neglected supplies
+        ctx.fillStyle = '#3a2a1a';
+        ctx.fillRect(kx, ky, cageW, cageH);
+        ctx.strokeStyle = 'rgba(80, 55, 30, 0.4)';
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(kx, ky, cageW, cageH);
+        // Dirty water bowl
+        ctx.fillStyle = '#4a5a3a';
+        ctx.beginPath();
+        ctx.ellipse(kx + cageW / 2, ky + cageH * 0.4, 4 * s, 2.5 * s, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#6a7a5a';
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+        // Spilled water stain
+        ctx.fillStyle = 'rgba(70, 90, 60, 0.25)';
+        ctx.beginPath();
+        ctx.ellipse(kx + cageW * 0.6, ky + cageH * 0.7, 3 * s, 2 * s, 0.4, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        // ---- Cage with animals (cage1, cage2, cage3) ----
+        // Dirty cage floor
+        ctx.fillStyle = '#4a3828';
+        ctx.fillRect(kx, ky, cageW, cageH);
+
+        // Rusted bars outline
+        ctx.strokeStyle = `rgba(120, 70, 30, ${0.7 + pulse * 0.15})`;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(kx, ky, cageW, cageH);
+
+        // Vertical bars (cramped)
+        ctx.strokeStyle = 'rgba(100, 60, 25, 0.5)';
+        ctx.lineWidth = 0.6;
+        const barCount = cellType === 'cage3' ? 4 : 3;
+        for (let b = 1; b < barCount; b++) {
+          ctx.beginPath();
+          ctx.moveTo(kx + b * cageW / barCount, ky);
+          ctx.lineTo(kx + b * cageW / barCount, ky + cageH);
+          ctx.stroke();
+        }
+
+        ctx.font = `${emojiSize}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        if (cellType === 'cage1') {
+          // Single sad animal
+          ctx.globalAlpha = animalDim;
+          ctx.fillText(petEmoji, kx + cageW / 2, ky + cageH / 2);
+        } else if (cellType === 'cage2') {
+          // 2 crammed in - offset left/right
+          ctx.globalAlpha = animalDim;
+          ctx.font = `${emojiSize * 0.8}px sans-serif`;
+          ctx.fillText(petEmoji, kx + cageW * 0.32, ky + cageH * 0.45);
+          ctx.globalAlpha = animalDim * 0.85;
+          ctx.fillText(pet2Emoji, kx + cageW * 0.68, ky + cageH * 0.6);
+        } else {
+          // cage3: 3 crammed in - triangle arrangement
+          ctx.font = `${emojiSize * 0.7}px sans-serif`;
+          ctx.globalAlpha = animalDim;
+          ctx.fillText(petEmoji, kx + cageW * 0.28, ky + cageH * 0.35);
+          ctx.globalAlpha = animalDim * 0.8;
+          ctx.fillText(pet2Emoji, kx + cageW * 0.72, ky + cageH * 0.35);
+          ctx.globalAlpha = animalDim * 0.7;
+          ctx.fillText(pet3Emoji, kx + cageW * 0.5, ky + cageH * 0.72);
+        }
+        ctx.globalAlpha = flickerDim;
+      }
+    }
+  }
+
+  // ---- Dark corridor below cages ----
+  const corrY = cageStartY + cageBlockH + 6 * s;
+  const corrH = 8 * s;
+  ctx.fillStyle = '#241a10';
+  ctx.fillRect(-foundW / 2 + 4 * s, corrY, foundW - 8 * s, corrH);
+  ctx.strokeStyle = '#3a2a18';
+  ctx.lineWidth = 0.8;
+  ctx.strokeRect(-foundW / 2 + 4 * s, corrY, foundW - 8 * s, corrH);
+
+  // ---- Bottom rooms ----
+  const bottomY = corrY + corrH + 3 * s;
+  const bottomH = foundH / 2 - (bottomY) - 4 * s;
+
+  // "Breeding room" (bottom-left)
+  const breedX = -foundW / 2 + 6 * s;
+  const breedW = foundW * 0.35;
+  if (bottomH > 8) {
+    ctx.fillStyle = '#3a1a1a';
+    ctx.beginPath();
+    ctx.roundRect(breedX, bottomY, breedW, bottomH, 2);
+    ctx.fill();
+    ctx.strokeStyle = '#5a2020';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(200, 80, 60, 0.5)';
+    ctx.font = `${6 * s}px Rubik, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Breeding', breedX + breedW / 2, bottomY + bottomH / 2);
+  }
+
+  // ---- Breeder Tyrant "office" (bottom-right) ----
+  const officeX = foundW / 2 - 6 * s - foundW * 0.4;
+  const officeW = foundW * 0.4;
+  if (bottomH > 8) {
+    // Dark office room
+    ctx.fillStyle = '#2e1e14';
+    ctx.beginPath();
+    ctx.roundRect(officeX, bottomY, officeW, bottomH, 2);
+    ctx.fill();
+    ctx.strokeStyle = '#4a3020';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Desk (dark wood)
+    const deskX = officeX + officeW * 0.3;
+    const deskY = bottomY + bottomH * 0.25;
+    const deskW = officeW * 0.45;
+    const deskH = bottomH * 0.2;
+    ctx.fillStyle = '#4a3018';
+    ctx.fillRect(deskX, deskY, deskW, deskH);
+    ctx.strokeStyle = '#5a4028';
+    ctx.lineWidth = 0.7;
+    ctx.strokeRect(deskX, deskY, deskW, deskH);
+
+    // Money stacks on desk
+    ctx.font = `${5 * s}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('💰', deskX + deskW * 0.3, deskY + deskH / 2);
+    ctx.fillText('💵', deskX + deskW * 0.7, deskY + deskH / 2);
+
+    // ---- Breeder Tyrant (back turned to animals, facing desk) ----
+    const tyrantX = officeX + officeW * 0.5;
+    const tyrantY = bottomY + bottomH * 0.65;
+    const tyrantPhase = now / 800;
+
+    // Chair
+    ctx.fillStyle = '#3a2010';
+    ctx.beginPath();
+    ctx.arc(tyrantX, tyrantY + 2 * s, 4 * s, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Body (dark suit, facing UP toward desk = back to animals above)
+    ctx.fillStyle = '#1a0808';
+    ctx.beginPath();
+    ctx.ellipse(tyrantX, tyrantY, 4 * s, 5.5 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#3a1010';
+    ctx.lineWidth = 0.6;
+    ctx.stroke();
+
+    // Head (facing desk/up)
+    ctx.fillStyle = '#d4a878';
+    ctx.beginPath();
+    ctx.arc(tyrantX, tyrantY - 5.5 * s, 3 * s, 0, Math.PI * 2);
+    ctx.fill();
+    // Dark hat
+    ctx.fillStyle = '#1a0505';
+    ctx.beginPath();
+    ctx.arc(tyrantX, tyrantY - 6 * s, 3.2 * s, Math.PI, Math.PI * 2);
+    ctx.fill();
+
+    // Arms reaching toward money (animated)
+    const armReach = Math.sin(tyrantPhase) * 1.5;
+    ctx.strokeStyle = '#1a0808';
+    ctx.lineWidth = 1.5 * s;
+    // Left arm to money
+    ctx.beginPath();
+    ctx.moveTo(tyrantX - 3.5 * s, tyrantY - 2 * s);
+    ctx.lineTo(deskX + deskW * 0.3 + armReach, deskY + deskH);
+    ctx.stroke();
+    // Right arm to money
+    ctx.beginPath();
+    ctx.moveTo(tyrantX + 3.5 * s, tyrantY - 2 * s);
+    ctx.lineTo(deskX + deskW * 0.7 - armReach, deskY + deskH);
+    ctx.stroke();
+
+    // Money counting animation (floating $ near hands)
+    const moneyBob = Math.sin(tyrantPhase * 2) * 2;
+    ctx.fillStyle = '#4a8a2a';
+    ctx.font = `bold ${4 * s}px Rubik, sans-serif`;
+    ctx.globalAlpha = flickerDim * 0.7;
+    ctx.fillText('$', deskX + deskW * 0.15 + armReach, deskY - 2 + moneyBob);
+    ctx.fillText('$', deskX + deskW * 0.85 - armReach, deskY - 1 - moneyBob);
+    ctx.globalAlpha = flickerDim;
+  }
+
+  ctx.globalAlpha = 1;
+
+  // ---- Boarded-up windows (along sides) ----
+  ctx.strokeStyle = '#5a3a1a';
+  ctx.lineWidth = 1.5 * s;
+  const winCount = Math.min(4, 1 + Math.floor(lvl / 3));
+  for (let i = 0; i < winCount; i++) {
+    const wy = -foundH / 2 + 15 * s + i * 18 * s;
+    if (wy + 8 * s > foundH / 2 - 5 * s) break;
+    // Left side
+    const wx = -foundW / 2;
+    ctx.fillStyle = '#1a1008';
+    ctx.fillRect(wx, wy, 5 * s, 8 * s);
+    ctx.beginPath();
+    ctx.moveTo(wx, wy); ctx.lineTo(wx + 5 * s, wy + 8 * s);
+    ctx.moveTo(wx + 5 * s, wy); ctx.lineTo(wx, wy + 8 * s);
+    ctx.stroke();
+    // Right side
+    const rwx = foundW / 2 - 5 * s;
+    ctx.fillStyle = '#1a1008';
+    ctx.fillRect(rwx, wy, 5 * s, 8 * s);
+    ctx.beginPath();
+    ctx.moveTo(rwx, wy); ctx.lineTo(rwx + 5 * s, wy + 8 * s);
+    ctx.moveTo(rwx + 5 * s, wy); ctx.lineTo(rwx, wy + 8 * s);
     ctx.stroke();
   }
-  
-  // Reset shadow for text
-  ctx.shadowBlur = 0;
-  
-  // Label above
-  ctx.fillStyle = '#ff4444';
+
+  // ---- Pulsing red "fire" glow at entrance (bottom center) ----
+  const fireX = 0;
+  const fireY = foundH / 2 - 3 * s;
+  const fireGrad = ctx.createRadialGradient(fireX, fireY, 0, fireX, fireY, 14 * s);
+  fireGrad.addColorStop(0, `rgba(255, 60, 0, ${0.4 + pulse * 0.3})`);
+  fireGrad.addColorStop(0.5, `rgba(200, 30, 0, ${0.15 + pulse * 0.1})`);
+  fireGrad.addColorStop(1, 'rgba(100, 10, 0, 0)');
+  ctx.fillStyle = fireGrad;
+  ctx.beginPath();
+  ctx.arc(fireX, fireY, 14 * s, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.font = `${12 * s}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('🔥', fireX, fireY - 2 * s);
+
+  // ---- Chains / barbed wire along top ----
+  ctx.strokeStyle = 'rgba(100, 60, 30, 0.6)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2 * s, 3 * s]);
+  ctx.beginPath();
+  ctx.moveTo(-foundW / 2, -foundH / 2 - 3 * s);
+  ctx.lineTo(foundW / 2, -foundH / 2 - 3 * s);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#8a5a2a';
+  for (let i = 0; i < 6; i++) {
+    const bx = -foundW / 2 + 10 * s + i * (foundW - 20 * s) / 5;
+    ctx.beginPath();
+    ctx.moveTo(bx, -foundH / 2 - 3 * s);
+    ctx.lineTo(bx - 2, -foundH / 2 - 7 * s);
+    ctx.lineTo(bx + 2, -foundH / 2 - 7 * s);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // ---- Label above (red, menacing) ----
+  ctx.fillStyle = '#ff3333';
   ctx.font = 'bold 12px Rubik, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
-  ctx.fillText(`Breeder Mill Lv${shelter.level}`, cx, cy - baseSize / 2 - 5);
-  
-  // Warning text below
-  ctx.fillStyle = '#ffaa00';
+  ctx.shadowColor = 'rgba(200, 0, 0, 0.7)';
+  ctx.shadowBlur = 6;
+  ctx.fillText(`Breeder Mill Lv${shelter.level}`, 0, -foundH / 2 - 10 * s);
+  ctx.shadowBlur = 0;
+
+  // ---- Warning text below ----
+  ctx.fillStyle = '#ff8800';
   ctx.font = '10px Rubik, sans-serif';
   ctx.textBaseline = 'top';
-  ctx.fillText('Spawning wild strays!', cx, cy + baseSize / 2.5 + 5);
-  
+  ctx.fillText('Spawning wild strays!', 0, foundH / 2 + 5 * s);
+
   ctx.restore();
 }
 
@@ -3429,7 +4676,7 @@ const BOSS_MILL_EMOJIS: Record<number, string> = {
 
 /** Draw the PetMall and all boss mills */
 function drawBossMode(bossMode: BossModeState): void {
-  const { mallX, mallY, mills, tycoonX, tycoonY, tycoonTargetMill, playerAtMill, millsCleared } = bossMode;
+  const { mallX, mallY, mills, tycoonX, tycoonY, tycoonTargetMill, playerAtMill, millsCleared, rebuildingMill } = bossMode;
   
   ctx.save();
   
@@ -3449,12 +4696,13 @@ function drawBossMode(bossMode: BossModeState): void {
   ctx.fillText('🏪 PETMALL', mallX, mallY - 40);
   ctx.font = '16px Rubik, sans-serif';
   ctx.fillStyle = '#ffffff';
-  ctx.fillText(`${millsCleared}/5 Mills Cleared`, mallX, mallY);
+  ctx.fillText(`Bring strays, get them out`, mallX, mallY);
   ctx.shadowBlur = 0;
   
   // Draw each mill
   for (const mill of mills) {
-    drawBossMill(mill, mill.id === playerAtMill, mill.id === tycoonTargetMill);
+    const isRebuilding = rebuildingMill !== undefined && rebuildingMill === mill.id;
+    drawBossMill(mill, mill.id === playerAtMill, mill.id === tycoonTargetMill, isRebuilding);
   }
   
   // Draw Breeder Tycoon
@@ -3464,7 +4712,7 @@ function drawBossMode(bossMode: BossModeState): void {
 }
 
 /** Draw a single boss mill */
-function drawBossMill(mill: BossMill, isPlayerHere: boolean, isTycoonTarget: boolean): void {
+function drawBossMill(mill: BossMill, isPlayerHere: boolean, isTycoonTarget: boolean, isRebuilding: boolean): void {
   const { x, y, petType, completed, id } = mill;
   const emoji = BOSS_MILL_EMOJIS[petType] ?? '🐾';
   const name = BOSS_MILL_NAMES[petType] ?? 'Mill';
@@ -3472,7 +4720,13 @@ function drawBossMill(mill: BossMill, isPlayerHere: boolean, isTycoonTarget: boo
   ctx.save();
   
   // Different style for completed mills
-  if (completed) {
+  if (isRebuilding) {
+    // Tycoon is rebuilding - pulsing orange/red warning
+    const rebuildPulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
+    ctx.shadowColor = `rgba(255, 100, 0, ${0.6 + rebuildPulse * 0.4})`;
+    ctx.shadowBlur = 20 + rebuildPulse * 10;
+    ctx.fillStyle = `rgba(255, 100, 0, ${0.15 + rebuildPulse * 0.1})`;
+  } else if (completed) {
     ctx.globalAlpha = 0.5;
     ctx.fillStyle = 'rgba(100, 200, 100, 0.3)';
   } else if (isPlayerHere) {
@@ -3500,9 +4754,12 @@ function drawBossMill(mill: BossMill, isPlayerHere: boolean, isTycoonTarget: boo
   const bw = BOSS_MILL_RADIUS * 1.4;
   const bh = BOSS_MILL_RADIUS * 1.2;
   
-  if (completed) {
+  if (completed && !isRebuilding) {
     ctx.fillStyle = '#3d8b40';
     ctx.strokeStyle = '#2d6a30';
+  } else if (isRebuilding) {
+    ctx.fillStyle = '#8b3500';
+    ctx.strokeStyle = '#5c2d0e';
   } else {
     ctx.fillStyle = '#8b4513';
     ctx.strokeStyle = '#5c2d0e';
@@ -3520,24 +4777,30 @@ function drawBossMill(mill: BossMill, isPlayerHere: boolean, isTycoonTarget: boo
   ctx.lineTo(x, y - bh / 2 - 30);
   ctx.lineTo(x + bw / 2 + 10, y - bh / 2);
   ctx.closePath();
-  ctx.fillStyle = completed ? '#2d6a30' : '#654321';
+  ctx.fillStyle = (completed && !isRebuilding) ? '#2d6a30' : isRebuilding ? '#5c2000' : '#654321';
   ctx.fill();
   ctx.stroke();
   
   // Pet emoji in center
+  ctx.globalAlpha = 1;
   ctx.font = '36px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(emoji, x, y);
   
   // Name label
-  ctx.fillStyle = completed ? '#90ee90' : '#ffd700';
+  ctx.fillStyle = (completed && !isRebuilding) ? '#90ee90' : '#ffd700';
   ctx.font = 'bold 12px Rubik, sans-serif';
   ctx.textBaseline = 'bottom';
   ctx.fillText(name, x, y - bh / 2 - 35);
   
   // Status below
-  if (completed) {
+  if (isRebuilding) {
+    ctx.fillStyle = '#ff6600';
+    ctx.font = 'bold 11px Rubik, sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.fillText('REBUILDING...', x, y + bh / 2 + 5);
+  } else if (completed) {
     ctx.fillStyle = '#90ee90';
     ctx.font = '11px Rubik, sans-serif';
     ctx.textBaseline = 'top';
@@ -3605,99 +4868,226 @@ const STRAY_PET_EMOJIS: Record<number, string> = {
   [PET_TYPE_SPECIAL]: '⭐',
 };
 
-/** Draw a stray on the map using the same graphic as adoption drop-off (emoji by type). Only boosts use circles. */
-function drawStray(x: number, y: number, petType: number = PET_TYPE_CAT): void {
+/** Set up shared canvas state for batched stray drawing. Call before the stray loop. */
+function beginStrayBatch(): void {
   ctx.save();
   ctx.globalAlpha = 1;
-  const emoji = STRAY_PET_EMOJIS[petType] ?? STRAY_PET_EMOJIS[PET_TYPE_CAT];
   ctx.font = '30px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.shadowColor = 'rgba(0,0,0,0.8)';
   ctx.shadowBlur = 4;
+}
+
+/** Reset canvas state after batched stray drawing. Call after the stray loop. */
+function endStrayBatch(): void {
+  ctx.restore();
+}
+
+/** Draw a single stray. Must be called between beginStrayBatch/endStrayBatch. */
+function drawStray(x: number, y: number, petType: number = PET_TYPE_CAT): void {
+  const emoji = STRAY_PET_EMOJIS[petType] ?? STRAY_PET_EMOJIS[PET_TYPE_CAT];
   ctx.fillText(emoji, x, y);
   if (petType === PET_TYPE_SPECIAL) {
     ctx.shadowColor = '#ffd700';
     ctx.shadowBlur = 12;
     ctx.fillText(emoji, x, y);
+    // Restore default shadow for next pet
+    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+    ctx.shadowBlur = 4;
   }
-  ctx.shadowBlur = 0;
-  ctx.restore();
 }
 
 /** Draw a breeder camp: bigger tent, small enclosed pen, random pets breeding inside */
+/** Breeder camp pet emojis by type index */
+const CAMP_PET_EMOJIS = ['🐱', '🐶', '🐰', '🐦'];
+
 function drawBreederCamp(x: number, y: number, level: number = 1): void {
-  const campRadius = 35;
-  const penRadius = 14; // Small enclosed fence (animal pen)
-  const postCount = 10; // Short fence posts around pen
-  const postHeight = 8;
-  const postWidth = 3;
-  
+  // Seeded RNG from position so each camp looks unique but stable
+  const seed0 = ((x * 7 + y * 31 + level * 101) | 0) >>> 0;
+  const rng = millRng(seed0);
+
+  const now = Date.now();
+  const flicker = 0.9 + 0.1 * Math.sin(now / 500 + seed0);
+
+  // Size: at least as large as the van (van half = 50 → 100px wide)
+  const campW = 110;
+  const campH = 80;
+
   ctx.save();
   ctx.translate(x, y);
-  
-  // Ground circle (dirt floor)
+
+  // ---- Dark ground slab ----
+  ctx.shadowColor = 'rgba(100, 30, 0, 0.3)';
+  ctx.shadowBlur = 10;
+  ctx.fillStyle = '#3a2e20';
   ctx.beginPath();
-  ctx.arc(0, 0, campRadius - 4, 0, Math.PI * 2);
-  ctx.fillStyle = '#5a4a3a';
+  ctx.roundRect(-campW / 2, -campH / 2, campW, campH, 5);
   ctx.fill();
-  
-  // Small enclosed fence (animal pen) - low rails around pen area
-  ctx.fillStyle = '#8B4513';
-  ctx.strokeStyle = '#5a3810';
-  ctx.lineWidth = 1;
-  for (let i = 0; i < postCount; i++) {
-    const angle = (i / postCount) * Math.PI * 2;
-    const px = Math.cos(angle) * penRadius;
-    const py = Math.sin(angle) * penRadius;
-    ctx.fillRect(px - postWidth / 2, py - postHeight / 2, postWidth, postHeight);
-  }
-  ctx.beginPath();
-  ctx.arc(0, 0, penRadius, 0, Math.PI * 2);
-  ctx.strokeStyle = '#6d4c35';
+  ctx.strokeStyle = '#5a3a1a';
   ctx.lineWidth = 2;
   ctx.stroke();
-  
-  // Random pets inside the pen (deterministic from x, y, level)
-  const seed = ((x * 7 + y * 31 + level * 101) | 0) >>> 0;
-  const petColors = ['#ff9f43', '#a17851', '#74b9ff', '#dfe6e9']; // cat, dog, bird, rabbit
-  const nPets = 2 + (seed % 3); // 2-4 pets
-  for (let i = 0; i < nPets; i++) {
-    const s = (seed + i * 17) >>> 0;
-    const px = ((s % 17) - 8) * 0.9;
-    const py = (((s >> 4) % 17) - 8) * 0.9;
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+
+  // ---- Dirt floor stains ----
+  ctx.fillStyle = 'rgba(70, 40, 20, 0.25)';
+  for (let i = 0; i < 4; i++) {
+    const sx = -campW / 2 + 10 + rng() * (campW - 20);
+    const sy = -campH / 2 + 8 + rng() * (campH - 16);
     ctx.beginPath();
-    ctx.arc(px, py, 4, 0, Math.PI * 2);
-    ctx.fillStyle = petColors[(s >> 8) % petColors.length];
+    ctx.ellipse(sx, sy, 4 + rng() * 5, 3 + rng() * 3, rng() * 3, 0, Math.PI * 2);
     ctx.fill();
-    ctx.strokeStyle = '#333';
-    ctx.lineWidth = 0.8;
+  }
+
+  ctx.globalAlpha = flicker;
+
+  // ---- Determine cage layout ----
+  // Choose the "breeding type" for the main overcrowded cage (same type)
+  const breedTypeIdx = Math.floor(rng() * CAMP_PET_EMOJIS.length);
+  const breedEmoji = CAMP_PET_EMOJIS[breedTypeIdx];
+  const breedCount = 2 + Math.floor(rng() * 3); // 2-4 of the same type
+
+  // Number of regular cages (1-3 based on level)
+  const regularCages = Math.min(3, 1 + Math.floor(level / 4));
+  const totalCages = 1 + regularCages; // 1 breeding cage + regular cages
+
+  // Cage dimensions
+  const cageW = 22;
+  const cageH = 18;
+  const cagePad = 4;
+  const cageBlockW = totalCages * (cageW + cagePad) - cagePad;
+  const cageStartX = -cageBlockW / 2;
+  const cageY = -campH / 2 + 10;
+
+  // Cage area floor
+  ctx.fillStyle = '#4a3828';
+  ctx.beginPath();
+  ctx.roundRect(cageStartX - 4, cageY - 4, cageBlockW + 8, cageH + 8, 2);
+  ctx.fill();
+  ctx.strokeStyle = '#5a4030';
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+
+  // ---- Draw the BREEDING cage (first cage, overcrowded with same type) ----
+  const bkx = cageStartX;
+  const bky = cageY;
+  ctx.fillStyle = '#4a3020';
+  ctx.fillRect(bkx, bky, cageW, cageH);
+  ctx.strokeStyle = 'rgba(140, 70, 30, 0.8)';
+  ctx.lineWidth = 1.2;
+  ctx.strokeRect(bkx, bky, cageW, cageH);
+  // Bars
+  ctx.strokeStyle = 'rgba(110, 60, 25, 0.5)';
+  ctx.lineWidth = 0.6;
+  for (let b = 1; b <= 3; b++) {
+    ctx.beginPath();
+    ctx.moveTo(bkx + b * cageW / 4, bky);
+    ctx.lineTo(bkx + b * cageW / 4, bky + cageH);
     ctx.stroke();
   }
-  
-  // Bigger tent (main structure) - larger triangle
+  // Same-type animals crammed in
+  ctx.font = '8px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  if (breedCount === 2) {
+    ctx.globalAlpha = flicker * 0.7;
+    ctx.fillText(breedEmoji, bkx + cageW * 0.35, bky + cageH * 0.45);
+    ctx.globalAlpha = flicker * 0.6;
+    ctx.fillText(breedEmoji, bkx + cageW * 0.65, bky + cageH * 0.6);
+  } else if (breedCount === 3) {
+    ctx.globalAlpha = flicker * 0.7;
+    ctx.fillText(breedEmoji, bkx + cageW * 0.25, bky + cageH * 0.4);
+    ctx.globalAlpha = flicker * 0.6;
+    ctx.fillText(breedEmoji, bkx + cageW * 0.6, bky + cageH * 0.35);
+    ctx.globalAlpha = flicker * 0.55;
+    ctx.fillText(breedEmoji, bkx + cageW * 0.45, bky + cageH * 0.72);
+  } else {
+    // 4 crammed
+    ctx.font = '7px sans-serif';
+    ctx.globalAlpha = flicker * 0.7;
+    ctx.fillText(breedEmoji, bkx + cageW * 0.28, bky + cageH * 0.3);
+    ctx.globalAlpha = flicker * 0.65;
+    ctx.fillText(breedEmoji, bkx + cageW * 0.72, bky + cageH * 0.3);
+    ctx.globalAlpha = flicker * 0.6;
+    ctx.fillText(breedEmoji, bkx + cageW * 0.28, bky + cageH * 0.72);
+    ctx.globalAlpha = flicker * 0.55;
+    ctx.fillText(breedEmoji, bkx + cageW * 0.72, bky + cageH * 0.72);
+  }
+  ctx.globalAlpha = flicker;
+
+  // ---- Regular cages (random single animals) ----
+  for (let i = 0; i < regularCages; i++) {
+    const kx = cageStartX + (i + 1) * (cageW + cagePad);
+    ctx.fillStyle = '#4a3828';
+    ctx.fillRect(kx, cageY, cageW, cageH);
+    ctx.strokeStyle = 'rgba(120, 70, 30, 0.7)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(kx, cageY, cageW, cageH);
+    // Bars
+    ctx.strokeStyle = 'rgba(100, 60, 25, 0.4)';
+    ctx.lineWidth = 0.5;
+    for (let b = 1; b < 3; b++) {
+      ctx.beginPath();
+      ctx.moveTo(kx + b * cageW / 3, cageY);
+      ctx.lineTo(kx + b * cageW / 3, cageY + cageH);
+      ctx.stroke();
+    }
+    // Single random animal
+    const petIdx = Math.floor(rng() * CAMP_PET_EMOJIS.length);
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.globalAlpha = flicker * (0.5 + 0.2 * Math.sin(now / 1100 + i * 1.7));
+    ctx.fillText(CAMP_PET_EMOJIS[petIdx], kx + cageW / 2, cageY + cageH / 2);
+    ctx.globalAlpha = flicker;
+  }
+
+  // ---- Tent structure (below cages) ----
+  const tentCx = 0;
+  const tentY = 8;
   ctx.beginPath();
-  ctx.moveTo(-20, 12);
-  ctx.lineTo(0, -18);
-  ctx.lineTo(20, 12);
+  ctx.moveTo(tentCx - 28, tentY + 18);
+  ctx.lineTo(tentCx, tentY - 14);
+  ctx.lineTo(tentCx + 28, tentY + 18);
   ctx.closePath();
-  ctx.fillStyle = '#D2B48C';
+  ctx.fillStyle = '#c4a47a';
   ctx.fill();
-  ctx.strokeStyle = '#8B7355';
+  ctx.strokeStyle = '#8a7050';
   ctx.lineWidth = 1.5;
   ctx.stroke();
+  // Tent flap / door
   ctx.beginPath();
-  ctx.moveTo(-7, 12);
-  ctx.lineTo(0, 4);
-  ctx.lineTo(7, 12);
-  ctx.fillStyle = '#4a3a2a';
+  ctx.moveTo(tentCx - 9, tentY + 18);
+  ctx.lineTo(tentCx, tentY + 6);
+  ctx.lineTo(tentCx + 9, tentY + 18);
+  ctx.fillStyle = '#3a2a1a';
   ctx.fill();
-  
+
+  // ---- Fence posts around perimeter ----
+  ctx.fillStyle = '#6a4a28';
+  const postSpacing = 16;
+  for (let px = -campW / 2 + 6; px < campW / 2 - 4; px += postSpacing) {
+    ctx.fillRect(px, -campH / 2, 2, 3);
+    ctx.fillRect(px, campH / 2 - 3, 2, 3);
+  }
+  for (let py = -campH / 2 + 6; py < campH / 2 - 4; py += postSpacing) {
+    ctx.fillRect(-campW / 2, py, 3, 2);
+    ctx.fillRect(campW / 2 - 3, py, 3, 2);
+  }
+  // Fence wire
+  ctx.strokeStyle = 'rgba(100, 70, 40, 0.4)';
+  ctx.lineWidth = 0.6;
+  ctx.setLineDash([3, 2]);
+  ctx.strokeRect(-campW / 2 + 1, -campH / 2 + 1, campW - 2, campH - 2);
+  ctx.setLineDash([]);
+
+  ctx.globalAlpha = 1;
   ctx.restore();
-  
-  // Level badge (white box with level number)
-  const badgeX = x + campRadius - 10;
-  const badgeY = y - campRadius + 5;
+
+  // ---- Level badge (top-right) ----
+  const badgeX = x + campW / 2 - 6;
+  const badgeY = y - campH / 2 + 6;
   ctx.fillStyle = '#fff';
   ctx.beginPath();
   ctx.roundRect(badgeX - 10, badgeY - 8, 20, 16, 3);
@@ -3710,8 +5100,8 @@ function drawBreederCamp(x: number, y: number, level: number = 1): void {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(`${level}`, badgeX, badgeY);
-  
-  // Calculate estimated RT cost to beat this camp
+
+  // ---- RT cost label below ----
   const basePets = 3 + Math.min(2, Math.floor(level / 2));
   const petCount = Math.min(basePets + Math.floor(level / 2), 8);
   let ingredientCount = 1;
@@ -3726,12 +5116,12 @@ function drawBreederCamp(x: number, y: number, level: number = 1): void {
     ingredientCount = 2;
   }
   const estimatedRtCost = petCount * ingredientCount * avgIngredientCost;
-  
+
   ctx.font = 'bold 10px Rubik, sans-serif';
   ctx.fillStyle = '#ff6b6b';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
-  ctx.fillText(`Lv${level} ~${estimatedRtCost}RT`, x, y + campRadius + 12);
+  ctx.fillText(`Lv${level} ~${estimatedRtCost}RT`, x, y + campH / 2 + 14);
 }
 
 function drawPickup(u: PickupState): void {
@@ -3827,14 +5217,25 @@ function render(dt: number): void {
     drawBossMode(latestSnapshot.bossMode);
   }
 
+  // Viewport culling: only draw strays visible on screen
+  const strayMargin = 50;
+  const viewL = safeCam.x - strayMargin;
+  const viewR = safeCam.x + safeCam.w + strayMargin;
+  const viewT = safeCam.y - strayMargin;
+  const viewB = safeCam.y + safeCam.h + strayMargin;
+
+  beginStrayBatch();
   for (const pet of latestSnapshot?.pets ?? []) {
     if (pet.insideShelterId !== null) continue;
     const p = getInterpolatedPet(pet.id) ?? pet;
     if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
     // Skip uninitialized pets at (0,0) - ghost stray fix
     if (p.x === 0 && p.y === 0) continue;
+    // Skip pets outside the viewport
+    if (p.x < viewL || p.x > viewR || p.y < viewT || p.y > viewB) continue;
     drawStray(p.x, p.y, pet.petType ?? PET_TYPE_CAT);
   }
+  endStrayBatch();
 
   // Sort players by size so larger ones render on top
   const sortedPlayers = [...(latestSnapshot?.players ?? [])].sort((a, b) => a.size - b.size);
@@ -3872,38 +5273,142 @@ function render(dt: number): void {
     }
   }
   
-  // Draw adoption animations (pets traveling to adoption center)
+  // Draw adoption animations: people walking away with their adopted pets
   const nowMs = Date.now();
   for (let i = adoptionAnimations.length - 1; i >= 0; i--) {
     const anim = adoptionAnimations[i];
     const elapsed = nowMs - anim.startTime;
-    
+
     if (elapsed < 0) continue; // Hasn't started yet (staggered)
-    
+
     if (elapsed > ADOPTION_ANIMATION_DURATION) {
-      // Animation finished, remove it
       adoptionAnimations.splice(i, 1);
       continue;
     }
-    
+
     const progress = elapsed / ADOPTION_ANIMATION_DURATION;
-    // Ease out curve for smooth deceleration
-    const easedProgress = 1 - Math.pow(1 - progress, 3);
-    
-    // Interpolate position
-    const x = anim.fromX + (anim.toX - anim.fromX) * easedProgress;
-    const y = anim.fromY + (anim.toY - anim.fromY) * easedProgress - Math.sin(progress * Math.PI) * 50; // Arc upward
-    
-    // Fade out near the end
+    const easedProgress = 1 - Math.pow(1 - progress, 3); // ease-out
+
+    // Fade out in the last 20%
     const alpha = progress < 0.8 ? 1 : 1 - (progress - 0.8) / 0.2;
-    
-    // Draw the pet emoji
+
     ctx.save();
     ctx.globalAlpha = alpha;
-    ctx.font = 'bold 32px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(ADOPTION_PET_EMOJIS[anim.petType] ?? '🐾', x, y);
+
+    if (anim.isBird) {
+      // ---- BIRD: flies free, no person, ascending with flutter ----
+      const birdX = anim.fromX + (anim.toX - anim.fromX) * easedProgress
+                   + Math.sin(progress * Math.PI * 4) * 12; // side-to-side flutter
+      const birdY = anim.fromY + (anim.toY - anim.fromY) * easedProgress
+                   - progress * 80 // rise upward
+                   + Math.sin(progress * Math.PI * 6) * 5; // vertical flutter
+      // Bird gets smaller as it flies away
+      const birdScale = 1 - progress * 0.4;
+      ctx.font = `${Math.round(22 * birdScale)}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('🐦', birdX, birdY);
+
+      // Small freedom sparkle trail
+      if (progress > 0.1 && progress < 0.7) {
+        ctx.globalAlpha = alpha * 0.4;
+        ctx.font = `${Math.round(8 * birdScale)}px sans-serif`;
+        ctx.fillText('✨', birdX - 8, birdY + 6);
+      }
+    } else {
+      // ---- NON-BIRD: person walking away with pet on leash ----
+      const personX = anim.fromX + (anim.toX - anim.fromX) * easedProgress;
+      const personY = anim.fromY + (anim.toY - anim.fromY) * easedProgress;
+
+      // Walking bob animation
+      const walkCycle = progress * 12; // fast walking cycle
+      const headBob = Math.sin(walkCycle * Math.PI) * 1.2;
+      const legSwing = Math.sin(walkCycle * Math.PI) * 2;
+
+      // Person body (facing walk direction)
+      const angle = anim.walkAngle;
+
+      ctx.save();
+      ctx.translate(personX, personY);
+
+      // -- Person sprite (similar to shelter volunteer) --
+      // Body (oval)
+      ctx.fillStyle = '#d4784a'; // warm casual clothing
+      ctx.beginPath();
+      ctx.ellipse(0, 1 + headBob * 0.3, 3.5, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#b05830';
+      ctx.lineWidth = 0.6;
+      ctx.stroke();
+
+      // Head
+      ctx.fillStyle = '#f5d5b8';
+      ctx.beginPath();
+      ctx.arc(0, -4.5 + headBob, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#c8a888';
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+
+      // Hair
+      ctx.fillStyle = '#6a4030';
+      ctx.beginPath();
+      ctx.arc(0, -5.5 + headBob, 3, Math.PI, Math.PI * 2);
+      ctx.fill();
+
+      // Legs (walking animation)
+      ctx.strokeStyle = '#4a6a8a';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(-1.5, 5);
+      ctx.lineTo(-1.5 - legSwing, 10);
+      ctx.moveTo(1.5, 5);
+      ctx.lineTo(1.5 + legSwing, 10);
+      ctx.stroke();
+
+      // -- Leash + pet --
+      // Pet position: behind/beside the person in the direction they came from
+      const leashLen = 14;
+      const petOffX = -Math.cos(angle) * leashLen + Math.sin(walkCycle * Math.PI * 0.7) * 2;
+      const petOffY = -Math.sin(angle) * leashLen + Math.abs(Math.sin(walkCycle * Math.PI)) * 1.5;
+
+      // Leash line (from person's hand to pet)
+      const handX = Math.cos(angle) * 3;
+      const handY = 1 + Math.sin(angle) * 2;
+      ctx.strokeStyle = '#8a6a4a';
+      ctx.lineWidth = 0.8;
+      ctx.setLineDash([2, 1]);
+      ctx.beginPath();
+      ctx.moveTo(handX, handY);
+      // Slight droop in the leash
+      const midX = (handX + petOffX) / 2;
+      const midY = (handY + petOffY) / 2 + 4;
+      ctx.quadraticCurveTo(midX, midY, petOffX, petOffY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Pet emoji at leash end
+      const petEmoji = ADOPTION_PET_EMOJIS[anim.petType] ?? '🐾';
+      ctx.font = '14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(petEmoji, petOffX, petOffY);
+
+      ctx.restore();
+    }
+
+    // Small heart above the person/bird periodically
+    if (progress > 0.05 && progress < 0.6 && Math.sin(progress * 20) > 0.8) {
+      const heartX = anim.fromX + (anim.toX - anim.fromX) * easedProgress;
+      const heartY = anim.fromY + (anim.toY - anim.fromY) * easedProgress
+                    - (anim.isBird ? progress * 80 + 15 : 14);
+      ctx.globalAlpha = alpha * 0.6;
+      ctx.font = '8px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('❤️', heartX, heartY);
+    }
+
     ctx.restore();
   }
 
@@ -3926,7 +5431,7 @@ function render(dt: number): void {
   ctx.restore();
 
   const scale = 120 / MAP_WIDTH;
-  minimapCtx.fillStyle = '#2d4a2d';
+  minimapCtx.fillStyle = 'rgba(45, 74, 45, 0.85)';
   minimapCtx.fillRect(0, 0, 120, 120);
   for (let yy = 0; yy <= MAP_HEIGHT; yy += DOT_SPACING * 3) {
     for (let xx = 0; xx <= MAP_WIDTH; xx += DOT_SPACING * 3) {
@@ -4470,14 +5975,14 @@ function render(dt: number): void {
   const shelterPortCount = Math.max(me?.shelterPortCharges ?? 0, lastShelterPortCharges);
   if (me && shelterPortCount > 0 && !isEliminated) {
     if (hasShelter) {
-      shelterPortBtnEl.textContent = `Home [H] (${shelterPortCount})`;
+      shelterPortBtnEl.textContent = isMobileBrowser ? `[H] (${shelterPortCount})` : `Home [H] (${shelterPortCount})`;
       (shelterPortBtnEl as HTMLButtonElement).disabled = false;
       shelterPortBtnEl.setAttribute('aria-disabled', 'false');
       shelterPortBtnEl.style.opacity = '1';
       shelterPortBtnEl.style.cursor = 'pointer';
     } else {
       // Show the button but indicate it's not usable without a shelter
-      shelterPortBtnEl.textContent = `Home [H] (${shelterPortCount}) 🔒`;
+      shelterPortBtnEl.textContent = isMobileBrowser ? `[H] (${shelterPortCount}) 🔒` : `Home [H] (${shelterPortCount}) 🔒`;
       (shelterPortBtnEl as HTMLButtonElement).disabled = false;
       shelterPortBtnEl.setAttribute('aria-disabled', 'true');
       shelterPortBtnEl.style.opacity = '0.6';
@@ -4571,7 +6076,9 @@ function render(dt: number): void {
   const leaderPercent = mapArea > 0 ? Math.min(100, Math.floor((leaderArea / mapArea) * 100)) : 0;
   const leaderPlayer = latestSnapshot?.players.find(p => p.shelterId === leaderShelter?.id);
   const points = me?.totalAdoptions ?? 0;
-  timerEl.textContent = matchPhase === 'playing' ? `Points: ${points}` : '';
+  const myShelterForStatus = me?.shelterId ? (latestSnapshot?.shelters?.find(s => s.id === me.shelterId) ?? null) : null;
+  const shelterLabel = myShelterForStatus ? `🏠 lvl${myShelterForStatus.tier}` : '🏠 --';
+  timerEl.textContent = matchPhase === 'playing' ? `⭐ ${points}  ${shelterLabel}` : '';
   
   // Update game clock (stop updating when match is over)
   const matchIsOver = latestSnapshot != null && latestSnapshot.matchEndAt > 0 && latestSnapshot.tick >= latestSnapshot.matchEndAt;
@@ -4601,9 +6108,16 @@ function render(dt: number): void {
         const progress = `${totalRescued}/${totalNeeded}`;
         return `<div class="event-item"><div class="event-name">${escapeHtml(typeName)}</div><div class="event-reqs">Need: ${progress} pets rescued</div><div class="event-time">${remainingSec}s left</div></div>`;
       }).join('');
-      eventPanelEl.classList.remove('hidden');
+      eventToggleBtnEl.classList.remove('hidden');
+      if (eventPanelOpen) {
+        eventPanelEl.classList.remove('hidden');
+      } else {
+        eventPanelEl.classList.add('hidden');
+      }
     } else {
+      eventToggleBtnEl.classList.add('hidden');
       eventPanelEl.classList.add('hidden');
+      eventPanelOpen = false;
     }
   }
   
@@ -4682,7 +6196,18 @@ function render(dt: number): void {
       </div>
     `;
     const sizeLabel = (p: PlayerState) => (p.eliminated ? '—' : `${Math.floor(p.size)}`);
-    leaderboardEl.innerHTML = `<strong>${title}</strong><br><br>` + sorted.map((p, i) => `${i + 1}. ${p.id === myPlayerId ? 'You' : (p.displayName ?? p.id)}: size ${sizeLabel(p)} (${p.totalAdoptions} adoptions)`).join('<br>') + tokenLines + adHtml + '<button type="button" id="play-again-btn" class="fight-ally-btn ally-btn" style="margin-right:8px">Play again</button><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn">Back to lobby</button>';
+    const playerLine = (p: PlayerState, i: number) => {
+      const isMe = p.id === myPlayerId;
+      const name = isMe ? 'You' : (p.displayName ?? p.id);
+      const rel = getRelationshipByPlayerId(p.id);
+      const relDot = rel === 'friend' ? '<span class="rel-dot rel-dot-friend"></span>' : rel === 'foe' ? '<span class="rel-dot rel-dot-foe"></span>' : '';
+      const targetUserId = getUserIdByPlayerId(p.id);
+      const markBtn = (!isMe && isSignedIn && targetUserId && targetUserId !== currentUserId)
+        ? ` <button class="rel-mark-btn" data-user-id="${escapeHtml(targetUserId)}" data-display-name="${escapeHtml(p.displayName ?? p.id)}" onclick="window.__showRelPopup(event)">&#9881;</button>`
+        : '';
+      return `${i + 1}. ${relDot}${escapeHtml(name)}: size ${sizeLabel(p)} (${p.totalAdoptions} adoptions)${markBtn}`;
+    };
+    leaderboardEl.innerHTML = `<strong>${title}</strong><br><br>` + sorted.map((p, i) => playerLine(p, i)).join('<br>') + tokenLines + adHtml + '<div style="display:flex;gap:12px;margin-top:16px;"><button type="button" id="play-again-btn" class="fight-ally-btn ally-btn" style="flex:1">Play again</button><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn" style="flex:1">Back to lobby</button></div>';
   } else {
     leaderboardEl.classList.remove('show');
   }
@@ -4795,11 +6320,32 @@ leaderboardEl.addEventListener('touchend', (e) => {
 
 // --- Lobby: Ready button ---
 lobbyReadyBtnEl.addEventListener('click', () => {
-  if (iAmReady || matchPhase !== 'countdown' || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  if (iAmReady || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+  if (matchPhase !== 'countdown' && matchPhase !== 'lobby') return;
   iAmReady = true;
   gameWs.send(JSON.stringify({ type: 'ready' }));
   lobbyReadyBtnEl.textContent = 'Ready!';
-  lobbyMessageEl.textContent = "You're ready! Waiting for other player(s)…";
+  lobbyMessageEl.textContent = matchPhase === 'lobby'
+    ? 'Starting with bots…'
+    : "You're ready! Waiting for other player(s)…";
+});
+
+// --- Observer: Back to lobby ---
+observerBackBtnEl.addEventListener('click', () => {
+  if (gameWs) {
+    gameWs.close();
+    gameWs = null;
+  }
+  isObserver = false;
+  observerOverlayEl.classList.add('hidden');
+  gameWrapEl.classList.remove('visible');
+  landingEl.classList.remove('hidden');
+  authAreaEl.classList.remove('hidden');
+  exitMobileFullscreen();
+  updateLandingTokens();
+  restoreModeSelection();
+  startServerClockWhenOnLobby();
+  connectLobbyLeaderboard();
 });
 
 // --- Lobby: Back to lobby (same as end-match lobby button) ---
@@ -5129,11 +6675,19 @@ actionVanSpeedBtnEl.addEventListener('click', () => {
 // --- Settings ---
 musicToggleEl.checked = getMusicEnabled();
 sfxToggleEl.checked = getSfxEnabled();
+vanSoundSelectEl.value = getVanSoundType();
 musicToggleEl.addEventListener('change', () => {
   setMusicEnabled(musicToggleEl.checked);
   if (musicToggleEl.checked) playMusic();
 });
-sfxToggleEl.addEventListener('change', () => setSfxEnabled(sfxToggleEl.checked));
+sfxToggleEl.addEventListener('change', () => {
+  setSfxEnabled(sfxToggleEl.checked);
+  if (!sfxToggleEl.checked) stopEngineLoop(); // Stop van engine when SFX disabled
+});
+vanSoundSelectEl.addEventListener('change', () => {
+  setVanSoundType(vanSoundSelectEl.value as VanSoundType);
+  stopEngineLoop(); // Stop current sound; new one will start on next movement tick
+});
 
 // Hide strays toggle - only show buildings/shelters/camps/events on minimap
 let hideStraysOnMinimap = localStorage.getItem('hideStrays') === 'true';
@@ -5145,6 +6699,16 @@ hideStraysToggleEl.addEventListener('change', () => {
 
 settingsBtnEl.addEventListener('click', () => settingsPanelEl.classList.toggle('hidden'));
 settingsCloseEl.addEventListener('click', () => settingsPanelEl.classList.add('hidden'));
+
+// Event panel megaphone toggle
+eventToggleBtnEl.addEventListener('click', () => {
+  eventPanelOpen = !eventPanelOpen;
+  if (eventPanelOpen) {
+    eventPanelEl.classList.remove('hidden');
+  } else {
+    eventPanelEl.classList.add('hidden');
+  }
+});
 
 // FPS setting: persist and apply
 if (fpsSelectEl) {
@@ -5262,6 +6826,17 @@ if (savedMode === 'ffa' || savedMode === 'teams' || savedMode === 'solo') {
 restoreModeSelection();
 const soloOptionsEl = document.getElementById('solo-options');
 const cpuShutdownBreedersEl = document.getElementById('cpu-shutdown-breeders') as HTMLInputElement | null;
+const mpOptionsEl = document.getElementById('mp-options');
+const botsEnabledEl = document.getElementById('bots-enabled') as HTMLInputElement | null;
+const BOTS_ENABLED_KEY = 'rescueworld_bots_enabled';
+let botsEnabled = localStorage.getItem(BOTS_ENABLED_KEY) !== 'false'; // default true
+if (botsEnabledEl) botsEnabledEl.checked = botsEnabled;
+if (botsEnabledEl) {
+  botsEnabledEl.addEventListener('change', () => {
+    botsEnabled = botsEnabledEl.checked;
+    localStorage.setItem(BOTS_ENABLED_KEY, String(botsEnabled));
+  });
+}
 
 function updateSoloOptionsVisibility(): void {
   if (soloOptionsEl) {
@@ -5269,6 +6844,13 @@ function updateSoloOptionsVisibility(): void {
       soloOptionsEl.classList.remove('hidden');
     } else {
       soloOptionsEl.classList.add('hidden');
+    }
+  }
+  if (mpOptionsEl) {
+    if (selectedMode === 'ffa' || selectedMode === 'teams') {
+      mpOptionsEl.classList.remove('hidden');
+    } else {
+      mpOptionsEl.classList.add('hidden');
     }
   }
 }
@@ -5342,6 +6924,7 @@ function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boole
       connectionOverlayEl.classList.add('hidden');
       gameWrapEl.classList.add('visible');
       if (musicToggleEl) musicToggleEl.checked = getMusicEnabled();
+      if (vanSoundSelectEl) vanSoundSelectEl.value = getVanSoundType();
       requestAnimationFrame(tick);
     })
     .catch((err: Error) => {
@@ -5549,6 +7132,7 @@ const bossMillWarning = document.getElementById('boss-mill-warning');
 let currentBossMillId: number = -1;
 let bossMillOpen = false;
 let lastPlayerAtMill: number = -1; // Track previous value to detect changes
+let wasBossModeActive = false; // Track boss mode transitions for music
 
 /** Ingredient emojis for display */
 const INGREDIENT_EMOJIS: Record<string, string> = {
@@ -5919,8 +7503,9 @@ function proceedWithBreederMiniGame(petCount: number, level: number, opts: Breed
   updateBreederTokensDisplay();
   renderSelectedIngredients();
 
-  // Hide result, show game
+  // Hide result and continue button, show game
   breederResultEl.classList.add('hidden');
+  breederCloseBtnEl.classList.add('hidden');
   breederFoodsEl.style.display = 'flex';
   breederMinigameEl.classList.add('show');
 
@@ -6314,9 +7899,10 @@ function endBreederMiniGame(completed: boolean): void {
     }));
   }
   
-  // Show result (will be updated when server responds with rewards)
+  // Show result and continue button (will be updated when server responds with rewards)
   breederFoodsEl.style.display = 'none';
   breederResultEl.classList.remove('hidden');
+  breederCloseBtnEl.classList.remove('hidden');
   breederResultTitleEl.textContent = completed 
     ? 'All Pets Rescued!' 
     : `Time's Up! (${breederGame.rescuedCount}/${breederGame.totalPets})`;
@@ -6369,6 +7955,28 @@ function closeBreederMiniGame(): void {
   breederMinigameEl.classList.remove('show');
 }
 
+/** Retreat from an active breeder minigame: clear local state, close UI, and
+ *  send only breederRetreat (NOT breederComplete) so the server can restore
+ *  the camp and bump the van away. */
+function retreatBreederMiniGame(): void {
+  // Clear timers without sending breederComplete
+  if (breederGame.timerInterval) {
+    clearInterval(breederGame.timerInterval);
+    breederGame.timerInterval = null;
+  }
+  if (breederGame.addPetInterval) {
+    clearInterval(breederGame.addPetInterval);
+    breederGame.addPetInterval = null;
+  }
+  // Close the minigame UI immediately (no results screen)
+  breederGame.active = false;
+  breederMinigameEl.classList.remove('show');
+  // Send retreat to server (camp restore + van bump + cooldown)
+  if (gameWs?.readyState === WebSocket.OPEN) {
+    gameWs.send(JSON.stringify({ type: 'breederRetreat' }));
+  }
+}
+
 // Breeder Mini-Game Event Listeners
 breederFoodsEl.querySelectorAll('.breeder-food-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
@@ -6382,12 +7990,7 @@ breederCloseBtnEl.addEventListener('click', closeBreederMiniGame);
 // Retreat button in active breeder minigame - allows escape at any time
 const breederRetreatBtn = document.getElementById('breeder-retreat-btn');
 breederRetreatBtn?.addEventListener('click', () => {
-  // End the minigame as a loss (player retreated)
-  endBreederMiniGame(false);
-  // Send retreat message to server to let player escape
-  if (gameWs?.readyState === WebSocket.OPEN) {
-    gameWs.send(JSON.stringify({ type: 'breederRetreat' }));
-  }
+  retreatBreederMiniGame();
 });
 
 // Breeder Warning Popup Event Listeners

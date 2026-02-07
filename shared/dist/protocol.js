@@ -92,14 +92,14 @@ function encodeSnapshot(snap) {
     for (const u of pickups) {
         size += 1 + encoder.encode(u.id).length + 4 + 4 + 1 + 1; // +1 for level byte
     }
-    // Shelters: count(1), then for each: id, ownerId, x, y, flags(1), numPets, pets, size(4), totalAdoptions(4), tier(1)
+    // Shelters: count(1), then for each: id, ownerId, x, y, flags(1), numPets(2), pets, size(4), totalAdoptions(4), tier(1)
     size += 1;
     for (const s of shelters) {
         size += 1 + encoder.encode(s.id).length;
         size += 1 + encoder.encode(s.ownerId).length;
         size += 4 + 4; // x, y
         size += 1; // flags byte (hasAdoptionCenter, hasGravity, hasAdvertising)
-        size += 1; // numPets
+        size += 2; // numPets (Uint16 - shelters can hold 255+ pets)
         for (const pid of s.petsInside)
             size += 1 + encoder.encode(pid).length;
         size += 4 + 4 + 1; // size(4), totalAdoptions(4), tier(1)
@@ -125,6 +125,7 @@ function encodeSnapshot(snap) {
     if (bossMode) {
         size += 4 + 4 + 4 + 4; // startTick, timeLimit, tycoonX, tycoonY
         size += 1 + 1 + 4 + 4 + 1; // tycoonTargetMill, millsCleared, mallX, mallY, playerAtMill
+        size += 1; // rebuildingMill
         size += 1; // numMills
         for (const mill of bossMode.mills) {
             size += 1 + 1 + 1 + 4 + 4 + 1; // id, petType, petCount, x, y, completed
@@ -242,7 +243,8 @@ function encodeSnapshot(snap) {
         // Pack flags into single byte
         const flags = (s.hasAdoptionCenter ? 1 : 0) | (s.hasGravity ? 2 : 0) | (s.hasAdvertising ? 4 : 0);
         view.setUint8(off++, flags);
-        view.setUint8(off++, s.petsInside.length);
+        view.setUint16(off, s.petsInside.length, true); // Uint16 - shelters can hold 255+ pets
+        off += 2;
         for (const pid of s.petsInside)
             off = writeString(view, off, pid);
         view.setFloat32(off, s.size, true);
@@ -300,6 +302,7 @@ function encodeSnapshot(snap) {
         view.setFloat32(off, bossMode.mallY, true);
         off += 4;
         view.setInt8(off++, bossMode.playerAtMill); // -1 to 4
+        view.setInt8(off++, bossMode.rebuildingMill ?? -1); // -1 to 4
         view.setUint8(off++, bossMode.mills.length);
         for (const mill of bossMode.mills) {
             view.setUint8(off++, mill.id & 0xff);
@@ -481,7 +484,8 @@ function decodeSnapshot(buf) {
         const hasAdoptionCenter = (flags & 1) !== 0;
         const hasGravity = (flags & 2) !== 0;
         const hasAdvertising = (flags & 4) !== 0;
-        const numShelterPets = view.getUint8(off++);
+        const numShelterPets = view.getUint16(off, true); // Uint16 - shelters can hold 255+ pets
+        off += 2;
         const petsInside = [];
         for (let j = 0; j < numShelterPets; j++) {
             const { s: pid, next: pn } = readString(view, off);
@@ -566,6 +570,7 @@ function decodeSnapshot(buf) {
             const mallY = view.getFloat32(off, true);
             off += 4;
             const playerAtMill = view.getInt8(off++);
+            const rebuildingMill = view.getInt8(off++);
             const numMills = view.getUint8(off++);
             const mills = [];
             for (let i = 0; i < numMills; i++) {
@@ -609,6 +614,7 @@ function decodeSnapshot(buf) {
                 mallX,
                 mallY,
                 playerAtMill,
+                rebuildingMill: rebuildingMill >= 0 ? rebuildingMill : undefined,
             };
         }
     }

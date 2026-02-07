@@ -18,6 +18,10 @@ import {
   getSavedMatch,
   deleteSavedMatch,
   getMatchHistory,
+  getRelationships,
+  setRelationship,
+  removeRelationship,
+  type RelationshipType,
 } from './referrals.js';
 import { getDailyGiftStatus, claimDailyGift, grantRegistrationGift, REGISTRATION_GIFT } from './dailyGifts.js';
 import { getLeaderboard, getUserRank } from './leaderboard.js';
@@ -647,6 +651,58 @@ app.post('/api/karma/award', (req: Request, res: Response) => {
   log(`Karma awarded: ${amount} KP to ${awardToUserId} (${karmaSource}: ${karmaReason})`);
   
   res.json({ success: true, userId: awardToUserId, karmaPoints: newBalance });
+});
+
+// --- Player Relationships (friend/foe) ---
+
+app.get('/auth/relationships', (req: Request, res: Response) => {
+  const userId = req.signedCookies?.session;
+  if (!userId) {
+    res.status(401).json({ error: 'not_signed_in' });
+    return;
+  }
+  const relationships = getRelationships(userId);
+  res.json({ relationships });
+});
+
+app.post('/auth/relationships', (req: Request, res: Response) => {
+  const userId = req.signedCookies?.session;
+  if (!userId) {
+    res.status(401).json({ error: 'not_signed_in' });
+    return;
+  }
+  const { targetUserId, relationship } = req.body as { targetUserId?: string; relationship?: string };
+  if (!targetUserId || typeof targetUserId !== 'string') {
+    res.status(400).json({ error: 'target_user_id_required' });
+    return;
+  }
+  if (relationship !== 'friend' && relationship !== 'foe') {
+    res.status(400).json({ error: 'invalid_relationship', validValues: ['friend', 'foe'] });
+    return;
+  }
+  if (targetUserId === userId) {
+    res.status(400).json({ error: 'cannot_mark_self' });
+    return;
+  }
+  setRelationship(userId, targetUserId, relationship as RelationshipType);
+  log(`User ${userId} marked ${targetUserId} as ${relationship}`);
+  res.json({ success: true });
+});
+
+app.delete('/auth/relationships/:targetUserId', (req: Request, res: Response) => {
+  const userId = req.signedCookies?.session;
+  if (!userId) {
+    res.status(401).json({ error: 'not_signed_in' });
+    return;
+  }
+  const targetUserId = req.params.targetUserId;
+  if (!targetUserId) {
+    res.status(400).json({ error: 'target_user_id_required' });
+    return;
+  }
+  removeRelationship(userId, targetUserId);
+  log(`User ${userId} removed relationship with ${targetUserId}`);
+  res.json({ success: true });
 });
 
 app.listen(API_PORT, () => {

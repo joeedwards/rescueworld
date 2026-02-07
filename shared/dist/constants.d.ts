@@ -62,6 +62,8 @@ export declare const INITIAL_SHELTER_SIZE = 1;
 export declare const SESSION_DURATION_MS: number;
 /** Max players per shard. */
 export declare const MAX_PLAYERS_PER_SHARD = 100;
+/** Max players per FFA/Teams match (including bots). */
+export declare const MAX_FFA_PLAYERS = 8;
 /** Stray spawn interval (ticks); spawn multiple per tick for a race feel. */
 export declare const STRAY_SPAWN_TICKS = 25;
 /** Strays spawned per spawn event. */
@@ -145,3 +147,7 @@ export declare const BOSS_MODE_REWARDS: {
 };
 /** Penalty for being caught by tycoon (lose this fraction of purchased ingredients). */
 export declare const BOSS_CAUGHT_PENALTY = 0.5;
+/** Time for tycoon to rebuild a cleared mill (seconds). */
+export declare const BOSS_TYCOON_REBUILD_SECONDS = 10;
+/** Time for tycoon to rebuild a cleared mill (ticks). */
+export declare const BOSS_TYCOON_REBUILD_TICKS: number;

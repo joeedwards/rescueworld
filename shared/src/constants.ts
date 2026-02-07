@@ -78,6 +78,9 @@ export const SESSION_DURATION_MS = 5 * 60 * 1000;
 /** Max players per shard. */
 export const MAX_PLAYERS_PER_SHARD = 100;
 
+/** Max players per FFA/Teams match (including bots). */
+export const MAX_FFA_PLAYERS = 8;
+
 /** Stray spawn interval (ticks); spawn multiple per tick for a race feel. */
 export const STRAY_SPAWN_TICKS = 25;
 /** Strays spawned per spawn event. */
@@ -203,3 +206,8 @@ export const BOSS_MODE_REWARDS = {
 
 /** Penalty for being caught by tycoon (lose this fraction of purchased ingredients). */
 export const BOSS_CAUGHT_PENALTY = 0.5;
+
+/** Time for tycoon to rebuild a cleared mill (seconds). */
+export const BOSS_TYCOON_REBUILD_SECONDS = 10;
+/** Time for tycoon to rebuild a cleared mill (ticks). */
+export const BOSS_TYCOON_REBUILD_TICKS = BOSS_TYCOON_REBUILD_SECONDS * TICK_RATE;

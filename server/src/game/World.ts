@@ -65,6 +65,7 @@ import {
   BOSS_MILL_RADIUS,
   BOSS_MODE_REWARDS,
   BOSS_CAUGHT_PENALTY,
+  BOSS_TYCOON_REBUILD_TICKS,
 } from 'shared';
 import { INPUT_LEFT, INPUT_RIGHT, INPUT_UP, INPUT_DOWN } from 'shared';
 import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED, PICKUP_TYPE_PORT, PICKUP_TYPE_BREEDER, PICKUP_TYPE_SHELTER_PORT } from 'shared';
@@ -143,6 +144,8 @@ export class World {
   private matchEndedEarly = false; // True if match ended due to domination
   private players = new Map<string, PlayerState>();
   private pets = new Map<string, PetState>();
+  /** Reusable array of outdoor strays for snapshots (avoids per-tick allocation) */
+  private snapshotStrays: PetState[] = [];
   private adoptionZones: AdoptionZoneState[] = [];
   private pickups = new Map<string, PickupState>();
   private petIdSeq = 0;
@@ -186,6 +189,10 @@ export class World {
   
   // CPU AI target persistence to prevent diagonal jitter
   private cpuTargets = new Map<string, { x: number; y: number; type: 'stray' | 'pickup' | 'zone' | 'wander'; breederClaimId?: string }>();
+  /** CPU retarget cooldown: tick when bot can pick a new target (simulates reaction time) */
+  private cpuRetargetCooldown = new Map<string, number>();
+  /** CPU hesitation: tick until which bot stands still (simulates thinking) */
+  private cpuHesitateTill = new Map<string, number>();
   
   // Breeder wave spawning - about every minute (45-75s), spawn all 5 breeders of current level at once
   // Note: TICK_RATE is 25 ticks/second
@@ -207,6 +214,8 @@ export class World {
   private breederClaimedBy = new Map<string, string>();
   /** Cooldown preventing CPU from targeting breeders after abandoning one: cpuId -> tick when they can target again */
   private cpuBreederCooldown = new Map<string, number>();
+  /** Cooldown after a human player retreats from a camp/mill: playerId -> tick when they can engage again */
+  private retreatCooldownUntilTick = new Map<string, number>();
   
   // Breeder camp tracking for growth mechanic
   private breederCamps = new Map<string, { x: number; y: number; spawnTick: number; level: number }>();
@@ -267,6 +276,9 @@ export class World {
     mallY: number;
     playerAtMill: number;
     lastMillClearTick: number; // For combo bonus tracking
+    rebuildingMill: number; // Which mill tycoon is rebuilding (-1 = none)
+    rebuildStartTick: number; // When rebuild started
+    visitedMills: number[]; // Track visit history to avoid immediate repeats
   } | null = null;
   
   // Match-wide announcements queue
@@ -420,7 +432,7 @@ export class World {
   private randomPosOutsideAdoptionZoneWithMargin(margin: number): { x: number; y: number } | null {
     const BREEDER_CAMP_AVOID_RADIUS = 80; // Avoid spawning within 80px of breeder camps
     
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 200; i++) {
       const x = MAP_WIDTH * Math.random();
       const y = MAP_HEIGHT * Math.random();
       let ok = true;
@@ -463,7 +475,8 @@ export class World {
       // Check player shelters - don't spawn inside or near them
       if (ok) {
         for (const shelter of this.shelters.values()) {
-          const playerShelterR = shelterRadius(shelter.size) + 100; // Shelter radius + safety margin
+          // Cap avoidance radius so breeder camps can still spawn on large maps with big shelters
+          const playerShelterR = Math.min(shelterVisualRadius(shelter.size) + 100, 800);
           const dx = x - shelter.x;
           const dy = y - shelter.y;
           if (dx * dx + dy * dy < playerShelterR * playerShelterR) {
@@ -947,6 +960,16 @@ export class World {
   private cpuAI(p: PlayerState): number {
     const zone = this.adoptionZones[0];
     if (!zone) return 0;
+
+    // Bot imperfection: occasional hesitation (stand still for ~0.5-1.5s simulating thinking)
+    const hesitateUntil = this.cpuHesitateTill.get(p.id) ?? 0;
+    if (this.tick < hesitateUntil) return 0; // Stand still during hesitation
+    // ~2% chance per tick to hesitate for 12-38 ticks (0.5-1.5s)
+    if (Math.random() < 0.02) {
+      const duration = 12 + Math.floor(Math.random() * 26);
+      this.cpuHesitateTill.set(p.id, this.tick + duration);
+    }
+
     // Vans (not grounded) are capped at VAN_MAX_CAPACITY
     const isGrounded = this.groundedPlayerIds.has(p.id);
     const capacity = isGrounded ? Math.floor(p.size) : Math.min(Math.floor(p.size), VAN_MAX_CAPACITY);
@@ -958,7 +981,7 @@ export class World {
       if (shelter.ownerId === p.id) continue;
       if (this.isAlly(p.id, shelter.ownerId, this.lastAllyPairs)) continue;
       
-      const shelterR = shelterRadius(shelter.size);
+      const shelterR = shelterVisualRadius(shelter.size);
       const dangerRadius = shelterR + 100; // Stay away from enemy shelters
       const d = dist(p.x, p.y, shelter.x, shelter.y);
       if (d < dangerRadius) {
@@ -986,11 +1009,9 @@ export class World {
         if (!this.isAlly(p.id, other.id, this.lastAllyPairs)) continue;
         const allyShelter = this.getPlayerShelter(other.id);
         if (allyShelter && allyShelter.petsInside.length < shelterMaxPets(other.size)) {
-          const vanRadius = VAN_FIXED_RADIUS;
-          const shelterR = shelterRadius(allyShelter.size);
-          const deliveryDistance = vanRadius + shelterR + 20;
+          const shelterR = shelterVisualRadius(allyShelter.size);
           const d = dist(p.x, p.y, allyShelter.x, allyShelter.y);
-          if (d <= deliveryDistance) {
+          if (d <= shelterR) {
             // At ally shelter - stop to let pet transfer happen
             this.cpuTargets.delete(p.id);
             return 0;
@@ -1074,6 +1095,15 @@ export class World {
       }
     }
 
+    // Bot imperfection: retarget cooldown (don't pick a new target immediately)
+    const cooldownUntil = this.cpuRetargetCooldown.get(p.id) ?? 0;
+    if (this.tick < cooldownUntil) {
+      // Wander aimlessly during cooldown
+      return 0;
+    }
+    // Set a short cooldown before next retarget (15-40 ticks = 0.6-1.6s)
+    this.cpuRetargetCooldown.set(p.id, this.tick + 15 + Math.floor(Math.random() * 25));
+
     // Need new target - look for strays/pickups across the ENTIRE map
     const strayCandidates: { x: number; y: number; d: number }[] = [];
     const pickupCandidates: { x: number; y: number; d: number; type: number; id: string; level?: number }[] = [];
@@ -1119,12 +1149,17 @@ export class World {
     }
     pickupCandidates.sort((a, b) => a.d - b.d);
 
-    // Pick target with slight randomness (but persist it)
+    // Pick target with significant randomness (bots are good but not optimal)
     const pickWithJitter = <T extends { x: number; y: number; d: number }>(arr: T[]): T | null => {
       if (arr.length === 0) return null;
       if (arr.length === 1) return arr[0];
+      // 50% nearest, 25% second nearest, 15% third, 10% random further
       const r = Math.random();
-      const idx = r < 0.7 ? 0 : r < 0.85 ? 1 : Math.min(2, arr.length - 1);
+      let idx: number;
+      if (r < 0.50) idx = 0;
+      else if (r < 0.75) idx = Math.min(1, arr.length - 1);
+      else if (r < 0.90) idx = Math.min(2, arr.length - 1);
+      else idx = Math.min(Math.floor(Math.random() * Math.min(5, arr.length)), arr.length - 1);
       return arr[idx] ?? null;
     };
 
@@ -1225,6 +1260,7 @@ export class World {
     this.pendingCpuBreederCompletions.clear();
     this.breederClaimedBy.clear();
     this.cpuBreederCooldown.clear();
+    this.retreatCooldownUntilTick.clear();
     this.breederCamps.clear();
     this.breederShelters.clear();
     this.millInCombat.clear();
@@ -1672,7 +1708,7 @@ export class World {
             // Check if position is inside a player shelter
             let insideShelter = false;
             for (const shelter of this.shelters.values()) {
-              const playerShelterR = shelterRadius(shelter.size) + 50; // Shelter radius + margin
+              const playerShelterR = shelterVisualRadius(shelter.size) + 50; // Capped visual radius + margin
               const dx = newX - shelter.x;
               const dy = newY - shelter.y;
               if (dx * dx + dy * dy < playerShelterR * playerShelterR) {
@@ -1768,6 +1804,9 @@ export class World {
         if (this.pendingBreederMiniGames.has(p.id)) continue;
         if (this.cpuAtBreeder.has(p.id) || this.pendingCpuBreederCompletions.has(p.id)) continue;
         if (p.id.startsWith('cpu-')) continue; // CPUs don't start mill minigame from van (they use camps)
+        // Skip if player is on retreat cooldown (just retreated from a camp/mill)
+        const millRetreatEnd = this.retreatCooldownUntilTick.get(p.id) ?? 0;
+        if (this.tick < millRetreatEnd) continue;
         const d = dist(p.x, p.y, breederShelter.x, breederShelter.y);
         if (d > VAN_FIXED_RADIUS + bsr) continue;
         this.millInCombat.add(shelterId);
@@ -1791,7 +1830,7 @@ export class World {
       if (this.millInCombat.has(breederShelterId)) continue;
       for (const playerShelter of this.shelters.values()) {
         const bsr = 40 + breederShelter.size * 0.5; // Breeder shelter radius
-        const psr = shelterRadius(playerShelter.size);
+        const psr = shelterVisualRadius(playerShelter.size); // Use capped visual radius for combat
         
         if (!aabbOverlap(breederShelter.x, breederShelter.y, bsr, 
                          playerShelter.x, playerShelter.y, psr)) continue;
@@ -1935,10 +1974,11 @@ export class World {
       
       // Vans can pass through each other (no van-van collision)
       // Vans only collide with stationary shelters (not other vans)
-      // Vans collide with ALL shelters except their own - allies deliver at edge, not through
+      // Vans collide with non-allied shelters only; allies can enter to deliver pets
       for (const shelter of this.shelters.values()) {
         if (shelter.ownerId === p.id) continue; // Don't collide with own shelter
-        const sr = shelterRadius(shelter.size);
+        if (this.isAlly(p.id, shelter.ownerId, this.lastAllyPairs)) continue; // Allies can enter each other's shelters
+        const sr = shelterVisualRadius(shelter.size);
         if (!aabbOverlap(nx, ny, radius, shelter.x, shelter.y, sr)) continue;
         const penX = radius + sr - Math.abs(nx - shelter.x);
         const penY = radius + sr - Math.abs(ny - shelter.y);
@@ -1987,8 +2027,8 @@ export class World {
           continue;
         }
         // Use shelter positions and sizes for combat detection
-        const ra = shelterRadius(shelterA.size);
-        const rb = shelterRadius(shelterB.size);
+        const ra = shelterVisualRadius(shelterA.size);
+        const rb = shelterVisualRadius(shelterB.size);
         if (!aabbOverlap(shelterA.x, shelterA.y, ra, shelterB.x, shelterB.y, rb)) {
           this.combatOverlapTicks.delete(key);
           continue;
@@ -2167,8 +2207,8 @@ export class World {
     // Shelters with gravity upgrade pull strays toward them
     for (const shelter of this.shelters.values()) {
       if (!shelter.hasGravity) continue;
-      const sr = shelterRadius(shelter.size);
-      const gravityRadius = sr + 550;
+      const sr = shelterVisualRadius(shelter.size);
+      const gravityRadius = Math.min(sr + 550, 900);
       const pullPerTick = 3;
       for (const pet of this.pets.values()) {
         if (pet.insideShelterId !== null) continue;
@@ -2188,8 +2228,8 @@ export class World {
       const maxPets = owner ? shelterMaxPets(owner.size) : 25;
       if (shelter.petsInside.length >= maxPets) continue;
       
-      const sr = shelterRadius(shelter.size);
-      const collectRadius = sr + 30; // Slightly larger than visual
+      const sr = shelterVisualRadius(shelter.size);
+      const collectRadius = Math.min(sr + 30, 350); // Capped so large shelters don't vacuum the whole map
       
       for (const pet of this.pets.values()) {
         if (pet.insideShelterId !== null) continue;
@@ -2209,7 +2249,7 @@ export class World {
       }
     }
     
-    // Pet delivery: vans can deliver to their own shelter OR an ally's shelter
+    // Pet delivery: vans must physically reach shelter (or port there) to drop off pets
     for (const p of this.players.values()) {
       if (this.eliminatedPlayerIds.has(p.id)) continue;
       if (p.petsInside.length === 0) continue;
@@ -2220,9 +2260,8 @@ export class World {
         const isAlly = this.isAlly(p.id, shelter.ownerId, this.lastAllyPairs);
         if (!isOwn && !isAlly) continue;
         
-        const vanRadius = VAN_FIXED_RADIUS;
-        const shelterR = shelterRadius(shelter.size);
-        const deliveryDistance = vanRadius + shelterR + 20;
+        // Van must be physically close to the shelter building to deliver (not the full territory radius)
+        const deliveryDistance = Math.min(shelterVisualRadius(shelter.size), 300);
         const d = dist(p.x, p.y, shelter.x, shelter.y);
         if (d > deliveryDistance) continue;
         const shelterOwner = this.players.get(shelter.ownerId);
@@ -2360,6 +2399,9 @@ export class World {
           }
           // Human players: don't allow if already attempting a breeder
           if (this.pendingBreederMiniGames.has(p.id)) continue;
+          // Skip if player is on retreat cooldown (just retreated from a camp/mill)
+          const retreatEnd = this.retreatCooldownUntilTick.get(p.id) ?? 0;
+          if (this.tick < retreatEnd) continue;
           
           // Check if another player (human or CPU) has claimed this breeder
           const existingClaim = this.breederClaimedBy.get(uid);
@@ -2568,11 +2610,16 @@ export class World {
       }
     }
 
-    // Periodic cleanup of expired CPU cooldowns (once per minute to prevent memory growth)
+    // Periodic cleanup of expired cooldowns (once per minute to prevent memory growth)
     if (now % 1500 === 0) {
       for (const [cpuId, cooldownEnd] of Array.from(this.cpuBreederCooldown.entries())) {
         if (now >= cooldownEnd) {
           this.cpuBreederCooldown.delete(cpuId);
+        }
+      }
+      for (const [pid, cooldownEnd] of Array.from(this.retreatCooldownUntilTick.entries())) {
+        if (now >= cooldownEnd) {
+          this.retreatCooldownUntilTick.delete(pid);
         }
       }
     }
@@ -2580,6 +2627,17 @@ export class World {
 
   isStrayLoss(): boolean {
     return this.strayLoss;
+  }
+
+  /** Build reusable array of outdoor strays only (pets not inside any shelter). */
+  private getSnapshotStrays(): PetState[] {
+    this.snapshotStrays.length = 0;
+    for (const pet of this.pets.values()) {
+      if (pet.insideShelterId === null) {
+        this.snapshotStrays.push(pet);
+      }
+    }
+    return this.snapshotStrays;
   }
 
   getSnapshot(): GameSnapshot {
@@ -2622,7 +2680,7 @@ export class World {
           vanSpeedUpgrade: hasVanSpeed || undefined,
         };
       }),
-      pets: Array.from(this.pets.values()),
+      pets: this.getSnapshotStrays(),
       adoptionZones: this.adoptionZones.map((z) => ({ ...z })),
       pickups: Array.from(this.pickups.values()),
       shelters: this.shelters.size > 0 ? Array.from(this.shelters.values()) : undefined,
@@ -2767,6 +2825,11 @@ export class World {
         player.y = clamp(player.y, 0, MAP_HEIGHT);
         log(`Player ${playerId} retreated from mill ${millShelterId} - van pushed away`);
       }
+      // Clear mill combat state so the mill can be re-engaged
+      if (millShelterId) {
+        this.millInCombat.delete(millShelterId);
+      }
+      this.activeMillByPlayer.delete(playerId);
     }
     
     // Clear the claim and pending minigame
@@ -2774,6 +2837,9 @@ export class World {
       this.breederClaimedBy.delete(miniGame.breederUid);
     }
     this.pendingBreederMiniGames.delete(playerId);
+    
+    // Set 2-second cooldown so the van can't immediately re-engage a camp/mill
+    this.retreatCooldownUntilTick.set(playerId, this.tick + TICK_RATE * 2);
   }
   
   /** Get pending match-wide announcements */
@@ -2999,7 +3065,8 @@ export class World {
       });
     }
 
-    // Initialize boss mode state
+    // Initialize boss mode state - tycoon starts at PetMall center, picks random first target
+    const firstTarget = Math.floor(Math.random() * 5);
     this.bossMode = {
       active: true,
       startTick: this.tick,
@@ -3007,13 +3074,16 @@ export class World {
       mills,
       tycoonX: mallX,
       tycoonY: mallY,
-      tycoonTargetMill: 0,
+      tycoonTargetMill: firstTarget,
       tycoonMoveAtTick: this.tick + BOSS_TYCOON_DWELL_TICKS,
       millsCleared: 0,
       mallX,
       mallY,
       playerAtMill: -1,
       lastMillClearTick: 0,
+      rebuildingMill: -1,
+      rebuildStartTick: 0,
+      visitedMills: [],
     };
 
     this.pendingAnnouncements.push('BOSS MODE: The Breeder Tycoon has arrived with the PetMall! Prepare meals to rescue the pets!');
@@ -3087,38 +3157,75 @@ export class World {
     }
   }
 
+  /** Pick a random mill index different from the current target, avoiding recent visits */
+  private pickRandomMill(currentMill: number): number {
+    if (!this.bossMode) return 0;
+    const bm = this.bossMode;
+    
+    // Build candidates: all mills except current
+    const candidates = [0, 1, 2, 3, 4].filter(i => i !== currentMill);
+    
+    // Prefer mills not recently visited (avoid immediate back-and-forth)
+    const notRecent = candidates.filter(i => !bm.visitedMills.includes(i));
+    const pool = notRecent.length > 0 ? notRecent : candidates;
+    
+    const chosen = pool[Math.floor(Math.random() * pool.length)];
+    
+    // Track visit history (keep last 2)
+    bm.visitedMills.push(chosen);
+    if (bm.visitedMills.length > 2) bm.visitedMills.shift();
+    
+    return chosen;
+  }
+
   /** Update the Breeder Tycoon patrol behavior */
   private updateTycoonPatrol(): void {
     if (!this.bossMode) return;
     const bm = this.bossMode;
 
-    // Check if tycoon should move to next mill
-    if (this.tick >= bm.tycoonMoveAtTick) {
-      // Find next uncompleted mill to patrol
-      let nextMill = (bm.tycoonTargetMill + 1) % 5;
-      let attempts = 0;
-      while (bm.mills[nextMill].completed && attempts < 5) {
-        nextMill = (nextMill + 1) % 5;
-        attempts++;
-      }
-      
-      if (attempts < 5) {
-        bm.tycoonTargetMill = nextMill;
+    // Handle active rebuild: tycoon stays at mill and rebuilds it
+    if (bm.rebuildingMill >= 0) {
+      const rebuildElapsed = this.tick - bm.rebuildStartTick;
+      if (rebuildElapsed >= BOSS_TYCOON_REBUILD_TICKS) {
+        // Rebuild complete - restore the mill
+        const mill = bm.mills[bm.rebuildingMill];
+        if (mill && mill.completed) {
+          mill.completed = false;
+          mill.purchased = {}; // Reset ingredients
+          bm.millsCleared = Math.max(0, bm.millsCleared - 1);
+          this.pendingAnnouncements.push(`The Breeder Tycoon rebuilt ${BOSS_MILL_NAMES[mill.petType] ?? 'a mill'}!`);
+          log(`Tycoon rebuilt mill ${bm.rebuildingMill} (${BOSS_MILL_NAMES[mill.petType]}). Mills cleared: ${bm.millsCleared}`);
+        }
+        bm.rebuildingMill = -1;
+        // Pick next random target and leave
+        bm.tycoonTargetMill = this.pickRandomMill(bm.tycoonTargetMill);
         bm.tycoonMoveAtTick = this.tick + BOSS_TYCOON_DWELL_TICKS;
       }
+      // While rebuilding, still check if player arrives (caught!)
+      if (bm.playerAtMill === bm.tycoonTargetMill) {
+        this.handleTycoonCatchPlayer();
+      }
+      return; // Don't move while rebuilding
+    }
+
+    // Check if tycoon should move to next mill (dwell expired)
+    if (this.tick >= bm.tycoonMoveAtTick) {
+      // Pick a random mill (different from current)
+      bm.tycoonTargetMill = this.pickRandomMill(bm.tycoonTargetMill);
+      bm.tycoonMoveAtTick = this.tick + BOSS_TYCOON_DWELL_TICKS;
     }
 
     // Move tycoon toward target mill
     const targetMill = bm.mills[bm.tycoonTargetMill];
-    if (targetMill && !targetMill.completed) {
+    if (targetMill) {
       const dx = targetMill.x - bm.tycoonX;
       const dy = targetMill.y - bm.tycoonY;
-      const dist = Math.hypot(dx, dy);
+      const d = Math.hypot(dx, dy);
       
-      if (dist > BOSS_TYCOON_SPEED) {
+      if (d > BOSS_TYCOON_SPEED) {
         // Move toward target
-        bm.tycoonX += (dx / dist) * BOSS_TYCOON_SPEED;
-        bm.tycoonY += (dy / dist) * BOSS_TYCOON_SPEED;
+        bm.tycoonX += (dx / d) * BOSS_TYCOON_SPEED;
+        bm.tycoonY += (dy / d) * BOSS_TYCOON_SPEED;
       } else {
         // Arrived at mill
         bm.tycoonX = targetMill.x;
@@ -3127,6 +3234,13 @@ export class World {
         // Check if player is at this mill (caught!)
         if (bm.playerAtMill === bm.tycoonTargetMill) {
           this.handleTycoonCatchPlayer();
+        }
+        
+        // If this mill was cleared, start rebuilding it
+        if (targetMill.completed && bm.rebuildingMill < 0) {
+          bm.rebuildingMill = bm.tycoonTargetMill;
+          bm.rebuildStartTick = this.tick;
+          log(`Tycoon starting rebuild of mill ${bm.tycoonTargetMill} (${BOSS_MILL_NAMES[targetMill.petType]})`);
         }
       }
     }
@@ -3267,6 +3381,11 @@ export class World {
     this.bossMode.millsCleared++;
     this.bossMode.playerAtMill = -1;
     
+    // Cancel any in-progress rebuild of this mill
+    if (this.bossMode.rebuildingMill === millId) {
+      this.bossMode.rebuildingMill = -1;
+    }
+    
     // Calculate bonus (speed bonus if cleared quickly)
     let rtBonus = 0;
     const ticksSinceStart = this.tick - this.bossMode.startTick;
@@ -3318,6 +3437,7 @@ export class World {
       mallX: bm.mallX,
       mallY: bm.mallY,
       playerAtMill: bm.playerAtMill,
+      rebuildingMill: bm.rebuildingMill >= 0 ? bm.rebuildingMill : undefined,
     };
   }
 

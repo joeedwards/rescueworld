@@ -11,6 +11,8 @@ export declare const INPUT_INTERACT: number;
 /** Shelter = moving player. Size = capacity. petsInside = strays collected. */
 export interface PlayerState {
     id: string;
+    /** Persistent user ID for signed-in users (e.g. u-xxxx). Undefined for guests. */
+    userId?: string;
     /** Display name (e.g. rescueNNN for guests). */
     displayName: string;
     x: number;
@@ -212,6 +214,10 @@ export interface BossMode {
     mallY: number;
     /** Which mill the player is currently interacting with (-1 = none) */
     playerAtMill: number;
+    /** Which mill the tycoon is currently rebuilding (-1 = none) */
+    rebuildingMill: number;
+    /** Tick when rebuild started */
+    rebuildStartTick: number;
 }
 /** Boss Mode state sent to client (subset for rendering) */
 export interface BossModeState {
@@ -226,6 +232,8 @@ export interface BossModeState {
     mallX: number;
     mallY: number;
     playerAtMill: number;
+    /** Which mill the tycoon is currently rebuilding (-1 = none) */
+    rebuildingMill?: number;
 }
 /** Match end inventory message (sent via WebSocket JSON) */
 export interface MatchEndInventoryMessage {

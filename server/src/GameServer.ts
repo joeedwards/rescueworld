@@ -7,12 +7,12 @@
 import type { WebSocket } from 'ws';
 import { WebSocketServer } from 'ws';
 import { World } from './game/World.js';
-import { TICK_RATE, TICK_MS } from 'shared';
+import { TICK_RATE, TICK_MS, MAX_FFA_PLAYERS } from 'shared';
 import { decodeInput, encodeSnapshot, MSG_INPUT } from 'shared';
 import { registerServer, appendReplay, getNextGuestName } from './registry.js';
 import { withdrawForMatch, depositAfterMatch, getInventory, type Inventory } from './inventory.js';
 import { recordMatchWin, recordMatchLoss, updateReputationOnQuit } from './leaderboard.js';
-import { saveSavedMatch, getSavedMatch, deleteSavedMatch, insertMatchHistory, incrementGameCount, saveFfaMatch, getAllSavedFfaMatches, deleteSavedFfaMatch } from './referrals.js';
+import { saveSavedMatch, getSavedMatch, deleteSavedMatch, insertMatchHistory, incrementGameCount, saveFfaMatch, getAllSavedFfaMatches, deleteSavedFfaMatch, getFriendsOf } from './referrals.js';
 import { awardKarmaPoints } from './karmaService.js';
 
 /** Timestamped log function for server output */
@@ -27,6 +27,28 @@ const GAME_WS_URL = process.env.GAME_WS_URL || `ws://localhost:${GAME_WS_PORT}`;
 const SERVER_ID = process.env.SERVER_ID || `game-${GAME_WS_PORT}`;
 
 const FFA_COUNTDOWN_MS = 10000;
+
+// Randomized bot names for CPU players
+const BOT_NAMES = [
+  'Whiskers', 'Buddy', 'Shadow', 'Luna', 'Milo', 'Daisy', 'Rocky', 'Bella',
+  'Gizmo', 'Coco', 'Ziggy', 'Pepper', 'Biscuit', 'Noodle', 'Patches', 'Mocha',
+  'Waffles', 'Sprout', 'Pickle', 'Muffin', 'Clover', 'Pebbles', 'Taco', 'Oreo',
+  'Nugget', 'Maple', 'Bandit', 'Boots', 'Chip', 'Jellybean', 'Snickers', 'Rascal',
+  'Bubbles', 'Truffle', 'Barkley', 'Domino', 'Pudding', 'Sage', 'Scooter', 'Mittens',
+];
+
+/** Pick a random bot name not already used in this match. */
+function pickBotName(match: Match): string {
+  const snapshot = match.world.getSnapshot();
+  const usedNames = new Set(snapshot.players.map(p => p.displayName));
+  const available = BOT_NAMES.filter(n => !usedNames.has(n));
+  if (available.length > 0) {
+    return available[Math.floor(Math.random() * available.length)];
+  }
+  // Fallback: append a number to a random name
+  const base = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
+  return `${base}${Math.floor(Math.random() * 99) + 1}`;
+}
 
 // Food costs for breeder mini-game - must match client FOOD_COSTS
 const FOOD_COSTS: Record<string, number> = {
@@ -63,6 +85,10 @@ interface Match {
   activeMillGames?: Map<string, { lastAddPetTick: number }>;
   /** Last auto-save timestamp for solo matches (graceful shutdown / crash recovery) */
   lastAutoSave?: number;
+  /** Whether bots should fill empty slots in this match */
+  botsEnabled?: boolean;
+  /** Observers watching this match (no player entity, receive snapshots only) */
+  observers: Map<string, WebSocket>;
 }
 
 const wss = new WebSocketServer({ port: GAME_WS_PORT });
@@ -105,6 +131,7 @@ function restoreSavedFfaMatches(): void {
           allyRequests: new Map(),
           lastReplayTick: 0,
           playerStartingInventory: new Map(),
+          observers: new Map(),
         };
         
         // Restore player-userId mappings and set all players as disconnected
@@ -149,6 +176,52 @@ const userIdToFfaMatches = new Map<string, Array<{ matchId: string; playerId: st
 const MAX_SIMULTANEOUS_MATCHES = 5;
 // FFA lobby match (waiting for players)
 let ffaLobbyMatchId: string | null = null;
+
+// Online presence tracking: userId -> Set of WebSocket connections (a user may have multiple tabs)
+const onlineUsers = new Map<string, Set<WebSocket>>();
+
+/** Register a user as online and notify their friends. */
+function registerOnlineUser(userId: string, displayName: string, ws: WebSocket): void {
+  let sockets = onlineUsers.get(userId);
+  if (!sockets) {
+    sockets = new Set();
+    onlineUsers.set(userId, sockets);
+  }
+  const wasOffline = sockets.size === 0;
+  sockets.add(ws);
+  
+  if (wasOffline) {
+    // Notify users who have marked this user as a friend
+    try {
+      const friendOfUserIds = getFriendsOf(userId);
+      const notifyMsg = JSON.stringify({ type: 'friendOnline', userId, displayName });
+      for (const friendUserId of friendOfUserIds) {
+        const friendSockets = onlineUsers.get(friendUserId);
+        if (friendSockets) {
+          for (const friendWs of friendSockets) {
+            if (friendWs.readyState === 1) friendWs.send(notifyMsg);
+          }
+        }
+      }
+      if (friendOfUserIds.length > 0) {
+        log(`Notified ${friendOfUserIds.length} friends that ${displayName} (${userId}) is online`);
+      }
+    } catch (e) {
+      log(`Failed to notify friends of ${userId}: ${e}`);
+    }
+  }
+}
+
+/** Unregister a WebSocket from online presence. */
+function unregisterOnlineUser(userId: string, ws: WebSocket): void {
+  const sockets = onlineUsers.get(userId);
+  if (sockets) {
+    sockets.delete(ws);
+    if (sockets.size === 0) {
+      onlineUsers.delete(userId);
+    }
+  }
+}
 
 // Restore saved FFA/Teams matches on startup (after maps are initialized)
 restoreSavedFfaMatches();
@@ -343,6 +416,7 @@ function createMatch(mode: 'ffa' | 'solo' | 'teams'): Match {
     lastReplayTick: 0,
     playerUserIds: new Map(),
     playerStartingInventory: new Map(),
+    observers: new Map(),
   };
   matches.set(match.id, match);
   log(`match created id=${match.id} mode=${mode}`);
@@ -359,6 +433,11 @@ function destroyMatch(matchId: string): void {
   for (const playerId of match.players.keys()) {
     playerToMatch.delete(playerId);
   }
+  // Close observer connections
+  for (const obsWs of match.observers.values()) {
+    try { obsWs.close(); } catch { /* ignore */ }
+  }
+  match.observers.clear();
   // Clean up FFA/Teams rejoin tracking for any users in this match
   for (const [userId, userMatches] of userIdToFfaMatches.entries()) {
     const filtered = userMatches.filter(info => info.matchId !== matchId);
@@ -403,7 +482,19 @@ function ensureCpusForMatch(match: Match): void {
     for (let i = 1; i <= 3; i++) {
       const cid = `cpu-${i}`;
       if (!match.cpuIds.has(cid)) {
-        match.world.addPlayer(cid, `CPU-${i}`);
+        match.world.addPlayer(cid, pickBotName(match));
+        match.cpuIds.add(cid);
+      }
+    }
+  } else if ((match.mode === 'ffa' || match.mode === 'teams') && match.botsEnabled) {
+    // With bots enabled, fill up to a reasonable count (at least 1 bot, up to 3)
+    const totalPlayers = getMatchTotalPlayers(match);
+    const botsToAdd = Math.min(3, MAX_FFA_PLAYERS - totalPlayers);
+    for (let i = 0; i < botsToAdd; i++) {
+      const idx = match.cpuIds.size + 1;
+      const cid = `cpu-${idx}`;
+      if (!match.cpuIds.has(cid) && getMatchTotalPlayers(match) < MAX_FFA_PLAYERS) {
+        match.world.addPlayer(cid, pickBotName(match));
         match.cpuIds.add(cid);
       }
     }
@@ -413,7 +504,7 @@ function ensureCpusForMatch(match: Match): void {
     if (humanCount === 2 && snapshot.players.filter((p) => !p.id.startsWith('cpu-')).length < 3) {
       const cid = 'cpu-1';
       if (!match.cpuIds.has(cid)) {
-        match.world.addPlayer(cid, 'CPU-1');
+        match.world.addPlayer(cid, pickBotName(match));
         match.cpuIds.add(cid);
       }
     }
@@ -425,6 +516,8 @@ function getMatchState(match: Match): {
   phase: MatchPhase; 
   countdownRemainingSec?: number; 
   readyCount: number;
+  playerCount: number;
+  botsEnabled?: boolean;
   players?: Array<{ id: string; displayName: string }>;
 } {
   let countdownRemainingSec: number | undefined;
@@ -438,7 +531,8 @@ function getMatchState(match: Match): {
     .filter(id => !id.startsWith('cpu-'))
     .map(id => {
       const p = snapshot.players.find(pl => pl.id === id);
-      return { id, displayName: p?.displayName ?? 'Unknown' };
+      const userId = match.playerUserIds.get(id) ?? undefined;
+      return { id, displayName: p?.displayName ?? 'Unknown', userId };
     });
   
   return {
@@ -446,8 +540,15 @@ function getMatchState(match: Match): {
     phase: match.phase,
     ...(countdownRemainingSec !== undefined && { countdownRemainingSec }),
     readyCount: match.readySet.size,
+    playerCount: humanPlayers.length,
+    botsEnabled: match.botsEnabled,
     players: humanPlayers.length > 0 ? humanPlayers : undefined,
   };
+}
+
+/** Get total player count in a match (humans + bots). */
+function getMatchTotalPlayers(match: Match): number {
+  return match.players.size + match.cpuIds.size;
 }
 
 function transitionToPlaying(match: Match): void {
@@ -455,6 +556,23 @@ function transitionToPlaying(match: Match): void {
     match.phase = 'playing';
     match.world.startMatch();
     log(`match started id=${match.id} players=${match.players.size}`);
+    // Send player userId map so clients can identify friends/foes
+    broadcastPlayerMap(match);
+  }
+}
+
+/** Broadcast playerId -> userId mapping to all connected players in a match. */
+function broadcastPlayerMap(match: Match): void {
+  const snapshot = match.world.getSnapshot();
+  const entries: Array<{ playerId: string; userId?: string; displayName: string }> = [];
+  for (const p of snapshot.players) {
+    if (p.id.startsWith('cpu-')) continue;
+    const userId = match.playerUserIds.get(p.id) ?? undefined;
+    entries.push({ playerId: p.id, userId, displayName: p.displayName });
+  }
+  const msg = JSON.stringify({ type: 'playerMap', players: entries });
+  for (const ws of match.players.values()) {
+    if (ws.readyState === 1) ws.send(msg);
   }
 }
 
@@ -640,6 +758,16 @@ wss.on('connection', async (ws) => {
     currentMatchId = match.id;
     
     ws.send(JSON.stringify({ type: 'welcome', playerId: effectivePlayerId, displayName, matchId: match.id, startingRT, startingPorts, adoptSpeedBoosts: startingAdoptSpeedBoosts }));
+    
+    // Register online presence for friend notifications
+    if (playerUserId) {
+      registerOnlineUser(playerUserId, name, ws);
+    }
+    
+    // If joining a match already in progress, broadcast updated player map
+    if (match.phase === 'playing') {
+      broadcastPlayerMap(match);
+    }
   };
 
   const resumeSoloMatch = (match: Match) => {
@@ -668,6 +796,10 @@ wss.on('connection', async (ws) => {
       resumed: true,
     }));
     log(`Solo match resumed for ${match.soloUserId} playerId=${effectivePlayerId}`);
+    // Register online presence for friend notifications
+    if (match.soloUserId) {
+      registerOnlineUser(match.soloUserId, displayName ?? 'Player', ws);
+    }
   };
   
   // Timeout: if client doesn't send mode in 5s, use FFA
@@ -766,6 +898,7 @@ wss.on('connection', async (ws) => {
                         lastReplayTick: 0,
                         playerUserIds: new Map([[humanId, playerUserId]]),
                         playerStartingInventory: new Map(),
+                        observers: new Map(),
                         soloUserId: playerUserId,
                         soloPlayerId: humanId,
                         soloDisplayName: world.getSnapshot().players.find((pl) => pl.id === humanId)?.displayName ?? displayNameToUse,
@@ -794,6 +927,10 @@ wss.on('connection', async (ws) => {
                         resumed: true,
                       }));
                       log(`Solo match loaded from DB for ${playerUserId} matchId=${match.id}`);
+                      // Register online presence for friend notifications
+                      if (playerUserId) {
+                        registerOnlineUser(playerUserId, match.soloDisplayName ?? displayNameToUse, ws);
+                      }
                       return;
                     }
                   } catch (e) {
@@ -856,6 +993,12 @@ wss.on('connection', async (ws) => {
                       resumed: true,
                     }));
                     log(`FFA match rejoined by ${playerUserId} playerId=${ffaInfo.playerId} matchId=${existingMatch.id}`);
+                    // Register online presence for friend notifications
+                    if (playerUserId) {
+                      registerOnlineUser(playerUserId, p?.displayName ?? displayNameToUse, ws);
+                    }
+                    // Send updated player map to all players (so they know about rejoining player's userId)
+                    broadcastPlayerMap(existingMatch);
                     return;
                   } else {
                     // Match ended or doesn't exist, clean up
@@ -877,20 +1020,66 @@ wss.on('connection', async (ws) => {
                 }
               }
               
-              // FFA: join the lobby match or create one
-              let match = ffaLobbyMatchId ? matches.get(ffaLobbyMatchId) : null;
-              if (!match || match.phase === 'playing') {
-                // Create new lobby if none exists or current is already playing
-                match = createMatch('ffa');
-                ffaLobbyMatchId = match.id;
-              }
-              addPlayerToMatch(match, displayNameToUse);
+              const clientBotsEnabled = !!msg.botsEnabled;
               
-              if (match.players.size >= 2 && match.phase === 'lobby') {
-                ensureCpusForMatch(match);
-                match.phase = 'countdown';
-                match.countdownEndAt = Date.now() + FFA_COUNTDOWN_MS;
-                match.readySet.clear();
+              // FFA: try to join an in-progress match that is not full
+              let joinedMidMatch = false;
+              for (const [, m] of matches) {
+                if (m.mode === 'ffa' && m.phase === 'playing' && !m.world.isMatchOver() && !m.frozen) {
+                  if (getMatchTotalPlayers(m) < MAX_FFA_PLAYERS) {
+                    addPlayerToMatch(m, displayNameToUse);
+                    if (clientBotsEnabled) m.botsEnabled = true;
+                    joinedMidMatch = true;
+                    log(`FFA mid-match join: player joined playing match ${m.id}`);
+                    break;
+                  }
+                }
+              }
+              
+              if (!joinedMidMatch) {
+                // Check if all in-progress FFA matches are full -> observer mode
+                let fullMatch: Match | null = null;
+                for (const [, m] of matches) {
+                  if (m.mode === 'ffa' && m.phase === 'playing' && !m.world.isMatchOver() && !m.frozen) {
+                    if (getMatchTotalPlayers(m) >= MAX_FFA_PLAYERS) {
+                      fullMatch = m;
+                      break;
+                    }
+                  }
+                }
+                
+                // Join lobby or create one
+                let match = ffaLobbyMatchId ? matches.get(ffaLobbyMatchId) : null;
+                if (!match || match.phase === 'playing') {
+                  // If all matches are full and no lobby, offer observer mode on the full match
+                  if (fullMatch && !match) {
+                    // Add as observer
+                    const obsId = `obs-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+                    fullMatch.observers.set(obsId, ws);
+                    currentMatchId = fullMatch.id;
+                    playerAdded = true;
+                    effectivePlayerId = obsId;
+                    ws.send(JSON.stringify({ type: 'observing', matchId: fullMatch.id }));
+                    log(`Observer ${obsId} watching full match ${fullMatch.id}`);
+                    // When match ends or slot opens, we handle promotion in tick loop
+                    ws.on('close', () => {
+                      fullMatch!.observers.delete(obsId);
+                    });
+                    return;
+                  }
+                  // Create new lobby if none exists or current is already playing
+                  match = createMatch('ffa');
+                  ffaLobbyMatchId = match.id;
+                }
+                if (clientBotsEnabled) match.botsEnabled = true;
+                addPlayerToMatch(match, displayNameToUse);
+                
+                if (match.players.size >= 2 && match.phase === 'lobby') {
+                  ensureCpusForMatch(match);
+                  match.phase = 'countdown';
+                  match.countdownEndAt = Date.now() + FFA_COUNTDOWN_MS;
+                  match.readySet.clear();
+                }
               }
             } else {
               // Teams: check if player wants to rejoin a specific teams match
@@ -963,13 +1152,31 @@ wss.on('connection', async (ws) => {
                 }
               }
               
-              // Teams: similar to FFA for now
-              let match = ffaLobbyMatchId ? matches.get(ffaLobbyMatchId) : null;
-              if (!match) {
-                match = createMatch('teams');
-                ffaLobbyMatchId = match.id;
+              const teamsBotsEnabled = !!msg.botsEnabled;
+              
+              // Teams: try to join an in-progress match that is not full
+              let teamsJoinedMid = false;
+              for (const [, m] of matches) {
+                if (m.mode === 'teams' && m.phase === 'playing' && !m.world.isMatchOver() && !m.frozen) {
+                  if (getMatchTotalPlayers(m) < MAX_FFA_PLAYERS) {
+                    addPlayerToMatch(m, displayNameToUse);
+                    if (teamsBotsEnabled) m.botsEnabled = true;
+                    teamsJoinedMid = true;
+                    log(`Teams mid-match join: player joined playing match ${m.id}`);
+                    break;
+                  }
+                }
               }
-              addPlayerToMatch(match, displayNameToUse);
+              
+              if (!teamsJoinedMid) {
+                let match = ffaLobbyMatchId ? matches.get(ffaLobbyMatchId) : null;
+                if (!match) {
+                  match = createMatch('teams');
+                  ffaLobbyMatchId = match.id;
+                }
+                if (teamsBotsEnabled) match.botsEnabled = true;
+                addPlayerToMatch(match, displayNameToUse);
+              }
             }
           })();
           return;
@@ -983,6 +1190,20 @@ wss.on('connection', async (ws) => {
           match.readySet.add(playerId);
           if (match.phase === 'countdown' && match.readySet.size >= 2) {
             transitionToPlaying(match);
+          }
+          // "Ready with Bots": single player in lobby with bots enabled
+          if (match.phase === 'lobby' && match.botsEnabled && (match.mode === 'ffa' || match.mode === 'teams')) {
+            const humanCount = Array.from(match.players.keys()).filter(id => !id.startsWith('cpu-')).length;
+            if (humanCount >= 1) {
+              // Add a bot to make it a 2-player match, then start
+              const botId = `cpu-${match.cpuIds.size + 1}`;
+              match.world.addPlayer(botId, pickBotName(match), 0, 0, 0, 0);
+              match.cpuIds.add(botId);
+              ensureCpusForMatch(match);
+              transitionToPlaying(match);
+              if (ffaLobbyMatchId === match.id) ffaLobbyMatchId = null;
+              log(`Ready with bots: match ${match.id} started with ${humanCount} human(s) + ${match.cpuIds.size} bot(s)`);
+            }
           }
           return;
         }
@@ -1298,6 +1519,10 @@ wss.on('connection', async (ws) => {
   ws.on('close', () => {
     clearTimeout(timeout);
     log(`player disconnected playerId=${effectivePlayerId} displayName=${displayName}`);
+    // Unregister online presence
+    if (playerUserId) {
+      unregisterOnlineUser(playerUserId, ws);
+    }
     if (currentMatchId) {
       removePlayerFromMatch(effectivePlayerId, currentMatchId);
     }
@@ -1509,6 +1734,29 @@ setInterval(() => {
         const buf = encodeSnapshot(snapshot);
         for (const ws of match.players.values()) {
           if (ws.readyState === 1) ws.send(buf);
+        }
+        // Broadcast to observers too
+        for (const [obsId, obsWs] of match.observers.entries()) {
+          if (obsWs.readyState === 1) {
+            obsWs.send(buf);
+          } else {
+            match.observers.delete(obsId);
+          }
+        }
+        
+        // Promote first observer if a player slot opened up
+        if (match.observers.size > 0 && getMatchTotalPlayers(match) < MAX_FFA_PLAYERS) {
+          const [obsId, obsWs] = match.observers.entries().next().value as [string, WebSocket];
+          if (obsWs.readyState === 1) {
+            match.observers.delete(obsId);
+            // Create a real player for this observer
+            const newPlayerId = `p-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+            match.world.addPlayer(newPlayerId, `Player`, 0, 0, 0, 0);
+            match.players.set(newPlayerId, obsWs);
+            playerToMatch.set(newPlayerId, match.id);
+            obsWs.send(JSON.stringify({ type: 'promoted', playerId: newPlayerId, matchId: match.id }));
+            log(`Observer ${obsId} promoted to player ${newPlayerId} in match ${match.id}`);
+          }
         }
         
         // Check for match end and process inventory/leaderboard (victory or stray loss)
