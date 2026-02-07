@@ -1354,11 +1354,13 @@ wss.on('connection', async (ws) => {
         }
         
         if (msg.type === 'fightAlly' && typeof msg.targetId === 'string' && (msg.choice === 'fight' || msg.choice === 'ally')) {
+          if (match.mode === 'teams') return; // Teams mode: no manual fight/ally
           match.fightAllyChoices.set(`${playerId},${msg.targetId}`, msg.choice);
           return;
         }
 
         if (msg.type === 'allyRequest' && typeof msg.targetId === 'string') {
+          if (match.mode === 'teams') return; // Teams mode: alliances are automatic
           let requests = match.allyRequests.get(playerId);
           if (!requests) {
             requests = new Set();
@@ -1383,8 +1385,9 @@ wss.on('connection', async (ws) => {
           return;
         }
         
-        // Handle ally response (accept/deny)
+        // Handle ally response (accept/deny) - not used in Teams mode
         if (msg.type === 'allyResponse' && typeof msg.targetId === 'string' && typeof msg.accept === 'boolean') {
+          if (match.mode === 'teams') return; // Teams mode: alliances are automatic
           if (msg.accept) {
             // Check if the target also requested to ally with us (mutual)
             const targetRequests = match.allyRequests.get(msg.targetId);

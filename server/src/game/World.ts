@@ -1421,6 +1421,7 @@ export class World {
   formAlliance(playerId1: string, playerId2: string): void {
     if (playerId1 === playerId2) return;
     const key = playerId1 < playerId2 ? `${playerId1},${playerId2}` : `${playerId2},${playerId1}`;
+    if (this.lastAllyPairs.has(key)) return; // Already allied
     this.lastAllyPairs.add(key);
     log(`Alliance formed between ${playerId1} and ${playerId2}`);
   }

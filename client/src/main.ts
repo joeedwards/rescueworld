@@ -1197,7 +1197,8 @@ function setTokens(n: number): void {
   localStorage.setItem(TOKENS_KEY, String(Math.max(0, n)));
 }
 function updateLandingTokens(): void {
-  const tokens = getTokens();
+  // For signed-in users, use server inventory; for guests, use localStorage
+  const tokens = isSignedIn ? currentInventory.storedRt : getTokens();
   
   // Update equipment panel RT display with human-readable format
   const equipRt = document.getElementById('equip-rt');
@@ -2156,8 +2157,9 @@ canvas.addEventListener('contextmenu', (e) => {
   e.preventDefault();
 });
 
-// --- Click/Tap on other shelters to send ally request ---
+// --- Click/Tap on other shelters to send ally request (disabled in Teams mode) ---
 function handleAllyRequestAtPosition(screenX: number, screenY: number): void {
+  if (selectedMode === 'teams') return; // Teams mode: alliances are automatic
   if (!latestSnapshot || !myPlayerId || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
   const cam = getCamera();
   const worldX = screenX + cam.x;
@@ -2988,7 +2990,8 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
             removeActiveMultiplayerMatch(currentMatchId);
           }
           updateResumeMatchUI();
-          // Refresh inventory display if we're showing lobby soon
+          // Refresh inventory from server after match end deposit
+          if (isSignedIn) fetchInventory();
           fetchSavedMatchStatus();
           fetchActiveMatchesInfo();
           // Show karma notification if awarded
@@ -3010,9 +3013,11 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         if (msg.type === 'announcement' && Array.isArray(msg.messages)) {
           showAnnouncement(msg.messages);
         }
-        // Incoming ally request from another player
+        // Incoming ally request from another player (not in Teams mode - alliances are automatic)
         if (msg.type === 'allyRequestReceived' && typeof msg.fromId === 'string' && typeof msg.fromName === 'string') {
-          showAllyRequestPopup(msg.fromId, msg.fromName);
+          if (selectedMode !== 'teams') {
+            showAllyRequestPopup(msg.fromId, msg.fromName);
+          }
         }
         // Pet transfer result
         if (msg.type === 'transferResult') {
@@ -7496,6 +7501,8 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
   landingEl.classList.remove('hidden');
   authAreaEl.classList.remove('hidden');
   exitMobileFullscreen();
+  // Refresh inventory from server so equipment chest shows accurate post-match values
+  if (isSignedIn) fetchInventory();
   updateLandingTokens();
   restoreModeSelection();
   // For solo mode with active connection, show Resume button (we know we just saved)
