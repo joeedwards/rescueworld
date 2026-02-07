@@ -7,10 +7,10 @@
 import type { WebSocket } from 'ws';
 import { WebSocketServer } from 'ws';
 import { World } from './game/World.js';
-import { TICK_RATE, TICK_MS, MAX_FFA_PLAYERS } from 'shared';
+import { TICK_RATE, TICK_MS, MAX_FFA_PLAYERS, MAX_RT_PER_MATCH } from 'shared';
 import { decodeInput, encodeSnapshot, MSG_INPUT } from 'shared';
 import { registerServer, appendReplay, getNextGuestName } from './registry.js';
-import { withdrawForMatch, depositAfterMatch, getInventory, type Inventory } from './inventory.js';
+import { withdrawForMatch, withdrawForMatchSelective, depositAfterMatch, getInventory, type Inventory, type ItemSelection } from './inventory.js';
 import { recordMatchWin, recordMatchLoss, updateReputationOnQuit } from './leaderboard.js';
 import { saveSavedMatch, getSavedMatch, deleteSavedMatch, insertMatchHistory, incrementGameCount, saveFfaMatch, getAllSavedFfaMatches, deleteSavedFfaMatch, getFriendsOf } from './referrals.js';
 import { awardKarmaPoints } from './karmaService.js';
@@ -89,6 +89,8 @@ interface Match {
   botsEnabled?: boolean;
   /** Observers watching this match (no player entity, receive snapshots only) */
   observers: Map<string, WebSocket>;
+  /** Team assignments for Teams mode: playerId -> 'red' | 'blue' */
+  playerTeams?: Map<string, 'red' | 'blue'>;
 }
 
 const wss = new WebSocketServer({ port: GAME_WS_PORT });
@@ -426,6 +428,7 @@ function createMatch(mode: 'ffa' | 'solo' | 'teams'): Match {
     playerUserIds: new Map(),
     playerStartingInventory: new Map(),
     observers: new Map(),
+    playerTeams: mode === 'teams' ? new Map() : undefined,
   };
   matches.set(match.id, match);
   log(`match created id=${match.id} mode=${mode}`);
@@ -487,6 +490,21 @@ function getHumanPlayerIdFromState(worldStateJson: string): string | null {
   return null;
 }
 
+/** Add a bot to a specific team in a Teams match. */
+function addBotToTeam(match: Match, team: 'red' | 'blue'): void {
+  const idx = match.cpuIds.size + 1;
+  const cid = `cpu-${idx}`;
+  if (!match.cpuIds.has(cid)) {
+    match.world.addPlayer(cid, pickBotName(match));
+    match.cpuIds.add(cid);
+    if (match.playerTeams) {
+      match.playerTeams.set(cid, team);
+      match.world.setPlayerTeam(cid, team);
+    }
+    log(`Bot ${cid} added to team ${team} in match ${match.id}`);
+  }
+}
+
 function ensureCpusForMatch(match: Match): void {
   if (match.mode === 'solo') {
     for (let i = 1; i <= 3; i++) {
@@ -496,7 +514,20 @@ function ensureCpusForMatch(match: Match): void {
         match.cpuIds.add(cid);
       }
     }
-  } else if ((match.mode === 'ffa' || match.mode === 'teams') && match.botsEnabled) {
+  } else if (match.mode === 'teams' && match.botsEnabled && match.playerTeams) {
+    // Teams mode: balance teams so each has at least 2 players, and both sides are equal
+    const redCount = Array.from(match.playerTeams.values()).filter(t => t === 'red').length;
+    const blueCount = Array.from(match.playerTeams.values()).filter(t => t === 'blue').length;
+    const targetPerTeam = Math.max(2, Math.max(redCount, blueCount));
+    // Fill red team
+    while (Array.from(match.playerTeams.values()).filter(t => t === 'red').length < targetPerTeam) {
+      addBotToTeam(match, 'red');
+    }
+    // Fill blue team
+    while (Array.from(match.playerTeams.values()).filter(t => t === 'blue').length < targetPerTeam) {
+      addBotToTeam(match, 'blue');
+    }
+  } else if (match.mode === 'ffa' && match.botsEnabled) {
     // With bots enabled, fill up to a reasonable count (at least 1 bot, up to 3)
     const totalPlayers = getMatchTotalPlayers(match);
     const botsToAdd = Math.min(3, MAX_FFA_PLAYERS - totalPlayers);
@@ -518,7 +549,7 @@ function getMatchState(match: Match): {
   readyCount: number;
   playerCount: number;
   botsEnabled?: boolean;
-  players?: Array<{ id: string; displayName: string }>;
+  players?: Array<{ id: string; displayName: string; team?: 'red' | 'blue' }>;
 } {
   let countdownRemainingSec: number | undefined;
   if (match.phase === 'countdown' && match.countdownEndAt > 0) {
@@ -532,7 +563,8 @@ function getMatchState(match: Match): {
     .map(id => {
       const p = snapshot.players.find(pl => pl.id === id);
       const userId = match.playerUserIds.get(id) ?? undefined;
-      return { id, displayName: p?.displayName ?? 'Unknown', userId };
+      const team = match.playerTeams?.get(id);
+      return { id, displayName: p?.displayName ?? 'Unknown', userId, team };
     });
   
   return {
@@ -554,6 +586,10 @@ function getMatchTotalPlayers(match: Match): number {
 function transitionToPlaying(match: Match): void {
   if (match.phase !== 'playing') {
     match.phase = 'playing';
+    // Teams mode: auto-form alliances between all same-team players before match starts
+    if (match.mode === 'teams') {
+      match.world.formTeamAlliances();
+    }
     match.world.startMatch();
     log(`match started id=${match.id} players=${match.players.size}`);
     // Send player userId map so clients can identify friends/foes
@@ -738,15 +774,12 @@ wss.on('connection', async (ws) => {
     displayName = name;
     playerAdded = true;
     
-    // Withdraw inventory NOW - only when we're definitely adding to a valid match
-    let startingAdoptSpeedBoosts = 0;
+    // Withdraw RT only (capped at MAX_RT_PER_MATCH) - items are deferred until client sends selectedItems
     if (playerUserId && !startingInventory) {
-      startingInventory = withdrawForMatch(playerUserId);
+      // Only withdraw RT now; items withdrawn when client sends selectedItems
+      startingInventory = withdrawForMatchSelective(playerUserId, MAX_RT_PER_MATCH, {});
       startingRT = startingInventory.storedRt;
-      startingPorts = startingInventory.portCharges;
-      startingShelterTier3Boosts = startingInventory.shelterTier3Boosts ?? 0;
-      startingAdoptSpeedBoosts = startingInventory.adoptSpeedBoosts ?? 0;
-      log(`Registered user ${playerUserId} withdrawing: ${startingRT} RT, ${startingPorts} ports, ${startingAdoptSpeedBoosts} adopt speed`);
+      log(`Registered user ${playerUserId} withdrawing RT: ${startingRT} (capped at ${MAX_RT_PER_MATCH})`);
     }
     if (playerUserId) {
       match.playerUserIds.set(effectivePlayerId, playerUserId);
@@ -756,12 +789,30 @@ wss.on('connection', async (ws) => {
     }
     
     log(`player joined match id=${match.id} playerId=${effectivePlayerId} displayName=${name} startingRT=${startingRT}`);
-    match.world.addPlayer(effectivePlayerId, name, startingRT, startingPorts, startingShelterTier3Boosts, startingAdoptSpeedBoosts);
+    match.world.addPlayer(effectivePlayerId, name, startingRT, startingPorts, startingShelterTier3Boosts, 0);
     match.players.set(effectivePlayerId, ws);
     playerToMatch.set(effectivePlayerId, match.id);
     currentMatchId = match.id;
     
-    ws.send(JSON.stringify({ type: 'welcome', playerId: effectivePlayerId, displayName, matchId: match.id, startingRT, startingPorts, adoptSpeedBoosts: startingAdoptSpeedBoosts }));
+    // Get remaining inventory so client can show what's left in chest
+    const remainingInventory = playerUserId ? getInventory(playerUserId) : null;
+    ws.send(JSON.stringify({ 
+      type: 'welcome', 
+      playerId: effectivePlayerId, 
+      displayName, 
+      matchId: match.id, 
+      startingRT, 
+      startingPorts: 0, 
+      adoptSpeedBoosts: 0,
+      remainingInventory: remainingInventory ? {
+        storedRt: remainingInventory.storedRt,
+        portCharges: remainingInventory.portCharges,
+        speedBoosts: remainingInventory.speedBoosts,
+        sizeBoosts: remainingInventory.sizeBoosts,
+        adoptSpeedBoosts: remainingInventory.adoptSpeedBoosts,
+        shelterTier3Boosts: remainingInventory.shelterTier3Boosts,
+      } : null,
+    }));
     
     // Register online presence for friend notifications
     if (playerUserId) {
@@ -853,9 +904,12 @@ wss.on('connection', async (ws) => {
               log(`Guest ${playerUserId} connecting...`);
             }
           } else {
-            // Fallback: accept from client for backwards compatibility
-            if (typeof msg.startingRT === 'number' && msg.startingRT > 0) {
-              startingRT = Math.floor(msg.startingRT);
+            // Guest: accept starting RT from client (capped at MAX_RT_PER_MATCH)
+            if (typeof msg.guestStartingRt === 'number' && msg.guestStartingRt > 0) {
+              startingRT = Math.min(Math.floor(msg.guestStartingRt), MAX_RT_PER_MATCH);
+            } else if (typeof msg.startingRT === 'number' && msg.startingRT > 0) {
+              // Backwards compat fallback
+              startingRT = Math.min(Math.floor(msg.startingRT), MAX_RT_PER_MATCH);
             }
             if (typeof msg.startingPorts === 'number' && msg.startingPorts > 0) {
               startingPorts = Math.floor(msg.startingPorts);
@@ -1131,6 +1185,8 @@ wss.on('connection', async (ws) => {
               }
               
               const teamsBotsEnabled = !!msg.botsEnabled;
+              // Team selection: player picks 'red' or 'blue' (default 'red')
+              const chosenTeam: 'red' | 'blue' = msg.team === 'blue' ? 'blue' : 'red';
               
               // Check if player has bots enabled but there's a no-bots lobby with waiting players
               if (teamsBotsEnabled) {
@@ -1152,6 +1208,20 @@ wss.on('connection', async (ws) => {
               }
               if (teamsBotsEnabled) match.botsEnabled = true;
               addPlayerToMatch(match, displayNameToUse);
+              // Assign team after player is added
+              if (match.playerTeams) {
+                match.playerTeams.set(effectivePlayerId, chosenTeam);
+                match.world.setPlayerTeam(effectivePlayerId, chosenTeam);
+                log(`Player ${displayNameToUse} joined team ${chosenTeam} in match ${match.id}`);
+              }
+              
+              // Start countdown when 2+ humans have joined (need at least 1 per team or bots will fill)
+              if (match.players.size >= 2 && match.phase === 'lobby') {
+                ensureCpusForMatch(match);
+                match.phase = 'countdown';
+                match.countdownEndAt = Date.now() + FFA_COUNTDOWN_MS;
+                match.readySet.clear();
+              }
             }
           })();
           return;
@@ -1239,15 +1309,43 @@ wss.on('connection', async (ws) => {
           if (match.phase === 'lobby' && match.botsEnabled && (match.mode === 'ffa' || match.mode === 'teams')) {
             const humanCount = Array.from(match.players.keys()).filter(id => !id.startsWith('cpu-')).length;
             if (humanCount >= 1) {
-              // Add a bot to make it a 2-player match, then start
-              const botId = `cpu-${match.cpuIds.size + 1}`;
-              match.world.addPlayer(botId, pickBotName(match), 0, 0, 0, 0);
-              match.cpuIds.add(botId);
-              ensureCpusForMatch(match);
+              if (match.mode === 'teams' && match.playerTeams) {
+                // Teams mode: ensure both teams have players, fill with bots
+                // If a team has no players at all, ensure at least the opposing team exists
+                const redCount = Array.from(match.playerTeams.values()).filter(t => t === 'red').length;
+                const blueCount = Array.from(match.playerTeams.values()).filter(t => t === 'blue').length;
+                // Make sure the opposing team has at least 2 bots
+                if (blueCount === 0) { addBotToTeam(match, 'blue'); addBotToTeam(match, 'blue'); }
+                if (redCount === 0) { addBotToTeam(match, 'red'); addBotToTeam(match, 'red'); }
+                // Balance teams: ensure both sides have equal counts (at least 2 each)
+                ensureCpusForMatch(match);
+              } else {
+                // FFA mode: add a bot to make it a 2-player match
+                const botId = `cpu-${match.cpuIds.size + 1}`;
+                match.world.addPlayer(botId, pickBotName(match), 0, 0, 0, 0);
+                match.cpuIds.add(botId);
+                ensureCpusForMatch(match);
+              }
               transitionToPlaying(match);
               if (ffaLobbyMatchId === match.id) ffaLobbyMatchId = null;
               if (teamsLobbyMatchId === match.id) teamsLobbyMatchId = null;
               log(`Ready with bots: match ${match.id} started with ${humanCount} human(s) + ${match.cpuIds.size} bot(s)`);
+            }
+          }
+          return;
+        }
+        
+        // Handle team change during lobby phase (Teams mode)
+        if (msg.type === 'changeTeam' && (msg.team === 'red' || msg.team === 'blue')) {
+          if (match.mode === 'teams' && match.phase === 'lobby' && match.playerTeams) {
+            const newTeam = msg.team as 'red' | 'blue';
+            match.playerTeams.set(playerId, newTeam);
+            match.world.setPlayerTeam(playerId, newTeam);
+            log(`Player ${playerId} changed team to ${newTeam} in match ${match.id}`);
+            // Broadcast updated match state so all players see the change
+            const matchState = getMatchState(match);
+            for (const ws of match.players.values()) {
+              if (ws.readyState === 1) ws.send(JSON.stringify(matchState));
             }
           }
           return;
@@ -1400,6 +1498,64 @@ wss.on('connection', async (ws) => {
             speedBoost: !!msg.speedBoost,
             adoptSpeedBoosts: typeof msg.adoptSpeedBoosts === 'number' ? msg.adoptSpeedBoosts : 0,
           });
+          return;
+        }
+        
+        // Handle selected items from equipment chest (sent after item selection modal)
+        if (msg.type === 'selectedItems') {
+          if (playerUserId) {
+            // Withdraw only the selected items from inventory (RT was already withdrawn)
+            const selection: ItemSelection = {
+              portCharges: typeof msg.portCharges === 'number' ? Math.max(0, Math.floor(msg.portCharges)) : 0,
+              shelterPortCharges: typeof msg.shelterPortCharges === 'number' ? Math.max(0, Math.floor(msg.shelterPortCharges)) : 0,
+              speedBoosts: typeof msg.speedBoosts === 'number' ? Math.max(0, Math.floor(msg.speedBoosts)) : 0,
+              sizeBoosts: typeof msg.sizeBoosts === 'number' ? Math.max(0, Math.floor(msg.sizeBoosts)) : 0,
+              shelterTier3Boosts: typeof msg.shelterTier3Boosts === 'number' ? Math.max(0, Math.floor(msg.shelterTier3Boosts)) : 0,
+              adoptSpeedBoosts: typeof msg.adoptSpeedBoosts === 'number' ? Math.max(0, Math.floor(msg.adoptSpeedBoosts)) : 0,
+            };
+            const withdrawn = withdrawForMatchSelective(playerUserId, 0, selection);
+            log(`Player ${playerUserId} selected items: ${withdrawn.portCharges} ports, ${withdrawn.speedBoosts} speed, ${withdrawn.sizeBoosts} size, ${withdrawn.adoptSpeedBoosts} adopt speed, ${withdrawn.shelterTier3Boosts} tier3`);
+            
+            // Apply the withdrawn items to the player
+            if (withdrawn.portCharges > 0) {
+              const currentPorts = match.world.getPortCharges(effectivePlayerId);
+              match.world.setPortCharges(effectivePlayerId, currentPorts + withdrawn.portCharges);
+            }
+            if (withdrawn.shelterPortCharges > 0) {
+              const currentShelterPorts = match.world.getShelterPortCharges(effectivePlayerId);
+              match.world.setShelterPortCharges(effectivePlayerId, currentShelterPorts + withdrawn.shelterPortCharges);
+            }
+            if (withdrawn.shelterTier3Boosts > 0) {
+              match.world.setShelterTier3Boosts(effectivePlayerId, withdrawn.shelterTier3Boosts);
+            }
+            match.world.applyStartingBoosts(effectivePlayerId, {
+              sizeBonus: withdrawn.sizeBoosts,
+              speedBoost: withdrawn.speedBoosts > 0,
+              adoptSpeedBoosts: withdrawn.adoptSpeedBoosts,
+            });
+            
+            // Update the starting inventory record to include items for deposit-back tracking
+            const existingInv = match.playerStartingInventory.get(effectivePlayerId);
+            if (existingInv) {
+              existingInv.portCharges += withdrawn.portCharges;
+              existingInv.shelterPortCharges += withdrawn.shelterPortCharges;
+              existingInv.speedBoosts += withdrawn.speedBoosts;
+              existingInv.sizeBoosts += withdrawn.sizeBoosts;
+              existingInv.shelterTier3Boosts += withdrawn.shelterTier3Boosts;
+              existingInv.adoptSpeedBoosts += withdrawn.adoptSpeedBoosts;
+            }
+            
+            // Send confirmation with what was actually applied
+            ws.send(JSON.stringify({
+              type: 'itemsApplied',
+              portCharges: withdrawn.portCharges,
+              shelterPortCharges: withdrawn.shelterPortCharges,
+              speedBoosts: withdrawn.speedBoosts,
+              sizeBoosts: withdrawn.sizeBoosts,
+              adoptSpeedBoosts: withdrawn.adoptSpeedBoosts,
+              shelterTier3Boosts: withdrawn.shelterTier3Boosts,
+            }));
+          }
           return;
         }
         
@@ -1827,18 +1983,40 @@ setInterval(() => {
             userIdToSoloMatchId.delete(match.soloUserId);
           }
           const durationSeconds = Math.floor((snapshot.matchDurationMs ?? 0) / 1000);
+          // Teams mode: determine winning team for reward scaling
+          const winningTeam = match.mode === 'teams' ? match.world.getWinningTeam() : null;
+          
           for (const [pid, userId] of match.playerUserIds.entries()) {
             const playerState = snapshot.players.find(p => p.id === pid);
             if (!playerState) continue;
-            const finalRT = isStrayLoss ? 0 : (playerState.money ?? 0);
-            const portCharges = isStrayLoss ? 0 : match.world.getPortCharges(pid);
-            const shelterPortCharges = isStrayLoss ? 0 : match.world.getShelterPortCharges(pid);
-            const adoptSpeedBoosts = isStrayLoss ? 0 : match.world.getAdoptSpeedBoosts(pid);
+            
+            // Teams mode: losing team gets 1/3 rewards
+            const playerTeam = match.mode === 'teams' ? match.world.getPlayerTeam(pid) : undefined;
+            const isOnWinningTeam = match.mode === 'teams' && playerTeam === winningTeam;
+            const isOnLosingTeam = match.mode === 'teams' && playerTeam != null && playerTeam !== winningTeam;
+            const rewardMultiplier = isOnLosingTeam ? (1 / 3) : 1;
+            
+            const rawRT = isStrayLoss ? 0 : (playerState.money ?? 0);
+            const finalRT = Math.floor(rawRT * rewardMultiplier);
+            const rawPortCharges = isStrayLoss ? 0 : match.world.getPortCharges(pid);
+            const portCharges = Math.floor(rawPortCharges * rewardMultiplier);
+            const rawShelterPortCharges = isStrayLoss ? 0 : match.world.getShelterPortCharges(pid);
+            const shelterPortCharges = Math.floor(rawShelterPortCharges * rewardMultiplier);
+            const rawAdoptSpeedBoosts = isStrayLoss ? 0 : match.world.getAdoptSpeedBoosts(pid);
+            const adoptSpeedBoosts = Math.floor(rawAdoptSpeedBoosts * rewardMultiplier);
             if (finalRT > 0 || portCharges > 0 || shelterPortCharges > 0 || adoptSpeedBoosts > 0) {
               depositAfterMatch(userId, finalRT, portCharges, shelterPortCharges, 0, 0, adoptSpeedBoosts);
-              log(`Deposited for ${userId}: ${finalRT} RT, ${portCharges} ports, ${shelterPortCharges} home ports, ${adoptSpeedBoosts} adopt speed`);
+              log(`Deposited for ${userId}: ${finalRT} RT, ${portCharges} ports, ${shelterPortCharges} home ports, ${adoptSpeedBoosts} adopt speed${isOnLosingTeam ? ' (losing team 1/3)' : ''}`);
             }
-            const isWinner = !isStrayLoss && snapshot.winnerId === pid;
+            
+            // Determine winner status
+            let isWinner: boolean;
+            if (match.mode === 'teams') {
+              isWinner = !isStrayLoss && isOnWinningTeam;
+            } else {
+              isWinner = !isStrayLoss && snapshot.winnerId === pid;
+            }
+            
             const adoptions = playerState.totalAdoptions ?? 0;
             let karmaAwarded = 0;
             if (isStrayLoss) {
@@ -1846,13 +2024,20 @@ setInterval(() => {
             } else {
               if (isWinner) {
                 recordMatchWin(userId, finalRT);
-                log(`Recorded win for ${userId}`);
+                log(`Recorded win for ${userId}${match.mode === 'teams' ? ` (team ${playerTeam})` : ''}`);
               } else {
                 recordMatchLoss(userId, finalRT);
               }
-              // Award 1 Karma Point for players with 50+ adoptions (FFA/Teams only, not solo)
-              // Multiple players can earn KP if they meet the threshold
-              if (match.mode !== 'solo' && adoptions >= 50) {
+              // KP award logic differs by mode:
+              // FFA: 1 KP for 50+ adoptions
+              // Teams: 1 KP for each member of the winning team
+              if (match.mode === 'teams') {
+                if (isOnWinningTeam) {
+                  awardKarmaPoints(userId, 1, `Teams match ${matchId} (team ${playerTeam} won)`);
+                  karmaAwarded = 1;
+                  log(`Awarded 1 KP to ${userId} (winning team ${playerTeam})`);
+                }
+              } else if (match.mode !== 'solo' && adoptions >= 50) {
                 awardKarmaPoints(userId, 1, `Match ${matchId} (${adoptions} adoptions)`);
                 karmaAwarded = 1;
                 log(`Awarded 1 KP to ${userId} for ${adoptions} adoptions`);
@@ -1872,9 +2057,11 @@ setInterval(() => {
               ws.send(JSON.stringify({
                 type: 'matchEndInventory',
                 deposited: { rt: finalRT, portCharges },
-                isWinner: !isStrayLoss && snapshot.winnerId === pid,
+                isWinner,
                 strayLoss: isStrayLoss,
                 karmaAwarded,
+                winningTeam: winningTeam || undefined,
+                myTeam: playerTeam || undefined,
               }));
             }
           }

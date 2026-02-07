@@ -66,6 +66,12 @@ import {
   BOSS_MODE_REWARDS,
   BOSS_CAUGHT_PENALTY,
   BOSS_TYCOON_REBUILD_TICKS,
+  // Season constants
+  getCurrentSeason,
+  SEASON_SPEED_MULTIPLIER,
+  SPRING_VEGETATION_SPEED,
+  isInVegetationPatch,
+  getWindMultiplier,
 } from 'shared';
 import { INPUT_LEFT, INPUT_RIGHT, INPUT_UP, INPUT_DOWN } from 'shared';
 import { SpatialGrid } from './SpatialGrid';
@@ -266,6 +272,11 @@ export class World {
   // Solo mode options
   private cpuCanShutdownBreeders = true; // Can be set via game options
   private matchMode: 'ffa' | 'solo' | 'teams' = 'ffa'; // Match mode (set by GameServer)
+  
+  // Teams mode: team assignments and scores
+  private playerTeams = new Map<string, 'red' | 'blue'>(); // playerId -> team
+  private teamScores = new Map<string, number>([['red', 0], ['blue', 0]]); // team -> score
+  private winningTeam: 'red' | 'blue' | null = null; // Set when match ends in Teams mode
   
   // Boss Mode state
   private bossMode: {
@@ -1233,6 +1244,17 @@ export class World {
       if (this.vanSpeedUpgrades.has(p.id)) {
         baseSpeed *= 1.2;
       }
+      // Season speed modifier
+      const season = getCurrentSeason();
+      baseSpeed *= SEASON_SPEED_MULTIPLIER[season];
+      // Spring: extra slow in thick vegetation patches
+      if (season === 'spring' && isInVegetationPatch(p.x, p.y)) {
+        baseSpeed *= SPRING_VEGETATION_SPEED;
+      }
+      // Fall: random wind gusts (deterministic from tick)
+      if (season === 'fall') {
+        baseSpeed *= getWindMultiplier(this.tick);
+      }
       const speed = p.speedBoostUntil > this.tick ? baseSpeed * SPEED_BOOST_MULTIPLIER : baseSpeed;
       const perTick = speed / TICK_RATE;
       p.vx = (dx / len) * perTick;
@@ -1403,6 +1425,51 @@ export class World {
     log(`Alliance formed between ${playerId1} and ${playerId2}`);
   }
 
+  /** Assign a player to a team (Teams mode only). */
+  setPlayerTeam(playerId: string, team: 'red' | 'blue'): void {
+    this.playerTeams.set(playerId, team);
+  }
+
+  /** Get a player's team assignment. */
+  getPlayerTeam(playerId: string): 'red' | 'blue' | undefined {
+    return this.playerTeams.get(playerId);
+  }
+
+  /** Get the current team scores. */
+  getTeamScores(): { red: number; blue: number } {
+    return {
+      red: this.teamScores.get('red') ?? 0,
+      blue: this.teamScores.get('blue') ?? 0,
+    };
+  }
+
+  /** Get the winning team (set after match ends in Teams mode). */
+  getWinningTeam(): 'red' | 'blue' | null {
+    return this.winningTeam;
+  }
+
+  /** Auto-form alliances between all players on the same team (call once at match start or when teams change). */
+  formTeamAlliances(): void {
+    const redPlayers: string[] = [];
+    const bluePlayers: string[] = [];
+    for (const [pid, team] of this.playerTeams) {
+      if (team === 'red') redPlayers.push(pid);
+      else bluePlayers.push(pid);
+    }
+    // Ally all red players with each other
+    for (let i = 0; i < redPlayers.length; i++) {
+      for (let j = i + 1; j < redPlayers.length; j++) {
+        this.formAlliance(redPlayers[i], redPlayers[j]);
+      }
+    }
+    // Ally all blue players with each other
+    for (let i = 0; i < bluePlayers.length; i++) {
+      for (let j = i + 1; j < bluePlayers.length; j++) {
+        this.formAlliance(bluePlayers[i], bluePlayers[j]);
+      }
+    }
+  }
+
   private static readonly ELIMINATED_SIZE_THRESHOLD = 10;
 
   /** Time limit in seconds for breeder camp mini-game by level (human and CPU). */
@@ -1475,6 +1542,11 @@ export class World {
     }
 
     const allyPairs = fightAllyChoices ? World.allyPairsFromChoices(fightAllyChoices) : new Set<string>();
+
+    // Teams mode: reinforce alliances between teammates every tick
+    if (this.matchMode === 'teams') {
+      this.formTeamAlliances();
+    }
 
     // Helper to check if both players have mutual ally requests (clicked ally on each other before overlap)
     const hasMutualAllyRequest = (aId: string, bId: string): boolean => {
@@ -2236,17 +2308,36 @@ export class World {
         } else {
           this.matchEndedEarly = true;
           this.matchEndAt = this.tick;
-          // Winner is the player with the most adoptions (FFA/Teams rule)
-          let winnerId: string | null = null;
-          let maxAdoptions = 0;
-          for (const p of this.players.values()) {
-            if (p.totalAdoptions > maxAdoptions) {
-              maxAdoptions = p.totalAdoptions;
-              winnerId = p.id;
+          if (this.matchMode === 'teams') {
+            // Teams mode: winning team is the one with more points
+            const redScore = this.teamScores.get('red') ?? 0;
+            const blueScore = this.teamScores.get('blue') ?? 0;
+            this.winningTeam = redScore >= blueScore ? 'red' : 'blue';
+            // Winner is the top player on the winning team
+            let winnerId: string | null = null;
+            let maxAdoptions = 0;
+            for (const p of this.players.values()) {
+              const team = this.playerTeams.get(p.id);
+              if (team === this.winningTeam && p.totalAdoptions > maxAdoptions) {
+                maxAdoptions = p.totalAdoptions;
+                winnerId = p.id;
+              }
             }
+            this.winnerId = winnerId;
+            log(`Teams match end: ${this.winningTeam} wins (red=${redScore}, blue=${blueScore}). MVP: ${this.winnerId ?? 'none'} (${maxAdoptions} adoptions)`);
+          } else {
+            // FFA: winner is the player with the most adoptions
+            let winnerId: string | null = null;
+            let maxAdoptions = 0;
+            for (const p of this.players.values()) {
+              if (p.totalAdoptions > maxAdoptions) {
+                maxAdoptions = p.totalAdoptions;
+                winnerId = p.id;
+              }
+            }
+            this.winnerId = winnerId;
+            log(`Match end: zero strays and all breeders cleared at level ${this.breederCurrentLevel}, tick ${this.tick}. Winner: ${this.winnerId ?? 'co-op'} (${maxAdoptions} adoptions)`);
           }
-          this.winnerId = winnerId;
-          log(`Match end: zero strays and all breeders cleared at level ${this.breederCurrentLevel}, tick ${this.tick}. Winner: ${this.winnerId ?? 'co-op'} (${maxAdoptions} adoptions)`);
         }
       }
     }
@@ -2569,6 +2660,11 @@ export class World {
       this.totalMatchAdoptions++;
       this.lastGlobalAdoptionTick = now;
       this.scarcityLevel = 0;
+      // Teams mode: add score to player's team
+      if (this.matchMode === 'teams') {
+        const team = this.playerTeams.get(p.id);
+        if (team) this.teamScores.set(team, (this.teamScores.get(team) ?? 0) + 1);
+      }
     };
 
     // Shelter adoption (shelter with adoption center adopts pets inside it)
@@ -2607,6 +2703,11 @@ export class World {
       this.totalMatchAdoptions++;
       this.lastGlobalAdoptionTick = now;
       this.scarcityLevel = 0;
+      // Teams mode: add score to player's team
+      if (this.matchMode === 'teams') {
+        const team = this.playerTeams.get(playerId);
+        if (team) this.teamScores.set(team, (this.teamScores.get(team) ?? 0) + 1);
+      }
       
       // Victory check moved to domination - 51% of total shelter influence
     };
@@ -2647,6 +2748,11 @@ export class World {
           this.totalMatchAdoptions++;
           this.lastGlobalAdoptionTick = now;
           this.scarcityLevel = 0;
+          // Teams mode: add score to player's team
+          if (this.matchMode === 'teams') {
+            const pTeam = this.playerTeams.get(p.id);
+            if (pTeam) this.teamScores.set(pTeam, (this.teamScores.get(pTeam) ?? 0) + 1);
+          }
         }
         // Removed announcement - too spammy
         break; // One van per event per tick
@@ -2783,6 +2889,7 @@ export class World {
         const shelterId = this.playerShelterIds.get(p.id);
         const hasVanSpeed = this.vanSpeedUpgrades.has(p.id);
         const disconnected = this.disconnectedPlayerIds.has(p.id);
+        const team = this.playerTeams.get(p.id);
         return {
           ...p,
           size: eliminated ? 0 : p.size,
@@ -2797,6 +2904,7 @@ export class World {
           money: money > 0 ? money : undefined,
           shelterId: shelterId || undefined,
           vanSpeedUpgrade: hasVanSpeed || undefined,
+          team: team || undefined,
         };
       }),
       pets: this.getSnapshotStrays(),
@@ -2814,6 +2922,8 @@ export class World {
         : undefined,
       adoptionEvents: this.adoptionEvents.size > 0 ? Array.from(this.adoptionEvents.values()) : undefined,
       bossMode: this.getBossModeState(),
+      teamScores: this.matchMode === 'teams' ? this.getTeamScores() : undefined,
+      winningTeam: this.winningTeam || undefined,
     };
   }
 
@@ -3018,6 +3128,12 @@ export class World {
     const currentTokens = this.playerMoney.get(playerId) ?? 0;
     this.playerMoney.set(playerId, currentTokens + tokenBonus);
     
+    // Teams mode: breeder takedown adds rescued count to team score
+    if (this.matchMode === 'teams') {
+      const team = this.playerTeams.get(playerId);
+      if (team) this.teamScores.set(team, (this.teamScores.get(team) ?? 0) + rescuedCount);
+    }
+    
     // Item rewards: full win = level-based count; 51% tier = 1 item
     const numItems = isFullWin ? (level >= 7 ? 3 : 2) : 1;
     const sizeAmount = 5 + Math.floor(level / 2);
@@ -3097,10 +3213,25 @@ export class World {
   getPortCharges(playerId: string): number {
     return this.portCharges.get(playerId) ?? 0;
   }
+
+  /** Set a player's port charges */
+  setPortCharges(playerId: string, count: number): void {
+    this.portCharges.set(playerId, count);
+  }
   
   /** Get a player's current shelter port charges */
   getShelterPortCharges(playerId: string): number {
     return this.shelterPortCharges.get(playerId) ?? 0;
+  }
+
+  /** Set a player's shelter port charges */
+  setShelterPortCharges(playerId: string, count: number): void {
+    this.shelterPortCharges.set(playerId, count);
+  }
+
+  /** Set a player's tier-3 shelter boosts */
+  setShelterTier3Boosts(playerId: string, count: number): void {
+    this.shelterTier3Boosts.set(playerId, count);
   }
   
   /** Get a player's current money/RT */
@@ -3631,6 +3762,9 @@ export class World {
       nextAdoptionEventSpawnTick: this.nextAdoptionEventSpawnTick,
       matchMode: this.matchMode,
       bossMode: this.bossMode,
+      playerTeams: Array.from(this.playerTeams.entries()),
+      teamScores: Array.from(this.teamScores.entries()),
+      winningTeam: this.winningTeam,
     };
     return JSON.stringify(state);
   }
@@ -3666,6 +3800,9 @@ export class World {
       pendingAnnouncements: string[]; adoptionEvents: [string, AdoptionEvent][];
       adoptionEventIdSeq: number; nextAdoptionEventSpawnTick: number;
       strayLoss?: boolean; disconnectedPlayerIds?: string[];
+      playerTeams?: [string, 'red' | 'blue'][];
+      teamScores?: [string, number][];
+      winningTeam?: 'red' | 'blue' | null;
     };
     w.tick = state.tick;
     w.matchStartTick = state.matchStartTick;
@@ -3730,6 +3867,9 @@ export class World {
     w.nextAdoptionEventSpawnTick = state.nextAdoptionEventSpawnTick;
     w.matchMode = (state as { matchMode?: 'ffa' | 'solo' | 'teams' }).matchMode ?? 'ffa';
     w.bossMode = (state as { bossMode?: typeof w.bossMode }).bossMode ?? null;
+    if (state.playerTeams) w.playerTeams = new Map(state.playerTeams);
+    if (state.teamScores) w.teamScores = new Map(state.teamScores);
+    w.winningTeam = state.winningTeam ?? null;
     return w;
   }
 }

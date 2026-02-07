@@ -65,8 +65,8 @@ function encodeSnapshot(snap) {
     const shelters = snap.shelters ?? [];
     const breederShelters = snap.breederShelters ?? [];
     const adoptionEvents = snap.adoptionEvents ?? [];
-    // msg(1), tick(4), matchEndAt(4), matchEndedEarly(1), winnerId(string), totalMatchAdoptions(4), scarcityLevel(1), matchDurationMs(4), totalOutdoorStrays(2), numPlayers(1)
-    let size = 1 + 4 + 4 + 1 + 1 + encoder.encode(snap.winnerId ?? '').length + 4 + 1 + 4 + 2 + 1;
+    // msg(1), tick(4), matchEndAt(4), matchEndedEarly(1), winnerId(string), strayLoss(1), totalMatchAdoptions(4), scarcityLevel(1), matchDurationMs(4), totalOutdoorStrays(2), numPlayers(1)
+    let size = 1 + 4 + 4 + 1 + 1 + encoder.encode(snap.winnerId ?? '').length + 1 + 4 + 1 + 4 + 2 + 1;
     for (const p of players) {
         size += 1 + encoder.encode(p.id).length + 1 + encoder.encode(p.displayName ?? p.id).length + 4 * 4 + 4 + 4 + 1; // id, displayName, x,y,vx,vy, size(4), totalAdoptions(4), numPets
         for (const pid of p.petsInside)
@@ -79,6 +79,7 @@ function encodeSnapshot(snap) {
         size += 2; // money (Uint16)
         size += 1 + encoder.encode(p.shelterId ?? '').length; // shelterId string
         size += 1; // vanSpeedUpgrade (1 byte bool)
+        size += 1; // team (0=none, 1=red, 2=blue)
     }
     size += 2; // Uint16 for pet count (large maps can have 255+ pets)
     for (const pet of pets) {
@@ -141,6 +142,8 @@ function encodeSnapshot(snap) {
             }
         }
     }
+    // Team scores and winning team (Teams mode)
+    size += 1 + 4 + 4 + 1; // hasTeamScores(1), red(4), blue(4), winningTeam(1)
     const buf = new ArrayBuffer(size * 2); // No cap - large games need large buffers
     const view = new DataView(buf);
     let off = 0;
@@ -151,6 +154,7 @@ function encodeSnapshot(snap) {
     off += 4;
     view.setUint8(off++, snap.matchEndedEarly ? 1 : 0);
     off = writeString(view, off, snap.winnerId ?? '');
+    view.setUint8(off++, snap.strayLoss ? 1 : 0);
     view.setUint32(off, (snap.totalMatchAdoptions ?? 0) >>> 0, true);
     off += 4;
     view.setUint8(off++, (snap.scarcityLevel ?? 0) & 0xff);
@@ -193,6 +197,7 @@ function encodeSnapshot(snap) {
         off += 2;
         off = writeString(view, off, p.shelterId ?? '');
         view.setUint8(off++, p.vanSpeedUpgrade ? 1 : 0);
+        view.setUint8(off++, p.team === 'red' ? 1 : p.team === 'blue' ? 2 : 0);
     }
     // Use Uint16 for pet count - large maps can have 255+ pets
     view.setUint16(off, pets.length, true);
@@ -334,6 +339,18 @@ function encodeSnapshot(snap) {
     else {
         view.setUint8(off++, 0); // hasBossMode = false
     }
+    // Encode team scores and winning team (Teams mode)
+    if (snap.teamScores) {
+        view.setUint8(off++, 1); // hasTeamScores = true
+        view.setUint32(off, snap.teamScores.red >>> 0, true);
+        off += 4;
+        view.setUint32(off, snap.teamScores.blue >>> 0, true);
+        off += 4;
+        view.setUint8(off++, snap.winningTeam === 'red' ? 1 : snap.winningTeam === 'blue' ? 2 : 0);
+    }
+    else {
+        view.setUint8(off++, 0); // hasTeamScores = false
+    }
     return buf.slice(0, off);
 }
 function decodeSnapshot(buf) {
@@ -348,6 +365,7 @@ function decodeSnapshot(buf) {
     const matchEndedEarly = view.getUint8(off++) !== 0;
     const { s: winnerId, next: winnerNext } = readString(view, off);
     off = winnerNext;
+    const strayLoss = view.getUint8(off++) !== 0;
     const totalMatchAdoptions = view.getUint32(off, true);
     off += 4;
     const scarcityLevel = view.getUint8(off++);
@@ -402,6 +420,8 @@ function decodeSnapshot(buf) {
         const { s: shelterId, next: shelterIdNext } = readString(view, off);
         off = shelterIdNext;
         const vanSpeedUpgrade = view.getUint8(off++) !== 0;
+        const teamByte = off < view.byteLength ? view.getUint8(off++) : 0;
+        const team = teamByte === 1 ? 'red' : teamByte === 2 ? 'blue' : undefined;
         players.push({
             id,
             displayName: displayName || id,
@@ -423,6 +443,7 @@ function decodeSnapshot(buf) {
             ...(money > 0 ? { money } : {}),
             ...(shelterId ? { shelterId } : {}),
             ...(vanSpeedUpgrade ? { vanSpeedUpgrade: true } : {}),
+            ...(team ? { team } : {}),
         });
     }
     // Use Uint16 for pet count - large maps can have 255+ pets
@@ -622,11 +643,27 @@ function decodeSnapshot(buf) {
             };
         }
     }
+    // Decode team scores and winning team (Teams mode)
+    let teamScores;
+    let winningTeam;
+    if (off < view.byteLength) {
+        const hasTeamScores = view.getUint8(off++);
+        if (hasTeamScores) {
+            const redScore = view.getUint32(off, true);
+            off += 4;
+            const blueScore = view.getUint32(off, true);
+            off += 4;
+            teamScores = { red: redScore, blue: blueScore };
+            const wtByte = view.getUint8(off++);
+            winningTeam = wtByte === 1 ? 'red' : wtByte === 2 ? 'blue' : undefined;
+        }
+    }
     return {
         tick,
         matchEndAt,
         matchEndedEarly: matchEndedEarly || undefined,
         winnerId: winnerId || undefined,
+        strayLoss: strayLoss ? true : undefined,
         totalMatchAdoptions,
         scarcityLevel: scarcityLevel > 0 ? scarcityLevel : undefined,
         matchDurationMs,
@@ -639,5 +676,7 @@ function decodeSnapshot(buf) {
         breederShelters: breederShelters.length > 0 ? breederShelters : undefined,
         adoptionEvents: adoptionEvents.length > 0 ? adoptionEvents : undefined,
         bossMode,
+        teamScores,
+        winningTeam,
     };
 }

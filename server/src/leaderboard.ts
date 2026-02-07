@@ -3,6 +3,7 @@
  */
 
 import { ensureReferralStorage } from './referrals.js';
+import { getSeasonLabel } from 'shared';
 
 /** Subscriber interface for live leaderboard (e.g. WebSocket with send()). */
 export type LeaderboardSubscriber = { send(data: string): void; readyState?: number };
@@ -136,11 +137,9 @@ function getCurrentWeekUTC(): string {
   return `${thursday.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
 }
 
-/** Season string in UTC e.g. 2026-Q1 */
+/** Season string in UTC e.g. "2026-Winter" (uses Northern Hemisphere seasons). */
 function getCurrentSeasonUTC(): string {
-  const d = new Date();
-  const q = Math.floor(d.getUTCMonth() / 3) + 1;
-  return `${d.getUTCFullYear()}-Q${q}`;
+  return getSeasonLabel();
 }
 
 const REPUTATION_MIN = 0;

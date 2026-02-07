@@ -88,6 +88,8 @@ export declare const SATELLITE_ZONE_MILESTONE = 75;
 export declare const EVENT_MILESTONES: readonly [50, 100, 200, 300];
 /** Rescue Tokens earned per pet adopted out. */
 export declare const TOKENS_PER_ADOPTION = 5;
+/** Max RT a player can bring into a single match from their equipment chest. */
+export declare const MAX_RT_PER_MATCH = 1000;
 /** Cost to build a shelter (ground at location). */
 export declare const SHELTER_BUILD_COST = 250;
 /** Van base size for drawing (fixed, doesn't grow). */
@@ -151,3 +153,22 @@ export declare const BOSS_CAUGHT_PENALTY = 0.5;
 export declare const BOSS_TYCOON_REBUILD_SECONDS = 10;
 /** Time for tycoon to rebuild a cleared mill (ticks). */
 export declare const BOSS_TYCOON_REBUILD_TICKS: number;
+export type Season = 'winter' | 'spring' | 'summer' | 'fall';
+/** Determine the current season from UTC date (Northern Hemisphere). */
+export declare function getCurrentSeason(): Season;
+/** Season label for leaderboard key, e.g. "2026-Winter". Dec counts toward next year's winter. */
+export declare function getSeasonLabel(): string;
+/** Speed multiplier per season (Summer = baseline 1.0). */
+export declare const SEASON_SPEED_MULTIPLIER: Record<Season, number>;
+/** Extra speed multiplier inside thick vegetation patches (Spring only). */
+export declare const SPRING_VEGETATION_SPEED = 0.7;
+/** Ticks per wind gust cycle in Fall (~2s at 25 Hz). */
+export declare const FALL_WIND_CYCLE_TICKS = 50;
+/** Minimum wind speed multiplier (Fall). */
+export declare const FALL_WIND_MIN = 0.8;
+/** Maximum wind speed multiplier (Fall). */
+export declare const FALL_WIND_MAX = 1.2;
+/** Deterministic vegetation density using spatial hash — returns true if position is in a thick patch. */
+export declare function isInVegetationPatch(x: number, y: number): boolean;
+/** Deterministic wind multiplier from tick (Fall only). */
+export declare function getWindMultiplier(tick: number): number;

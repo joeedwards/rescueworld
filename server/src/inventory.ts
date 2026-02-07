@@ -121,26 +121,75 @@ export function depositAfterMatch(
 }
 
 /**
+ * @deprecated Use withdrawForMatchSelective instead
  * Withdraw all items for match start (empties the chest)
  */
 export function withdrawForMatch(userId: string): Inventory {
+  return withdrawForMatchSelective(userId, 999999, {});
+}
+
+/** Item selection for selective withdrawal */
+export type ItemSelection = {
+  portCharges?: number;
+  shelterPortCharges?: number;
+  speedBoosts?: number;
+  sizeBoosts?: number;
+  shelterTier3Boosts?: number;
+  adoptSpeedBoosts?: number;
+};
+
+/**
+ * Withdraw RT (capped at maxRt) and only selected items for match start.
+ * Returns what was actually withdrawn. Remainder stays in inventory.
+ */
+export function withdrawForMatchSelective(
+  userId: string,
+  maxRt: number = 1000,
+  items: ItemSelection = {}
+): Inventory {
   const conn = db();
   
   // Get current inventory
   const inventory = getInventory(userId);
   
-  if (inventory.storedRt > 0 || inventory.portCharges > 0 || inventory.shelterPortCharges > 0 || inventory.speedBoosts > 0 || inventory.sizeBoosts > 0 || inventory.shelterTier3Boosts > 0 || inventory.adoptSpeedBoosts > 0) {
-    // Clear the inventory
+  // Calculate what to actually withdraw (capped by what's available and requested)
+  const rtToWithdraw = Math.min(maxRt, inventory.storedRt);
+  const portsToWithdraw = Math.min(items.portCharges ?? 0, inventory.portCharges);
+  const shelterPortsToWithdraw = Math.min(items.shelterPortCharges ?? 0, inventory.shelterPortCharges);
+  const speedToWithdraw = Math.min(items.speedBoosts ?? 0, inventory.speedBoosts);
+  const sizeToWithdraw = Math.min(items.sizeBoosts ?? 0, inventory.sizeBoosts);
+  const tier3ToWithdraw = Math.min(items.shelterTier3Boosts ?? 0, inventory.shelterTier3Boosts);
+  const adoptSpeedToWithdraw = Math.min(items.adoptSpeedBoosts ?? 0, inventory.adoptSpeedBoosts);
+  
+  const hasAnything = rtToWithdraw > 0 || portsToWithdraw > 0 || shelterPortsToWithdraw > 0 ||
+    speedToWithdraw > 0 || sizeToWithdraw > 0 || tier3ToWithdraw > 0 || adoptSpeedToWithdraw > 0;
+  
+  if (hasAnything) {
     conn.prepare(`
       UPDATE inventory 
-      SET stored_rt = 0, port_charges = 0, shelter_port_charges = 0, speed_boosts = 0, size_boosts = 0, shelter_tier3_boosts = 0, adopt_speed_boosts = 0
+      SET stored_rt = stored_rt - ?,
+          port_charges = port_charges - ?,
+          shelter_port_charges = shelter_port_charges - ?,
+          speed_boosts = speed_boosts - ?,
+          size_boosts = size_boosts - ?,
+          shelter_tier3_boosts = shelter_tier3_boosts - ?,
+          adopt_speed_boosts = adopt_speed_boosts - ?
       WHERE user_id = ?
-    `).run(userId);
+    `).run(rtToWithdraw, portsToWithdraw, shelterPortsToWithdraw, speedToWithdraw, sizeToWithdraw, tier3ToWithdraw, adoptSpeedToWithdraw, userId);
     
-    log(`Withdrew for ${userId}: ${inventory.storedRt} RT, ${inventory.portCharges} ports, ${inventory.shelterPortCharges} home ports, ${inventory.speedBoosts} speed, ${inventory.sizeBoosts} size, ${inventory.shelterTier3Boosts} tier3 shelter boosts, ${inventory.adoptSpeedBoosts} adopt speed`);
+    log(`Selective withdraw for ${userId}: ${rtToWithdraw}/${inventory.storedRt} RT, ${portsToWithdraw} ports, ${shelterPortsToWithdraw} home ports, ${speedToWithdraw} speed, ${sizeToWithdraw} size, ${tier3ToWithdraw} tier3, ${adoptSpeedToWithdraw} adopt speed`);
   }
   
-  return inventory;
+  // Return what was actually withdrawn (not what remains)
+  return {
+    storedRt: rtToWithdraw,
+    portCharges: portsToWithdraw,
+    shelterPortCharges: shelterPortsToWithdraw,
+    speedBoosts: speedToWithdraw,
+    sizeBoosts: sizeToWithdraw,
+    shelterTier3Boosts: tier3ToWithdraw,
+    adoptSpeedBoosts: adoptSpeedToWithdraw,
+  };
 }
 
 /**

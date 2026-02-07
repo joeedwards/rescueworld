@@ -27,6 +27,11 @@
     }
     .top-bar .score { font: 700 14px/1 Rubik, sans-serif; color: #7bed9f; text-shadow: 0 0 12px rgba(123,237,159,0.4); }
     .top-bar .game-clock { font: 600 14px/1 monospace; color: rgba(255,255,255,0.7); background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px; }
+    .top-bar .season-badge { font: 600 12px/1 Rubik, sans-serif; padding: 3px 8px; border-radius: 4px; letter-spacing: 0.03em; }
+    .top-bar .season-badge.winter { background: rgba(100,150,220,0.35); color: #d0e8ff; }
+    .top-bar .season-badge.spring { background: rgba(80,180,80,0.35); color: #a8f0a8; }
+    .top-bar .season-badge.summer { background: rgba(220,180,50,0.35); color: #fff3b0; }
+    .top-bar .season-badge.fall { background: rgba(200,120,50,0.35); color: #ffd8a8; }
     .top-bar .game-title { display: none; }
     .top-bar .timer { font: 700 14px/1 Rubik, sans-serif; color: #fff; letter-spacing: 0.05em; }
     .top-bar #auth-area { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -93,6 +98,22 @@
     .friends-remove-btn { background: none; border: none; color: rgba(255,255,255,0.4); font-size: 14px; cursor: pointer; padding: 2px 4px; }
     .friends-remove-btn:hover { color: #e74c3c; }
     .friends-empty { font: 400 12px Rubik, sans-serif; color: rgba(255,255,255,0.5); text-align: center; margin: 16px 0; }
+    .team-select { margin: 12px 0; }
+    .team-select.hidden { display: none; }
+    .team-select-label { font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.8); margin-bottom: 8px; }
+    .team-select-btns { display: flex; gap: 10px; justify-content: center; }
+    .team-btn { padding: 8px 20px; font: 700 13px Rubik, sans-serif; border: 2px solid transparent; border-radius: 8px; cursor: pointer; transition: all 0.15s; color: #fff; }
+    .team-btn-red { background: rgba(231,76,60,0.3); border-color: rgba(231,76,60,0.5); }
+    .team-btn-red:hover, .team-btn-red.selected { background: rgba(231,76,60,0.6); border-color: #e74c3c; }
+    .team-btn-blue { background: rgba(52,152,219,0.3); border-color: rgba(52,152,219,0.5); }
+    .team-btn-blue:hover, .team-btn-blue.selected { background: rgba(52,152,219,0.6); border-color: #3498db; }
+    .lobby-player.team-red { border-left: 3px solid #e74c3c; background: rgba(231,76,60,0.2); }
+    .lobby-player.team-blue { border-left: 3px solid #3498db; background: rgba(52,152,219,0.2); }
+    .team-score-hud { display: flex; gap: 6px; align-items: center; font: 700 13px Rubik, sans-serif; }
+    .team-score-hud.hidden { display: none; }
+    .team-score-hud .team-divider { color: rgba(255,255,255,0.4); }
+    .team-score-red { color: #e74c3c; }
+    .team-score-blue { color: #3498db; }
     .lobby-ready-btn.hidden { display: none; }
     .lobby-gift-btn { position: absolute; top: 10px; right: 10px; font-size: 24px; background: transparent; border: none; cursor: pointer; padding: 4px; border-radius: 6px; transition: transform 0.15s; }
     .observer-overlay { position: fixed; top: 24px; left: 50%; transform: translateX(-50%); z-index: 69; background: rgba(35,42,60,0.92); border: 2px solid #ffa502; border-radius: 12px; padding: 14px 24px; text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
@@ -513,6 +534,51 @@
     #connection-overlay p { max-width: 420px; line-height: 1.5; margin-bottom: 8px; color: rgba(255,255,255,0.9); }
     #connection-overlay code { background: rgba(0,0,0,0.3); padding: 2px 8px; border-radius: 4px; font-size: 14px; }
     #connection-overlay .error { color: #ff6b6b; margin-top: 16px; }
+    /* Item Selection Modal */
+    #item-select-overlay {
+      position: fixed; inset: 0; background: rgba(26,26,46,0.95); display: flex; flex-direction: column;
+      align-items: center; justify-content: center; padding: 24px; text-align: center; z-index: 105;
+      font: 600 16px Rubik, sans-serif; color: #fff;
+    }
+    #item-select-overlay.hidden { display: none; }
+    .item-select-panel {
+      background: rgba(30,40,60,0.95); border: 1px solid rgba(255,255,255,0.2); border-radius: 14px;
+      padding: 24px 28px; max-width: 380px; width: 100%;
+    }
+    .item-select-title { font: 700 18px Rubik, sans-serif; color: #ffd93d; margin-bottom: 6px; }
+    .item-select-subtitle { font: 400 12px Rubik, sans-serif; color: rgba(255,255,255,0.6); margin-bottom: 18px; }
+    .item-select-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 12px; margin-bottom: 8px; border-radius: 8px;
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+    }
+    .item-select-row.hidden { display: none; }
+    .item-select-info { display: flex; align-items: center; gap: 10px; }
+    .item-select-icon { font-size: 20px; }
+    .item-select-name { font: 600 13px Rubik, sans-serif; color: #fff; }
+    .item-select-avail { font: 400 11px Rubik, sans-serif; color: rgba(255,255,255,0.5); margin-left: 4px; }
+    .item-select-controls { display: flex; align-items: center; gap: 6px; }
+    .item-select-controls button {
+      width: 28px; height: 28px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.25);
+      background: rgba(255,255,255,0.08); color: #fff; font: 700 16px Rubik, sans-serif;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+    }
+    .item-select-controls button:hover { background: rgba(255,255,255,0.18); border-color: #7bed9f; }
+    .item-select-controls button:disabled { opacity: 0.3; cursor: not-allowed; }
+    .item-select-qty { font: 700 14px Rubik, sans-serif; color: #7bed9f; min-width: 20px; text-align: center; }
+    .item-select-actions { display: flex; gap: 10px; margin-top: 18px; }
+    .item-select-confirm {
+      flex: 1; padding: 12px; border-radius: 8px; border: none;
+      background: linear-gradient(135deg, #7bed9f, #50c878); color: #1a1a2e;
+      font: 700 14px Rubik, sans-serif; cursor: pointer; transition: transform 0.1s, box-shadow 0.15s;
+    }
+    .item-select-confirm:hover { transform: scale(1.03); box-shadow: 0 4px 16px rgba(123,237,159,0.3); }
+    .item-select-skip {
+      flex: 1; padding: 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.25);
+      background: transparent; color: rgba(255,255,255,0.7);
+      font: 600 13px Rubik, sans-serif; cursor: pointer;
+    }
+    .item-select-skip:hover { border-color: rgba(255,255,255,0.5); color: #fff; }
     .toast {
       position: fixed; top: 20px; left: 50%; transform: translateX(-50%) translateY(-100px);
       background: rgba(255, 100, 100, 0.95); color: #fff; padding: 12px 24px;
@@ -965,6 +1031,85 @@
     <p>From the project root run: <code>npm run dev</code></p>
     <p>That starts both the server (ports 4000, 4001) and this client (3000).</p>
   </div>
+
+  <!-- Item Selection Modal (shown before match if player has equipment items) -->
+  <div id="item-select-overlay" class="hidden">
+    <div class="item-select-panel">
+      <div class="item-select-title">Select Equipment for This Match</div>
+      <div class="item-select-subtitle">Choose which items to bring. RT is applied automatically.</div>
+
+      <div class="item-select-row" id="item-row-ports">
+        <div class="item-select-info">
+          <span class="item-select-icon">🌀</span>
+          <span class="item-select-name">Teleport Charges</span>
+          <span class="item-select-avail" id="item-avail-ports"></span>
+        </div>
+        <div class="item-select-controls">
+          <button type="button" id="item-dec-ports">−</button>
+          <span class="item-select-qty" id="item-qty-ports">0</span>
+          <button type="button" id="item-inc-ports">+</button>
+        </div>
+      </div>
+
+      <div class="item-select-row" id="item-row-speed">
+        <div class="item-select-info">
+          <span class="item-select-icon">⚡</span>
+          <span class="item-select-name">Speed Boost</span>
+          <span class="item-select-avail" id="item-avail-speed"></span>
+        </div>
+        <div class="item-select-controls">
+          <button type="button" id="item-dec-speed">−</button>
+          <span class="item-select-qty" id="item-qty-speed">0</span>
+          <button type="button" id="item-inc-speed">+</button>
+        </div>
+      </div>
+
+      <div class="item-select-row" id="item-row-size">
+        <div class="item-select-info">
+          <span class="item-select-icon">📦</span>
+          <span class="item-select-name">Size Boosts</span>
+          <span class="item-select-avail" id="item-avail-size"></span>
+        </div>
+        <div class="item-select-controls">
+          <button type="button" id="item-dec-size">−</button>
+          <span class="item-select-qty" id="item-qty-size">0</span>
+          <button type="button" id="item-inc-size">+</button>
+        </div>
+      </div>
+
+      <div class="item-select-row" id="item-row-adopt">
+        <div class="item-select-info">
+          <span class="item-select-icon">🚀</span>
+          <span class="item-select-name">Adopt Speed Boosts</span>
+          <span class="item-select-avail" id="item-avail-adopt"></span>
+        </div>
+        <div class="item-select-controls">
+          <button type="button" id="item-dec-adopt">−</button>
+          <span class="item-select-qty" id="item-qty-adopt">0</span>
+          <button type="button" id="item-inc-adopt">+</button>
+        </div>
+      </div>
+
+      <div class="item-select-row" id="item-row-tier3">
+        <div class="item-select-info">
+          <span class="item-select-icon">🏠</span>
+          <span class="item-select-name">Shelter Tier 3</span>
+          <span class="item-select-avail" id="item-avail-tier3"></span>
+        </div>
+        <div class="item-select-controls">
+          <button type="button" id="item-dec-tier3">−</button>
+          <span class="item-select-qty" id="item-qty-tier3">0</span>
+          <button type="button" id="item-inc-tier3">+</button>
+        </div>
+      </div>
+
+      <div class="item-select-actions">
+        <button type="button" class="item-select-confirm" id="item-select-confirm-btn">Start Match</button>
+        <button type="button" class="item-select-skip" id="item-select-skip-btn">Start Without Items</button>
+      </div>
+    </div>
+  </div>
+
   <div id="abandon-confirm-popup" class="abandon-confirm-popup hidden">
     <p class="abandon-confirm-title">Start New Game?</p>
     <p class="abandon-confirm-text">This will abandon your saved match.<br>Your progress will be lost.</p>
@@ -987,6 +1132,12 @@
     <div class="top-bar">
       <span class="score" id="score">Size: 1</span>
       <span class="game-clock" id="game-clock">00:00:00</span>
+      <span class="season-badge" id="season-badge"></span>
+      <span id="team-score-hud" class="team-score-hud hidden">
+        <span class="team-score-red" id="team-score-red">Red: 0</span>
+        <span class="team-divider">|</span>
+        <span class="team-score-blue" id="team-score-blue">Blue: 0</span>
+      </span>
       <span class="timer" id="timer">5:00</span>
       <span id="ping" class="ping-display"></span>
       <div id="auth-area"></div>
@@ -1101,6 +1252,13 @@
     
     <div id="lobby-overlay" class="lobby-overlay hidden">
       <p id="lobby-message" class="lobby-message">Waiting for another player…</p>
+      <div id="team-select" class="team-select hidden">
+        <p class="team-select-label">Choose your team:</p>
+        <div class="team-select-btns">
+          <button type="button" id="team-red-btn" class="team-btn team-btn-red selected" data-team="red">Team Red</button>
+          <button type="button" id="team-blue-btn" class="team-btn team-btn-blue" data-team="blue">Team Blue</button>
+        </div>
+      </div>
       <div id="lobby-player-list" class="lobby-player-list"></div>
       <p id="lobby-countdown" class="lobby-countdown hidden"></p>
       <button type="button" id="lobby-ready-btn" class="fight-ally-btn ally-btn hidden">Ready</button>

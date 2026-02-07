@@ -115,6 +115,9 @@ export const EVENT_MILESTONES = [50, 100, 200, 300] as const;
 /** Rescue Tokens earned per pet adopted out. */
 export const TOKENS_PER_ADOPTION = 5;
 
+/** Max RT a player can bring into a single match from their equipment chest. */
+export const MAX_RT_PER_MATCH = 1000;
+
 /** Cost to build a shelter (ground at location). */
 export const SHELTER_BUILD_COST = 250;
 
@@ -211,3 +214,60 @@ export const BOSS_CAUGHT_PENALTY = 0.5;
 export const BOSS_TYCOON_REBUILD_SECONDS = 10;
 /** Time for tycoon to rebuild a cleared mill (ticks). */
 export const BOSS_TYCOON_REBUILD_TICKS = BOSS_TYCOON_REBUILD_SECONDS * TICK_RATE;
+
+// ============================================
+// SEASON CONSTANTS
+// ============================================
+
+export type Season = 'winter' | 'spring' | 'summer' | 'fall';
+
+/** Determine the current season from UTC date (Northern Hemisphere). */
+export function getCurrentSeason(): Season {
+  const month = new Date().getUTCMonth(); // 0-11
+  if (month <= 1 || month === 11) return 'winter'; // Dec, Jan, Feb
+  if (month <= 4) return 'spring';                  // Mar, Apr, May
+  if (month <= 7) return 'summer';                  // Jun, Jul, Aug
+  return 'fall';                                    // Sep, Oct, Nov
+}
+
+/** Season label for leaderboard key, e.g. "2026-Winter". Dec counts toward next year's winter. */
+export function getSeasonLabel(): string {
+  const d = new Date();
+  const season = getCurrentSeason();
+  const year = (d.getUTCMonth() === 11) ? d.getUTCFullYear() + 1 : d.getUTCFullYear();
+  return `${year}-${season.charAt(0).toUpperCase() + season.slice(1)}`;
+}
+
+/** Speed multiplier per season (Summer = baseline 1.0). */
+export const SEASON_SPEED_MULTIPLIER: Record<Season, number> = {
+  winter: 0.82,
+  spring: 0.93,
+  summer: 1.0,
+  fall: 0.93,
+};
+
+/** Extra speed multiplier inside thick vegetation patches (Spring only). */
+export const SPRING_VEGETATION_SPEED = 0.7;
+
+/** Ticks per wind gust cycle in Fall (~2s at 25 Hz). */
+export const FALL_WIND_CYCLE_TICKS = 50;
+/** Minimum wind speed multiplier (Fall). */
+export const FALL_WIND_MIN = 0.8;
+/** Maximum wind speed multiplier (Fall). */
+export const FALL_WIND_MAX = 1.2;
+
+/** Deterministic vegetation density using spatial hash — returns true if position is in a thick patch. */
+export function isInVegetationPatch(x: number, y: number): boolean {
+  const scale = 300;
+  const val = Math.sin(x / scale * 1.7 + 0.3) * Math.cos(y / scale * 2.3 + 0.7)
+            * Math.sin((x + y) / scale * 0.9);
+  return val > 0.25; // ~20% of map area
+}
+
+/** Deterministic wind multiplier from tick (Fall only). */
+export function getWindMultiplier(tick: number): number {
+  const cycle = Math.floor(tick / FALL_WIND_CYCLE_TICKS);
+  const hash = Math.sin(cycle * 12.9898 + 78.233) * 43758.5453;
+  const t = hash - Math.floor(hash); // 0..1
+  return FALL_WIND_MIN + t * (FALL_WIND_MAX - FALL_WIND_MIN);
+}

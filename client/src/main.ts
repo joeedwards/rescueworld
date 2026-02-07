@@ -1,5 +1,5 @@
 /**
- * Puppy Rescue client: browser-first, 8-directional movement, tap-to-move,
+ * Adoptar.io client: browser-first, 8-directional movement, tap-to-move,
  * prediction for local player, interpolation for others. Connects via
  * signaling -> game WebSocket.
  */
@@ -24,7 +24,14 @@ import {
   BOSS_INGREDIENT_COSTS,
   BOSS_MODE_TIME_LIMIT_TICKS,
   BOSS_TYCOON_DETECTION_RADIUS,
+  // Season constants
+  getCurrentSeason,
+  getSeasonLabel,
+  isInVegetationPatch,
+  getWindMultiplier,
+  MAX_RT_PER_MATCH,
 } from 'shared';
+import type { Season } from 'shared';
 import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED, PICKUP_TYPE_PORT, PICKUP_TYPE_BREEDER, PICKUP_TYPE_SHELTER_PORT, VAN_MAX_CAPACITY } from 'shared';
 import { PET_TYPE_CAT, PET_TYPE_DOG, PET_TYPE_BIRD, PET_TYPE_RABBIT, PET_TYPE_SPECIAL } from 'shared';
 import { BOSS_MILL_HORSE, BOSS_MILL_CAT, BOSS_MILL_DOG, BOSS_MILL_BIRD, BOSS_MILL_RABBIT } from 'shared';
@@ -38,6 +45,9 @@ import {
   decodeSnapshot,
   MSG_SNAPSHOT,
 } from 'shared';
+
+// Current season (computed at page load; can be cycled with Ctrl+Shift+Alt+8 easter egg)
+let currentSeason: Season = getCurrentSeason();
 
 // Preload images - try multiple paths for different deployment scenarios
 const breederMillImage = new Image();
@@ -230,6 +240,8 @@ const lastPetTypesById = new Map<string, number>();
 let lastSpeedBoostUntil = 0;
 let matchEndPlayed = false;
 let matchEndTokensAwarded = false;
+/** Set when matchEndInventory has strayLoss: true; used so match-over UI shows 0 RT even if snapshot lacked the field. */
+let matchEndWasStrayLoss = false;
 let growthPopUntil = 0;
 let currentRttMs = 0;
 let highLatencySince = 0;
@@ -253,6 +265,18 @@ const carriedEl = document.getElementById('carried')!;
 const tagCooldownEl = document.getElementById('tag-cooldown')!;
 const timerEl = document.getElementById('timer')!;
 const gameClockEl = document.getElementById('game-clock')!;
+const seasonBadgeEl = document.getElementById('season-badge')!;
+
+// Initialize season badge
+{
+  const SEASON_ICONS: Record<Season, string> = { winter: '\u2744', spring: '\u2740', summer: '\u2600', fall: '\u2741' };
+  const SEASON_NAMES: Record<Season, string> = { winter: 'Winter', spring: 'Spring', summer: 'Summer', fall: 'Fall' };
+  seasonBadgeEl.textContent = `${SEASON_ICONS[currentSeason]} ${SEASON_NAMES[currentSeason]}`;
+  seasonBadgeEl.className = `season-badge ${currentSeason}`;
+  // Update the Season leaderboard tab to show the season name
+  const seasonTab = document.querySelector('.leaderboard-tab[data-type="season"]') as HTMLElement | null;
+  if (seasonTab) seasonTab.textContent = `${SEASON_NAMES[currentSeason]}`;
+}
 const leaderboardEl = document.getElementById('leaderboard')!;
 const connectionOverlayEl = document.getElementById('connection-overlay')!;
 const howToPlayEl = document.getElementById('how-to-play')!;
@@ -325,6 +349,12 @@ const lobbyCountdownEl = document.getElementById('lobby-countdown')!;
 const lobbyReadyBtnEl = document.getElementById('lobby-ready-btn')!;
 const lobbyBackBtnEl = document.getElementById('lobby-back-btn')!;
 const lobbyGiftBtnEl = document.getElementById('lobby-gift-btn')!;
+const teamSelectEl = document.getElementById('team-select')!;
+const teamRedBtnEl = document.getElementById('team-red-btn')!;
+const teamBlueBtnEl = document.getElementById('team-blue-btn')!;
+const teamScoreHudEl = document.getElementById('team-score-hud')!;
+const teamScoreRedEl = document.getElementById('team-score-red')!;
+const teamScoreBlueEl = document.getElementById('team-score-blue')!;
 const observerOverlayEl = document.getElementById('observer-overlay')!;
 const observerBackBtnEl = document.getElementById('observer-back-btn')!;
 
@@ -383,8 +413,24 @@ const equipNoteEl = document.getElementById('equip-note')!;
 const karmaDisplayEl = document.getElementById('karma-display')!;
 const karmaPointsEl = document.getElementById('karma-points')!;
 
+// Item Selection Modal Elements
+const itemSelectOverlayEl = document.getElementById('item-select-overlay')!;
+const itemSelectConfirmBtn = document.getElementById('item-select-confirm-btn')!;
+const itemSelectSkipBtn = document.getElementById('item-select-skip-btn')!;
+
 // Karma state (from server)
 let currentKarmaPoints = 0;
+
+// Item selection state
+interface ItemSelection {
+  portCharges: number;
+  shelterPortCharges: number;
+  speedBoosts: number;
+  sizeBoosts: number;
+  adoptSpeedBoosts: number;
+  shelterTier3Boosts: number;
+}
+let pendingItemSelection: ItemSelection | null = null;
 
 // Inventory state (from server)
 interface Inventory {
@@ -393,6 +439,7 @@ interface Inventory {
   speedBoosts: number;
   sizeBoosts: number;
   adoptSpeedBoosts: number;
+  shelterTier3Boosts?: number;
   signedIn: boolean;
 }
 let currentInventory: Inventory = { storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, adoptSpeedBoosts: 0, signedIn: false };
@@ -556,6 +603,25 @@ const PORT_ANIMATION_DURATION = 400; // ms for each phase
 // Track previous positions to detect teleports
 const prevPlayerPositions = new Map<string, { x: number; y: number }>();
 
+// Diverse adopter appearances: skin tones, hair, and clothing for adoption animations
+interface AdopterAppearance {
+  skin: string;
+  skinStroke: string;
+  hair: string;
+  clothing: string;
+  clothingStroke: string;
+}
+const ADOPTER_APPEARANCES: AdopterAppearance[] = [
+  { skin: '#f5d5b8', skinStroke: '#c8a888', hair: '#6a4030', clothing: '#d4784a', clothingStroke: '#b05830' }, // light
+  { skin: '#f0c8a0', skinStroke: '#c8a080', hair: '#4a3020', clothing: '#5a8ab0', clothingStroke: '#3a6a90' }, // light-medium
+  { skin: '#c89060', skinStroke: '#a07048', hair: '#2a1a10', clothing: '#7a5a9a', clothingStroke: '#5a3a7a' }, // medium
+  { skin: '#a06838', skinStroke: '#805028', hair: '#1a1010', clothing: '#c85050', clothingStroke: '#a03030' }, // medium-dark
+  { skin: '#704020', skinStroke: '#503010', hair: '#0a0808', clothing: '#4aaa70', clothingStroke: '#2a8a50' }, // dark
+  { skin: '#4a2a10', skinStroke: '#3a1a08', hair: '#050404', clothing: '#e0a040', clothingStroke: '#c08020' }, // very dark
+  { skin: '#d4a878', skinStroke: '#b08858', hair: '#8a6040', clothing: '#6080c0', clothingStroke: '#4060a0' }, // olive/tan
+  { skin: '#e8c498', skinStroke: '#c0a070', hair: '#c89050', clothing: '#50b0a0', clothingStroke: '#309080' }, // warm light (blonde)
+];
+
 // Adoption animation state: people walking away with adopted pets
 interface AdoptionAnimation {
   id: string;
@@ -570,6 +636,8 @@ interface AdoptionAnimation {
   walkAngle: number;
   /** True if bird — flies free instead of leash walk */
   isBird: boolean;
+  /** Randomized appearance (skin tone, hair, clothing) */
+  appearance: AdopterAppearance;
 }
 const adoptionAnimations: AdoptionAnimation[] = [];
 const ADOPTION_ANIMATION_DURATION = 2500; // ms - walking away is slower and more cinematic
@@ -610,6 +678,7 @@ function triggerAdoptionAnimation(fromX: number, fromY: number, _toX: number, _t
       petType,
       walkAngle,
       isBird: petType === PET_TYPE_BIRD,
+      appearance: ADOPTER_APPEARANCES[Math.floor(Math.random() * ADOPTER_APPEARANCES.length)],
     });
   }
 }
@@ -652,6 +721,7 @@ type ReferralInfo = {
   tokensBonus: number;
 };
 let selectedMode: 'ffa' | 'teams' | 'solo' = 'ffa';
+let selectedTeam: 'red' | 'blue' = 'red';
 let hasSavedMatch = false;
 const pendingBoosts = { sizeBonus: 0, speedBoost: false };  // adoptSpeed is now inventory-based
 let currentDisplayName: string | null = null;
@@ -746,8 +816,10 @@ function showRelPopup(targetUserId: string, displayName: string, anchorX: number
   const current = playerRelationships.get(targetUserId);
   const popup = document.createElement('div');
   popup.className = 'rel-popup';
-  popup.style.left = `${anchorX}px`;
-  popup.style.top = `${anchorY}px`;
+  // Position off-screen first so we can measure, then clamp into viewport
+  popup.style.left = '0px';
+  popup.style.top = '0px';
+  popup.style.visibility = 'hidden';
   
   let html = `<div class="rel-popup-name">${escapeHtml(displayName)}</div><div class="rel-popup-actions">`;
   if (current !== 'friend') {
@@ -777,6 +849,23 @@ function showRelPopup(targetUserId: string, displayName: string, anchorX: number
   });
   
   document.body.appendChild(popup);
+  // Clamp popup within viewport so it doesn't go off-screen on mobile
+  const popupRect = popup.getBoundingClientRect();
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let px = anchorX;
+  let py = anchorY;
+  // If it would overflow right edge, move to left of anchor
+  if (px + popupRect.width > vw - 8) {
+    px = Math.max(8, anchorX - popupRect.width - 16);
+  }
+  // Clamp vertically
+  if (py + popupRect.height > vh - 8) {
+    py = Math.max(8, vh - popupRect.height - 8);
+  }
+  popup.style.left = `${px}px`;
+  popup.style.top = `${py}px`;
+  popup.style.visibility = 'visible';
   relPopupEl = popup;
   
   // Close on click outside
@@ -2472,6 +2561,8 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     const displayName = await getOrCreateDisplayName();
     // NOTE: Don't withdraw inventory here! The server withdraws it after validating the match.
     // This prevents inventory loss if the player tries to resume an expired match.
+    // For guests: send starting RT (capped at MAX_RT_PER_MATCH) so server can give in-game money
+    const guestRt = !isSignedIn ? Math.min(getTokens(), MAX_RT_PER_MATCH) : undefined;
     gameWs.send(JSON.stringify({ 
       type: 'mode', 
       mode: options?.mode ?? 'ffa', 
@@ -2480,16 +2571,46 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
       abandon: options?.abandon,
       rejoinMatchId: options?.rejoinMatchId,
       botsEnabled: (options?.mode === 'ffa' || options?.mode === 'teams') ? botsEnabled : undefined,
+      team: options?.mode === 'teams' ? selectedTeam : undefined,
+      guestStartingRt: guestRt,
     }));
+    // Deduct guest RT from localStorage (brought into match)
+    if (!isSignedIn && guestRt && guestRt > 0) {
+      setTokens(getTokens() - guestRt);
+    }
     if (pendingBoosts.sizeBonus > 0 || pendingBoosts.speedBoost) {
       gameWs.send(JSON.stringify({
         type: 'startingBoosts',
         sizeBonus: pendingBoosts.sizeBonus,
         speedBoost: pendingBoosts.speedBoost,
-        // adoptSpeedBoosts are loaded from inventory by the server
       }));
       pendingBoosts.sizeBonus = 0;
       pendingBoosts.speedBoost = false;
+    }
+    // Send selected equipment items (from item selection modal)
+    if (pendingItemSelection) {
+      if (isSignedIn) {
+        // Signed-in users: server withdraws selected items from inventory
+        gameWs.send(JSON.stringify({
+          type: 'selectedItems',
+          portCharges: pendingItemSelection.portCharges,
+          shelterPortCharges: pendingItemSelection.shelterPortCharges,
+          speedBoosts: pendingItemSelection.speedBoosts,
+          sizeBoosts: pendingItemSelection.sizeBoosts,
+          adoptSpeedBoosts: pendingItemSelection.adoptSpeedBoosts,
+          shelterTier3Boosts: pendingItemSelection.shelterTier3Boosts,
+        }));
+      } else {
+        // Guest: apply selected items as startingBoosts (items were purchased pre-match)
+        if (pendingItemSelection.sizeBoosts > 0 || pendingItemSelection.speedBoosts > 0) {
+          gameWs.send(JSON.stringify({
+            type: 'startingBoosts',
+            sizeBonus: pendingItemSelection.sizeBoosts,
+            speedBoost: pendingItemSelection.speedBoosts > 0,
+          }));
+        }
+      }
+      pendingItemSelection = null;
     }
     // Send selected color
     const selectedColor = getSelectedColor();
@@ -2560,9 +2681,22 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           inMatchAdoptSpeedBoosts = typeof msg.adoptSpeedBoosts === 'number' ? msg.adoptSpeedBoosts : 0;
           adoptSpeedActiveUntilTick = 0;
           adoptSpeedUsedSeconds = 0;
-          // Server withdrew inventory - update client state to reflect 0 inventory
+          // Server withdrew RT (capped) - update client state to reflect remaining inventory
           if (isSignedIn && !msg.resumed) {
-            currentInventory = { storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, adoptSpeedBoosts: 0, signedIn: true };
+            if (msg.remainingInventory) {
+              currentInventory = {
+                storedRt: msg.remainingInventory.storedRt ?? 0,
+                portCharges: msg.remainingInventory.portCharges ?? 0,
+                speedBoosts: msg.remainingInventory.speedBoosts ?? 0,
+                sizeBoosts: msg.remainingInventory.sizeBoosts ?? 0,
+                adoptSpeedBoosts: msg.remainingInventory.adoptSpeedBoosts ?? 0,
+                shelterTier3Boosts: msg.remainingInventory.shelterTier3Boosts ?? 0,
+                signedIn: true,
+              };
+            } else {
+              currentInventory = { storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, adoptSpeedBoosts: 0, signedIn: true };
+            }
+            updateEquipmentPanel();
           }
           // Show toast for starting RT from chest (if not resuming)
           if (!msg.resumed && typeof msg.startingRT === 'number' && msg.startingRT > 0) {
@@ -2616,6 +2750,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           leaderboardEl.classList.remove('show');
           matchEndPlayed = false;
           matchEndTokensAwarded = false;
+          matchEndWasStrayLoss = false;
           clearAnnouncements();
           gameWrapEl.classList.remove('visible');
           landingEl.classList.remove('hidden');
@@ -2657,6 +2792,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           leaderboardEl.classList.remove('show');
           matchEndPlayed = false;
           matchEndTokensAwarded = false;
+          matchEndWasStrayLoss = false;
           clearAnnouncements();
           gameWrapEl.classList.remove('visible');
           landingEl.classList.remove('hidden');
@@ -2695,16 +2831,18 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
             }
           }
           
-          // Update player list (only show human players in FFA lobby)
+          // Update player list (only show human players in FFA/Teams lobby)
           if (Array.isArray(msg.players) && msg.players.length > 0) {
             lobbyPlayerListEl.innerHTML = msg.players
-              .map((p: { displayName: string; id: string; userId?: string }) => {
+              .map((p: { displayName: string; id: string; userId?: string; team?: 'red' | 'blue' }) => {
                 const rel = p.userId ? playerRelationships.get(p.userId) : undefined;
                 const relClass = rel === 'friend' ? ' is-friend' : rel === 'foe' ? ' is-foe' : '';
+                const teamClass = p.team === 'red' ? ' team-red' : p.team === 'blue' ? ' team-blue' : '';
                 const relIcon = rel === 'friend' ? '<span class="rel-icon friend-icon" title="Friend"></span>' : rel === 'foe' ? '<span class="rel-icon foe-icon" title="Foe"></span>' : '';
+                const teamLabel = p.team ? ` <span style="opacity:0.7;font-size:11px">[${p.team}]</span>` : '';
                 const isMe = p.id === myPlayerId;
                 const clickAttr = (!isMe && isSignedIn && p.userId && p.userId !== currentUserId) ? ` data-user-id="${escapeHtml(p.userId)}" data-display-name="${escapeHtml(p.displayName)}" onclick="window.__showRelPopup(event)"` : '';
-                return `<div class="lobby-player${relClass}"${clickAttr}>${relIcon}${escapeHtml(p.displayName)}</div>`;
+                return `<div class="lobby-player${relClass}${teamClass}"${clickAttr}>${relIcon}${escapeHtml(p.displayName)}${teamLabel}</div>`;
               })
               .join('');
           } else {
@@ -2716,18 +2854,29 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
               lobbyOverlayEl.classList.add('hidden');
             } else {
               lobbyOverlayEl.classList.remove('hidden');
+              // Show team selection only in Teams mode lobby
+              if (selectedMode === 'teams') {
+                teamSelectEl.classList.remove('hidden');
+              } else {
+                teamSelectEl.classList.add('hidden');
+              }
               if (botsEnabled && typeof msg.playerCount === 'number' && msg.playerCount <= 1) {
-                lobbyMessageEl.textContent = 'No other players yet.';
+                lobbyMessageEl.textContent = selectedMode === 'teams' 
+                  ? 'Pick your team and start with bots.'
+                  : 'No other players yet.';
                 lobbyReadyBtnEl.classList.remove('hidden');
                 lobbyReadyBtnEl.textContent = 'Ready with Bots';
               } else {
-                lobbyMessageEl.textContent = 'Waiting for another player…';
+                lobbyMessageEl.textContent = selectedMode === 'teams'
+                  ? 'Pick your team. Waiting for players…'
+                  : 'Waiting for another player…';
                 lobbyReadyBtnEl.classList.add('hidden');
               }
               lobbyCountdownEl.classList.add('hidden');
             }
           } else if (matchPhase === 'countdown') {
             lobbyOverlayEl.classList.remove('hidden');
+            teamSelectEl.classList.add('hidden'); // Hide team select during countdown
             lobbyMessageEl.textContent = 'Match starting soon';
             lobbyCountdownEl.classList.remove('hidden');
             lobbyCountdownEl.textContent = countdownRemainingSec > 0 ? `Starting in ${countdownRemainingSec}s…` : 'Starting…';
@@ -2736,6 +2885,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
             else lobbyReadyBtnEl.textContent = 'Ready';
           } else {
             lobbyOverlayEl.classList.add('hidden');
+            teamSelectEl.classList.add('hidden');
             lobbyPlayerListEl.innerHTML = ''; // Clear when match starts
           }
         }
@@ -2783,6 +2933,35 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
             showToast(`Boss Mode failed: ${msg.reason || 'unknown'}`, 'error');
           }
         }
+        // Items applied confirmation (from item selection modal)
+        if (msg.type === 'itemsApplied') {
+          // Update remaining inventory after items were withdrawn
+          if (isSignedIn) {
+            currentInventory.portCharges = Math.max(0, currentInventory.portCharges - (msg.portCharges ?? 0));
+            currentInventory.speedBoosts = Math.max(0, currentInventory.speedBoosts - (msg.speedBoosts ?? 0));
+            currentInventory.sizeBoosts = Math.max(0, currentInventory.sizeBoosts - (msg.sizeBoosts ?? 0));
+            currentInventory.adoptSpeedBoosts = Math.max(0, currentInventory.adoptSpeedBoosts - (msg.adoptSpeedBoosts ?? 0));
+            if (currentInventory.shelterTier3Boosts != null) {
+              currentInventory.shelterTier3Boosts = Math.max(0, currentInventory.shelterTier3Boosts - (msg.shelterTier3Boosts ?? 0));
+            }
+            updateEquipmentPanel();
+          }
+          // Update in-match adopt speed boost count
+          if (typeof msg.adoptSpeedBoosts === 'number' && msg.adoptSpeedBoosts > 0) {
+            inMatchAdoptSpeedBoosts += msg.adoptSpeedBoosts;
+            updateAdoptSpeedButton();
+          }
+          // Show toast summarizing what was applied
+          const parts: string[] = [];
+          if (msg.portCharges > 0) parts.push(`${msg.portCharges} port${msg.portCharges > 1 ? 's' : ''}`);
+          if (msg.speedBoosts > 0) parts.push('speed boost');
+          if (msg.sizeBoosts > 0) parts.push(`+${msg.sizeBoosts} size`);
+          if (msg.adoptSpeedBoosts > 0) parts.push(`${msg.adoptSpeedBoosts} adopt speed`);
+          if (msg.shelterTier3Boosts > 0) parts.push(`${msg.shelterTier3Boosts} tier 3`);
+          if (parts.length > 0) {
+            showToast(`Equipment applied: ${parts.join(', ')}`, 'success');
+          }
+        }
         // Boost used confirmation
         if (msg.type === 'boostUsed') {
           if (msg.boostType === 'adoptSpeed') {
@@ -2804,6 +2983,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         // Match end inventory notification - match has ended, saved match cleared
         if (msg.type === 'matchEndInventory') {
           hasSavedMatch = false;
+          if (msg.strayLoss === true) matchEndWasStrayLoss = true;
           // Remove current match from pending list (it has ended)
           if (currentMatchId) {
             removeActiveMultiplayerMatch(currentMatchId);
@@ -2817,6 +2997,14 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
             showToast(`+${msg.karmaAwarded} Karma Point!`, 'success');
             // Refresh karma display
             fetchKarma();
+          }
+          // Teams mode: show team result toast
+          if (msg.winningTeam && msg.myTeam) {
+            if (msg.myTeam === msg.winningTeam) {
+              showToast(`Your team (${msg.myTeam === 'red' ? 'Red' : 'Blue'}) won! Full rewards earned.`, 'success');
+            } else {
+              showToast(`Your team (${msg.myTeam === 'red' ? 'Red' : 'Blue'}) lost. Rewards reduced to 1/3.`, 'error');
+            }
           }
         }
         // Match-wide announcements
@@ -3332,11 +3520,140 @@ function getInterpolatedPet(id: string): PetState | null {
 const DOT_SPACING = 36;
 const DOT_R = 1.8;
 
+// ============================================
+// SEASON VISUALS
+// ============================================
+
+// --- Snowflake particle system (Winter) ---
+interface Snowflake { x: number; y: number; r: number; speed: number; drift: number; }
+const snowflakes: Snowflake[] = [];
+const SNOWFLAKE_COUNT = 120;
+for (let i = 0; i < SNOWFLAKE_COUNT; i++) {
+  snowflakes.push({
+    x: Math.random() * 2000,
+    y: Math.random() * 2000,
+    r: 1 + Math.random() * 2.5,
+    speed: 20 + Math.random() * 40,
+    drift: (Math.random() - 0.5) * 15,
+  });
+}
+
+// --- Leaf particle system (Fall) ---
+interface Leaf { x: number; y: number; r: number; angle: number; speed: number; color: string; rotSpeed: number; }
+const leaves: Leaf[] = [];
+const LEAF_COUNT = 80;
+const LEAF_COLORS = ['#c0392b', '#e67e22', '#d4a017', '#b8860b', '#8B4513'];
+for (let i = 0; i < LEAF_COUNT; i++) {
+  leaves.push({
+    x: Math.random() * 2000,
+    y: Math.random() * 2000,
+    r: 2 + Math.random() * 3,
+    angle: Math.random() * Math.PI * 2,
+    speed: 30 + Math.random() * 50,
+    color: LEAF_COLORS[Math.floor(Math.random() * LEAF_COLORS.length)],
+    rotSpeed: (Math.random() - 0.5) * 4,
+  });
+}
+
+/** Season background colors */
+const SEASON_BG: Record<Season, string> = {
+  winter: '#b8cce0',
+  spring: '#2d7a2d',
+  summer: '#5a7a3d',
+  fall: '#4a6b3d',
+};
+
+/** Season dot colors */
+const SEASON_DOT: Record<Season, string> = {
+  winter: 'rgba(255,255,255,0.5)',
+  spring: 'rgba(255,255,255,0.3)',
+  summer: 'rgba(255,255,200,0.3)',
+  fall: 'rgba(255,240,220,0.3)',
+};
+
 function hashColor(id: string): string {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
   const hue = (h % 360);
   return `hsl(${hue}, 72%, 58%)`;
+}
+
+/** Update snowflake/leaf positions each frame (called from render). */
+function updateSeasonParticles(dt: number, cam: { x: number; y: number; w: number; h: number }): void {
+  if (currentSeason === 'winter') {
+    for (const s of snowflakes) {
+      s.y += s.speed * dt;
+      s.x += s.drift * dt;
+      // Wrap around the camera viewport
+      if (s.y > cam.y + cam.h + 20) { s.y = cam.y - 20; s.x = cam.x + Math.random() * cam.w; }
+      if (s.x < cam.x - 20) s.x = cam.x + cam.w + 10;
+      if (s.x > cam.x + cam.w + 20) s.x = cam.x - 10;
+    }
+  }
+  if (currentSeason === 'fall') {
+    const tick = latestSnapshot?.tick ?? 0;
+    const wind = getWindMultiplier(tick);
+    const windAngle = wind > 1 ? -0.5 : 0.5; // wind direction shifts
+    for (const l of leaves) {
+      l.x += (l.speed * wind * 0.8 + Math.sin(l.angle) * 10) * dt;
+      l.y += (l.speed * 0.4 + Math.cos(l.angle) * 5) * dt;
+      l.angle += l.rotSpeed * dt;
+      // Wrap around the camera viewport
+      if (l.y > cam.y + cam.h + 20) { l.y = cam.y - 20; l.x = cam.x + Math.random() * cam.w; }
+      if (l.x > cam.x + cam.w + 40) { l.x = cam.x - 30; l.y = cam.y + Math.random() * cam.h; }
+      if (l.x < cam.x - 40) { l.x = cam.x + cam.w + 20; }
+    }
+  }
+}
+
+/** Draw seasonal particles on top of the world (called after world entities, before UI). */
+function drawSeasonParticles(cam: { x: number; y: number; w: number; h: number }): void {
+  if (currentSeason === 'winter') {
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    for (const s of snowflakes) {
+      if (s.x < cam.x - 10 || s.x > cam.x + cam.w + 10) continue;
+      if (s.y < cam.y - 10 || s.y > cam.y + cam.h + 10) continue;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  if (currentSeason === 'fall') {
+    const tick = latestSnapshot?.tick ?? 0;
+    const wind = getWindMultiplier(tick);
+    // Draw wind streaks
+    ctx.save();
+    ctx.globalAlpha = 0.08 + Math.abs(wind - 1) * 0.3;
+    ctx.strokeStyle = 'rgba(200,200,200,0.5)';
+    ctx.lineWidth = 1;
+    const streakAngle = wind > 1 ? -0.3 : 0.3;
+    for (let i = 0; i < 25; i++) {
+      const sx = cam.x + (((i * 137 + tick * 2) % (cam.w + 200)) - 100);
+      const sy = cam.y + (((i * 89 + tick * 3) % (cam.h + 200)) - 100);
+      const len = 30 + Math.abs(wind - 1) * 80;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx + Math.cos(streakAngle) * len, sy + Math.sin(streakAngle) * len);
+      ctx.stroke();
+    }
+    ctx.restore();
+    // Draw leaves
+    for (const l of leaves) {
+      if (l.x < cam.x - 10 || l.x > cam.x + cam.w + 10) continue;
+      if (l.y < cam.y - 10 || l.y > cam.y + cam.h + 10) continue;
+      ctx.save();
+      ctx.translate(l.x, l.y);
+      ctx.rotate(l.angle);
+      ctx.fillStyle = l.color;
+      ctx.beginPath();
+      // Leaf shape: two curves
+      ctx.moveTo(0, -l.r);
+      ctx.quadraticCurveTo(l.r * 1.5, 0, 0, l.r);
+      ctx.quadraticCurveTo(-l.r * 1.5, 0, 0, -l.r);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
 }
 
 function drawMapBackground(cam: { x: number; y: number; w: number; h: number }): void {
@@ -3345,9 +3662,117 @@ function drawMapBackground(cam: { x: number; y: number; w: number; h: number }):
   const y0 = Math.floor((cam.y - pad) / DOT_SPACING) * DOT_SPACING;
   const x1 = Math.ceil((cam.x + cam.w + pad) / DOT_SPACING) * DOT_SPACING;
   const y1 = Math.ceil((cam.y + cam.h + pad) / DOT_SPACING) * DOT_SPACING;
-  ctx.fillStyle = '#3d6b3d';
+
+  // Season-aware background
+  ctx.fillStyle = SEASON_BG[currentSeason];
   ctx.fillRect(cam.x, cam.y, cam.w, cam.h);
-  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+
+  // Season-specific terrain patches
+  if (currentSeason === 'winter') {
+    // Ice/snow patches
+    const patchSpacing = 300;
+    const px0 = Math.floor((cam.x - patchSpacing) / patchSpacing) * patchSpacing;
+    const py0 = Math.floor((cam.y - patchSpacing) / patchSpacing) * patchSpacing;
+    const px1 = Math.ceil((cam.x + cam.w + patchSpacing) / patchSpacing) * patchSpacing;
+    const py1 = Math.ceil((cam.y + cam.h + patchSpacing) / patchSpacing) * patchSpacing;
+    for (let py = py0; py <= py1; py += patchSpacing) {
+      for (let px = px0; px <= px1; px += patchSpacing) {
+        // Deterministic placement using spatial hash
+        const hash = Math.sin(px * 0.017 + py * 0.013) * 43758.5453;
+        const t = hash - Math.floor(hash);
+        if (t > 0.55) continue; // ~55% chance of a patch
+        const patchR = 30 + t * 60;
+        const offX = (hash * 7) % patchSpacing * 0.5;
+        const offY = (hash * 13) % patchSpacing * 0.5;
+        ctx.fillStyle = t > 0.3 ? 'rgba(220,235,248,0.4)' : 'rgba(200,220,240,0.3)';
+        ctx.beginPath();
+        ctx.ellipse(px + offX, py + offY, patchR, patchR * 0.7, t * Math.PI, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  } else if (currentSeason === 'spring') {
+    // Thick vegetation patches (matching server isInVegetationPatch)
+    const vegSpacing = 60;
+    const vx0 = Math.floor((cam.x - vegSpacing) / vegSpacing) * vegSpacing;
+    const vy0 = Math.floor((cam.y - vegSpacing) / vegSpacing) * vegSpacing;
+    const vx1 = Math.ceil((cam.x + cam.w + vegSpacing) / vegSpacing) * vegSpacing;
+    const vy1 = Math.ceil((cam.y + cam.h + vegSpacing) / vegSpacing) * vegSpacing;
+    for (let vy = vy0; vy <= vy1; vy += vegSpacing) {
+      for (let vx = vx0; vx <= vx1; vx += vegSpacing) {
+        if (isInVegetationPatch(vx, vy)) {
+          ctx.fillStyle = 'rgba(20,90,20,0.25)';
+          ctx.fillRect(vx - vegSpacing / 2, vy - vegSpacing / 2, vegSpacing, vegSpacing);
+        }
+      }
+    }
+    // Small flower dots
+    const flowerSpacing = 150;
+    const fx0 = Math.floor((cam.x - flowerSpacing) / flowerSpacing) * flowerSpacing;
+    const fy0 = Math.floor((cam.y - flowerSpacing) / flowerSpacing) * flowerSpacing;
+    const fx1 = Math.ceil((cam.x + cam.w + flowerSpacing) / flowerSpacing) * flowerSpacing;
+    const fy1 = Math.ceil((cam.y + cam.h + flowerSpacing) / flowerSpacing) * flowerSpacing;
+    const flowerColors = ['#ff69b4', '#ff6347', '#ffd700', '#da70d6', '#fff'];
+    for (let fy = fy0; fy <= fy1; fy += flowerSpacing) {
+      for (let fx = fx0; fx <= fx1; fx += flowerSpacing) {
+        const fHash = Math.sin(fx * 0.031 + fy * 0.023) * 43758.5453;
+        const ft = fHash - Math.floor(fHash);
+        if (ft > 0.4) continue;
+        const color = flowerColors[Math.floor(ft * 5 * flowerColors.length) % flowerColors.length];
+        const fOx = (fHash * 11) % flowerSpacing * 0.6;
+        const fOy = (fHash * 17) % flowerSpacing * 0.6;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(fx + fOx, fy + fOy, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  } else if (currentSeason === 'summer') {
+    // Brown/dry patches
+    const drySpacing = 280;
+    const dx0 = Math.floor((cam.x - drySpacing) / drySpacing) * drySpacing;
+    const dy0 = Math.floor((cam.y - drySpacing) / drySpacing) * drySpacing;
+    const dx1 = Math.ceil((cam.x + cam.w + drySpacing) / drySpacing) * drySpacing;
+    const dy1 = Math.ceil((cam.y + cam.h + drySpacing) / drySpacing) * drySpacing;
+    for (let dy = dy0; dy <= dy1; dy += drySpacing) {
+      for (let dx = dx0; dx <= dx1; dx += drySpacing) {
+        const dHash = Math.sin(dx * 0.019 + dy * 0.011) * 43758.5453;
+        const dt = dHash - Math.floor(dHash);
+        if (dt > 0.45) continue;
+        const patchR = 25 + dt * 55;
+        const doX = (dHash * 9) % drySpacing * 0.4;
+        const doY = (dHash * 15) % drySpacing * 0.4;
+        ctx.fillStyle = dt > 0.25 ? 'rgba(160,140,80,0.2)' : 'rgba(140,120,60,0.15)';
+        ctx.beginPath();
+        ctx.ellipse(dx + doX, dy + doY, patchR, patchR * 0.65, dt * Math.PI * 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+  // Fall terrain: slight orange/brown hue patches (leaves on ground)
+  if (currentSeason === 'fall') {
+    const fallSpacing = 200;
+    const ax0 = Math.floor((cam.x - fallSpacing) / fallSpacing) * fallSpacing;
+    const ay0 = Math.floor((cam.y - fallSpacing) / fallSpacing) * fallSpacing;
+    const ax1 = Math.ceil((cam.x + cam.w + fallSpacing) / fallSpacing) * fallSpacing;
+    const ay1 = Math.ceil((cam.y + cam.h + fallSpacing) / fallSpacing) * fallSpacing;
+    for (let ay = ay0; ay <= ay1; ay += fallSpacing) {
+      for (let ax = ax0; ax <= ax1; ax += fallSpacing) {
+        const aHash = Math.sin(ax * 0.021 + ay * 0.017) * 43758.5453;
+        const at = aHash - Math.floor(aHash);
+        if (at > 0.5) continue;
+        const patchR = 20 + at * 40;
+        const aoX = (aHash * 7) % fallSpacing * 0.5;
+        const aoY = (aHash * 11) % fallSpacing * 0.5;
+        ctx.fillStyle = at > 0.3 ? 'rgba(180,120,50,0.12)' : 'rgba(160,100,40,0.1)';
+        ctx.beginPath();
+        ctx.ellipse(ax + aoX, ay + aoY, patchR, patchR * 0.7, at * Math.PI, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  // Grid dots
+  ctx.fillStyle = SEASON_DOT[currentSeason];
   for (let yy = y0; yy <= y1; yy += DOT_SPACING) {
     for (let xx = x0; xx <= x1; xx += DOT_SPACING) {
       ctx.fillRect(xx - DOT_R, yy - DOT_R, DOT_R * 2, DOT_R * 2);
@@ -4011,7 +4436,9 @@ function drawShelterWorker(
 ): void {
   // Body color: workers wear blue, volunteers wear green
   const bodyColor = isVolunteer ? '#5ab87a' : '#4a8ec9';
-  const headColor = '#f5d5b8';
+  // Pick a consistent skin tone based on position (seeded by x+y so it stays stable across frames)
+  const skinIdx = Math.abs(Math.round(x * 7 + y * 13)) % ADOPTER_APPEARANCES.length;
+  const workerSkin = ADOPTER_APPEARANCES[skinIdx];
 
   // Body (oval)
   ctx.fillStyle = bodyColor;
@@ -4023,11 +4450,11 @@ function drawShelterWorker(
   ctx.stroke();
 
   // Head
-  ctx.fillStyle = headColor;
+  ctx.fillStyle = workerSkin.skin;
   ctx.beginPath();
   ctx.arc(x, y - 4, 2.8, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = '#c8a888';
+  ctx.strokeStyle = workerSkin.skinStroke;
   ctx.lineWidth = 0.5;
   ctx.stroke();
 
@@ -5400,6 +5827,7 @@ function render(dt: number): void {
     const camX = Number.isFinite(cam.x) ? Math.max(0, Math.min(MAP_WIDTH - cam.w, cam.x)) : 0;
     const camY = Number.isFinite(cam.y) ? Math.max(0, Math.min(MAP_HEIGHT - cam.h, cam.y)) : 0;
     const safeCam = { x: camX, y: camY, w: cam.w, h: cam.h };
+    updateSeasonParticles(dt, safeCam);
     ctx.save();
     ctx.translate(-safeCam.x, -safeCam.y);
     drawMapBackground(safeCam);
@@ -5551,26 +5979,27 @@ function render(dt: number): void {
       ctx.translate(personX, personY);
 
       // -- Person sprite (similar to shelter volunteer) --
+      const ap = anim.appearance;
       // Body (oval)
-      ctx.fillStyle = '#d4784a'; // warm casual clothing
+      ctx.fillStyle = ap.clothing;
       ctx.beginPath();
       ctx.ellipse(0, 1 + headBob * 0.3, 3.5, 5, 0, 0, Math.PI * 2);
       ctx.fill();
-      ctx.strokeStyle = '#b05830';
+      ctx.strokeStyle = ap.clothingStroke;
       ctx.lineWidth = 0.6;
       ctx.stroke();
 
       // Head
-      ctx.fillStyle = '#f5d5b8';
+      ctx.fillStyle = ap.skin;
       ctx.beginPath();
       ctx.arc(0, -4.5 + headBob, 3, 0, Math.PI * 2);
       ctx.fill();
-      ctx.strokeStyle = '#c8a888';
+      ctx.strokeStyle = ap.skinStroke;
       ctx.lineWidth = 0.5;
       ctx.stroke();
 
       // Hair
-      ctx.fillStyle = '#6a4030';
+      ctx.fillStyle = ap.hair;
       ctx.beginPath();
       ctx.arc(0, -5.5 + headBob, 3, Math.PI, Math.PI * 2);
       ctx.fill();
@@ -5647,10 +6076,20 @@ function render(dt: number): void {
     }
   }
 
+  // Draw seasonal particle overlays (snowflakes, leaves, wind streaks)
+  drawSeasonParticles(safeCam);
+
   ctx.restore();
 
   const scale = 120 / MAP_WIDTH;
-  minimapCtx.fillStyle = 'rgba(45, 74, 45, 0.85)';
+  // Season-aware minimap background
+  const minimapBg: Record<Season, string> = {
+    winter: 'rgba(140, 160, 180, 0.85)',
+    spring: 'rgba(30, 80, 30, 0.85)',
+    summer: 'rgba(70, 90, 45, 0.85)',
+    fall: 'rgba(55, 75, 45, 0.85)',
+  };
+  minimapCtx.fillStyle = minimapBg[currentSeason];
   minimapCtx.fillRect(0, 0, 120, 120);
   for (let yy = 0; yy <= MAP_HEIGHT; yy += DOT_SPACING * 3) {
     for (let xx = 0; xx <= MAP_WIDTH; xx += DOT_SPACING * 3) {
@@ -6314,6 +6753,15 @@ function render(dt: number): void {
     gameClockEl.textContent = `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   }
   
+  // Team score HUD (Teams mode only)
+  if (selectedMode === 'teams' && matchPhase === 'playing' && latestSnapshot?.teamScores) {
+    teamScoreHudEl.classList.remove('hidden');
+    teamScoreRedEl.textContent = `Red: ${latestSnapshot.teamScores.red}`;
+    teamScoreBlueEl.textContent = `Blue: ${latestSnapshot.teamScores.blue}`;
+  } else {
+    teamScoreHudEl.classList.add('hidden');
+  }
+  
   // Boss mode timer overlay
   updateBossModeTimer();
   
@@ -6373,7 +6821,7 @@ function render(dt: number): void {
       if (!a.eliminated) return b.size - a.size || b.totalAdoptions - a.totalAdoptions;
       return a.totalAdoptions - b.totalAdoptions;
     });
-    const strayLoss = !!(latestSnapshot?.strayLoss);
+    const strayLoss = !!(latestSnapshot?.strayLoss || matchEndWasStrayLoss);
     const meResult = sorted.find((p) => p.id === myPlayerId);
     const mySize = meResult && !meResult.eliminated ? Math.floor(meResult.size) : 0;
     const placementBonus = [100, 50, 25];
@@ -6397,10 +6845,19 @@ function render(dt: number): void {
           : '';
     // Determine win title
     let title = 'Match over';
-    if (latestSnapshot?.strayLoss) {
+    if (latestSnapshot?.strayLoss || matchEndWasStrayLoss) {
       title = 'Match lost — too many strays!';
     } else if (iAmEliminated) {
       title = 'You were consumed';
+    } else if (selectedMode === 'teams' && latestSnapshot?.winningTeam) {
+      const myTeam = me?.team;
+      const winTeam = latestSnapshot.winningTeam;
+      const teamName = winTeam === 'red' ? 'Red' : 'Blue';
+      if (myTeam === winTeam) {
+        title = `Your team won! (Team ${teamName})`;
+      } else {
+        title = `Team ${teamName} won!`;
+      }
     } else if (latestSnapshot && latestSnapshot.winnerId) {
       const winnerId = latestSnapshot.winnerId;
       const winnerPlayer = latestSnapshot.players.find(p => p.id === winnerId);
@@ -6425,13 +6882,18 @@ function render(dt: number): void {
       const name = isMe ? 'You' : (p.displayName ?? p.id);
       const rel = getRelationshipByPlayerId(p.id);
       const relDot = rel === 'friend' ? '<span class="rel-dot rel-dot-friend"></span>' : rel === 'foe' ? '<span class="rel-dot rel-dot-foe"></span>' : '';
+      const teamTag = p.team ? `<span style="color:${p.team === 'red' ? '#e74c3c' : '#3498db'};font-weight:700"> [${p.team === 'red' ? 'R' : 'B'}]</span>` : '';
       const targetUserId = getUserIdByPlayerId(p.id);
       const markBtn = (!isMe && isSignedIn && targetUserId && targetUserId !== currentUserId)
         ? ` <button class="rel-mark-btn" data-user-id="${escapeHtml(targetUserId)}" data-display-name="${escapeHtml(p.displayName ?? p.id)}" onclick="window.__showRelPopup(event)">&#9881;</button>`
         : '';
-      return `${i + 1}. ${relDot}${escapeHtml(name)}: size ${sizeLabel(p)} (${p.totalAdoptions} adoptions)${markBtn}`;
+      return `${i + 1}. ${relDot}${escapeHtml(name)}${teamTag}: size ${sizeLabel(p)} (${p.totalAdoptions} adoptions)${markBtn}`;
     };
-    leaderboardEl.innerHTML = `<strong>${title}</strong><br><br>` + sorted.map((p, i) => playerLine(p, i)).join('<br>') + tokenLines + adHtml + '<div style="display:flex;gap:12px;margin-top:16px;"><button type="button" id="play-again-btn" class="fight-ally-btn ally-btn" style="flex:1">Play again</button><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn" style="flex:1">Back to lobby</button></div>';
+    // Team scores summary for Teams mode
+    const teamScoreLine = selectedMode === 'teams' && latestSnapshot?.teamScores
+      ? `<br><span style="color:#e74c3c;font-weight:700">Red: ${latestSnapshot.teamScores.red}</span> vs <span style="color:#3498db;font-weight:700">Blue: ${latestSnapshot.teamScores.blue}</span><br>`
+      : '';
+    leaderboardEl.innerHTML = `<strong>${title}</strong>${teamScoreLine}<br>` + sorted.map((p, i) => playerLine(p, i)).join('<br>') + tokenLines + adHtml + '<div style="display:flex;gap:12px;margin-top:16px;"><button type="button" id="play-again-btn" class="fight-ally-btn ally-btn" style="flex:1">Play again</button><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn" style="flex:1">Back to lobby</button></div>';
   } else {
     leaderboardEl.classList.remove('show');
   }
@@ -6462,6 +6924,7 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
     }
     leaderboardEl.classList.remove('show');
     matchEndPlayed = false;
+    matchEndWasStrayLoss = false;
     wasPlayerObserver = false; // Reset observer state for new match
     latestSnapshot = null;
     connectionOverlayEl.classList.remove('hidden');
@@ -6488,6 +6951,7 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
     leaderboardEl.classList.remove('show');
     matchEndPlayed = false;
     matchEndTokensAwarded = false;
+    matchEndWasStrayLoss = false;
     latestSnapshot = null;
     currentMatchId = null;
     gameWrapEl.classList.remove('visible');
@@ -6541,6 +7005,28 @@ leaderboardEl.addEventListener('touchend', (e) => {
   e.stopPropagation();
   handleLeaderboardButton(btn);
 }, { passive: false, capture: true });
+
+// --- Lobby: Team selection buttons ---
+teamRedBtnEl.addEventListener('click', () => {
+  if (selectedTeam === 'red') return;
+  selectedTeam = 'red';
+  teamRedBtnEl.classList.add('selected');
+  teamBlueBtnEl.classList.remove('selected');
+  // Notify server of team change during lobby
+  if (gameWs && gameWs.readyState === WebSocket.OPEN && matchPhase === 'lobby') {
+    gameWs.send(JSON.stringify({ type: 'changeTeam', team: 'red' }));
+  }
+});
+teamBlueBtnEl.addEventListener('click', () => {
+  if (selectedTeam === 'blue') return;
+  selectedTeam = 'blue';
+  teamBlueBtnEl.classList.add('selected');
+  teamRedBtnEl.classList.remove('selected');
+  // Notify server of team change during lobby
+  if (gameWs && gameWs.readyState === WebSocket.OPEN && matchPhase === 'lobby') {
+    gameWs.send(JSON.stringify({ type: 'changeTeam', team: 'blue' }));
+  }
+});
 
 // --- Lobby: Ready button ---
 lobbyReadyBtnEl.addEventListener('click', () => {
@@ -6812,6 +7298,23 @@ document.addEventListener('keydown', (e) => {
       gameWs.send(JSON.stringify({ type: 'useShelterPort' }));
     }
   }
+  // Easter egg: Cycle season visuals (Ctrl+Shift+Alt+*) - client-side only, cosmetic
+  if (e.ctrlKey && e.shiftKey && e.altKey && (e.key === '*' || e.key === '8')) {
+    e.preventDefault();
+    const SEASON_ORDER: Season[] = ['winter', 'spring', 'summer', 'fall'];
+    const SEASON_NAMES_EE: Record<Season, string> = { winter: 'Winter', spring: 'Spring', summer: 'Summer', fall: 'Fall' };
+    const SEASON_ICONS_EE: Record<Season, string> = { winter: '\u2744', spring: '\u2740', summer: '\u2600', fall: '\u2741' };
+    const idx = SEASON_ORDER.indexOf(currentSeason);
+    currentSeason = SEASON_ORDER[(idx + 1) % SEASON_ORDER.length];
+    // Update HUD badge
+    seasonBadgeEl.textContent = `${SEASON_ICONS_EE[currentSeason]} ${SEASON_NAMES_EE[currentSeason]}`;
+    seasonBadgeEl.className = `season-badge ${currentSeason}`;
+    // Update leaderboard tab
+    const seasonTabEE = document.querySelector('.leaderboard-tab[data-type="season"]') as HTMLElement | null;
+    if (seasonTabEE) seasonTabEE.textContent = SEASON_NAMES_EE[currentSeason];
+    showToast(`Season switched to ${SEASON_NAMES_EE[currentSeason]} ${SEASON_ICONS_EE[currentSeason]}`, 'info');
+    return;
+  }
   // Debug: Force boss mode (Ctrl+Shift+B) - check BEFORE regular B handler
   if (e.ctrlKey && e.shiftKey && (e.key === 'b' || e.key === 'B')) {
     e.preventDefault();
@@ -6982,6 +7485,7 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
   leaderboardEl.classList.remove('show');
   matchEndPlayed = false;
   matchEndTokensAwarded = false;
+  matchEndWasStrayLoss = false;
   // Clear any pending announcements/banners immediately
   clearAnnouncements();
   gameWrapEl.classList.remove('visible');
@@ -7137,6 +7641,117 @@ referralClaimBtn.addEventListener('click', async () => {
   }
 });
 
+// --- Item Selection Modal Logic ---
+
+/** Check if player has any equipment items (non-RT) in their chest */
+function playerHasEquipmentItems(): boolean {
+  if (isSignedIn) {
+    return (currentInventory.portCharges > 0 || currentInventory.speedBoosts > 0 ||
+            currentInventory.sizeBoosts > 0 || currentInventory.adoptSpeedBoosts > 0 ||
+            (currentInventory.shelterTier3Boosts ?? 0) > 0);
+  }
+  // Guests: check pendingBoosts (bought from Buy buttons)
+  return pendingBoosts.sizeBonus > 0 || pendingBoosts.speedBoost;
+}
+
+/** Show item selection modal and return a promise that resolves with the selection */
+function showItemSelectionModal(): Promise<ItemSelection> {
+  return new Promise((resolve) => {
+    // Current quantities available
+    const avail = {
+      ports: isSignedIn ? currentInventory.portCharges : 0,
+      speed: isSignedIn ? currentInventory.speedBoosts : (pendingBoosts.speedBoost ? 1 : 0),
+      size: isSignedIn ? currentInventory.sizeBoosts : pendingBoosts.sizeBonus,
+      adopt: isSignedIn ? currentInventory.adoptSpeedBoosts : 0,
+      tier3: isSignedIn ? (currentInventory.shelterTier3Boosts ?? 0) : 0,
+    };
+
+    // Selected quantities (default to all)
+    const selected = {
+      ports: avail.ports,
+      speed: avail.speed,
+      size: avail.size,
+      adopt: avail.adopt,
+      tier3: avail.tier3,
+    };
+
+    // Helper to update row visibility and display
+    function updateRow(key: 'ports' | 'speed' | 'size' | 'adopt' | 'tier3') {
+      const row = document.getElementById(`item-row-${key}`)!;
+      const qtyEl = document.getElementById(`item-qty-${key}`)!;
+      const availEl = document.getElementById(`item-avail-${key}`)!;
+      const decBtn = document.getElementById(`item-dec-${key}`) as HTMLButtonElement;
+      const incBtn = document.getElementById(`item-inc-${key}`) as HTMLButtonElement;
+      if (avail[key] <= 0) {
+        row.classList.add('hidden');
+        return;
+      }
+      row.classList.remove('hidden');
+      availEl.textContent = `(have ${avail[key]})`;
+      qtyEl.textContent = String(selected[key]);
+      decBtn.disabled = selected[key] <= 0;
+      incBtn.disabled = selected[key] >= avail[key];
+    }
+
+    function updateAll() {
+      updateRow('ports');
+      updateRow('speed');
+      updateRow('size');
+      updateRow('adopt');
+      updateRow('tier3');
+    }
+
+    // Wire up +/- buttons
+    const keys = ['ports', 'speed', 'size', 'adopt', 'tier3'] as const;
+    const cleanupFns: (() => void)[] = [];
+    for (const key of keys) {
+      const decBtn = document.getElementById(`item-dec-${key}`)!;
+      const incBtn = document.getElementById(`item-inc-${key}`)!;
+      const onDec = () => { if (selected[key] > 0) { selected[key]--; updateAll(); } };
+      const onInc = () => { if (selected[key] < avail[key]) { selected[key]++; updateAll(); } };
+      decBtn.addEventListener('click', onDec);
+      incBtn.addEventListener('click', onInc);
+      cleanupFns.push(() => { decBtn.removeEventListener('click', onDec); incBtn.removeEventListener('click', onInc); });
+    }
+
+    updateAll();
+    itemSelectOverlayEl.classList.remove('hidden');
+
+    const cleanup = () => {
+      itemSelectOverlayEl.classList.add('hidden');
+      cleanupFns.forEach((fn) => fn());
+      itemSelectConfirmBtn.removeEventListener('click', onConfirm);
+      itemSelectSkipBtn.removeEventListener('click', onSkip);
+    };
+
+    const onConfirm = () => {
+      cleanup();
+      resolve({
+        portCharges: selected.ports,
+        shelterPortCharges: 0,
+        speedBoosts: selected.speed,
+        sizeBoosts: selected.size,
+        adoptSpeedBoosts: selected.adopt,
+        shelterTier3Boosts: selected.tier3,
+      });
+    };
+    const onSkip = () => {
+      cleanup();
+      resolve({
+        portCharges: 0,
+        shelterPortCharges: 0,
+        speedBoosts: 0,
+        sizeBoosts: 0,
+        adoptSpeedBoosts: 0,
+        shelterTier3Boosts: 0,
+      });
+    };
+
+    itemSelectConfirmBtn.addEventListener('click', onConfirm);
+    itemSelectSkipBtn.addEventListener('click', onSkip);
+  });
+}
+
 function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boolean; resume?: boolean; rejoinMatchId?: string }): void {
   // Request fullscreen immediately while still in user gesture context
   enterMobileFullscreen();
@@ -7144,25 +7759,44 @@ function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boole
   stopServerClock();
   stopMatchClockUpdates();
   stopMatchPolling();
-  landingEl.classList.add('hidden');
-  connectionOverlayEl.classList.remove('hidden');
-  connectionOverlayEl.innerHTML = (options.resume || options.rejoinMatchId)
-    ? '<h2>Resuming…</h2><p>Loading your saved match.</p>'
-    : '<h2>Connecting…</h2><p>Waiting for game server.</p>';
-  authAreaEl.classList.add('hidden');
-  connect({ mode: options.mode, abandon: options.abandon, rejoinMatchId: options.rejoinMatchId })
-    .then(() => {
-      connectionOverlayEl.classList.add('hidden');
-      gameWrapEl.classList.add('visible');
-      if (musicToggleEl) musicToggleEl.checked = getMusicEnabled();
-      if (vanSoundSelectEl) vanSoundSelectEl.value = getVanSoundType();
-      requestAnimationFrame(tick);
-    })
-    .catch((err: Error) => {
-      showConnectionError(err.message || 'Connection failed.');
-      exitMobileFullscreen(); // Exit fullscreen on connection error
-      authAreaEl.classList.remove('hidden');
+
+  const doConnect = () => {
+    landingEl.classList.add('hidden');
+    connectionOverlayEl.classList.remove('hidden');
+    connectionOverlayEl.innerHTML = (options.resume || options.rejoinMatchId)
+      ? '<h2>Resuming…</h2><p>Loading your saved match.</p>'
+      : '<h2>Connecting…</h2><p>Waiting for game server.</p>';
+    authAreaEl.classList.add('hidden');
+    connect({ mode: options.mode, abandon: options.abandon, rejoinMatchId: options.rejoinMatchId })
+      .then(() => {
+        connectionOverlayEl.classList.add('hidden');
+        gameWrapEl.classList.add('visible');
+        if (musicToggleEl) musicToggleEl.checked = getMusicEnabled();
+        if (vanSoundSelectEl) vanSoundSelectEl.value = getVanSoundType();
+        requestAnimationFrame(tick);
+      })
+      .catch((err: Error) => {
+        showConnectionError(err.message || 'Connection failed.');
+        exitMobileFullscreen(); // Exit fullscreen on connection error
+        authAreaEl.classList.remove('hidden');
+      });
+  };
+
+  // Show item selection modal if player has equipment items (skip for resume/rejoin)
+  if (!options.resume && !options.rejoinMatchId && playerHasEquipmentItems()) {
+    showItemSelectionModal().then((selection) => {
+      pendingItemSelection = selection;
+      // For guests: clear pendingBoosts since they chose via modal
+      if (!isSignedIn) {
+        pendingBoosts.sizeBonus = 0;
+        pendingBoosts.speedBoost = false;
+      }
+      doConnect();
     });
+  } else {
+    pendingItemSelection = null;
+    doConnect();
+  }
 }
 
 const resumeMatchBtnEl = document.getElementById('resume-match-btn');
@@ -8900,15 +9534,19 @@ function updateEquipmentPanel(): void {
   const hasSpeed = pendingBoosts.speedBoost || currentInventory.speedBoosts > 0;
   equipSpeedEl.textContent = hasSpeed ? '✓' : '0';
   
-  // Size+ from pending boosts (per-match, not persisted)
-  equipSizeEl.textContent = pendingBoosts.sizeBonus > 0 ? `+${pendingBoosts.sizeBonus}` : '0';
+  // Size: from inventory (signed-in) or pendingBoosts (guest)
+  const sizeCount = isSignedIn ? currentInventory.sizeBoosts : pendingBoosts.sizeBonus;
+  equipSizeEl.textContent = sizeCount > 0 ? `+${sizeCount}` : '0';
   
   // Adopt speed boosts from inventory (use during match for 60s each)
   equipAdoptSpeedEl.textContent = String(currentInventory.adoptSpeedBoosts ?? 0);
   
   if (currentInventory.signedIn) {
-    if (displayRt > 0 || currentInventory.portCharges > 0 || pendingBoosts.sizeBonus > 0 || currentInventory.adoptSpeedBoosts > 0) {
-      equipNoteEl.textContent = 'Ready for next match!';
+    const hasItems = displayRt > 0 || currentInventory.portCharges > 0 || 
+                     currentInventory.sizeBoosts > 0 || currentInventory.adoptSpeedBoosts > 0 ||
+                     currentInventory.speedBoosts > 0;
+    if (hasItems) {
+      equipNoteEl.textContent = `Up to ${MAX_RT_PER_MATCH} RT auto-applied per match`;
     } else {
       equipNoteEl.textContent = 'Earn tokens by winning matches!';
     }

@@ -48,6 +48,8 @@ export interface PlayerState {
     shelterId?: string;
     /** True if player has purchased permanent van speed upgrade. */
     vanSpeedUpgrade?: boolean;
+    /** Team assignment in Teams mode ('red' or 'blue'). Undefined in FFA/Solo. */
+    team?: 'red' | 'blue';
 }
 export declare const PICKUP_TYPE_GROWTH = 0;
 export declare const PICKUP_TYPE_SPEED = 1;
@@ -246,6 +248,10 @@ export interface MatchEndInventoryMessage {
     strayLoss: boolean;
     /** Karma points awarded (1 for winner in FFA/Teams, 0 otherwise) */
     karmaAwarded?: number;
+    /** Winning team in Teams mode. Undefined in FFA/Solo. */
+    winningTeam?: 'red' | 'blue';
+    /** This player's team in Teams mode. Undefined in FFA/Solo. */
+    myTeam?: 'red' | 'blue';
 }
 export interface GameSnapshot {
     tick: number;
@@ -277,4 +283,11 @@ export interface GameSnapshot {
     /** Boss mode state (solo only) */
     bossMode?: BossModeState;
     stateHash?: string;
+    /** Team scores in Teams mode. Undefined in FFA/Solo. */
+    teamScores?: {
+        red: number;
+        blue: number;
+    };
+    /** Winning team in Teams mode (set when match ends). Undefined in FFA/Solo. */
+    winningTeam?: 'red' | 'blue';
 }
