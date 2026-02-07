@@ -254,7 +254,7 @@ export interface GameSnapshot {
     matchEndedEarly?: boolean;
     /** ID of the winner (reached adoption milestone). */
     winnerId?: string;
-    /** True if match ended due to >3000 strays (loss for all, no RT). */
+    /** True if match ended due to >2000 strays (loss for all, no RT). */
     strayLoss?: boolean;
     /** Total adoptions across all players in this match. */
     totalMatchAdoptions?: number;

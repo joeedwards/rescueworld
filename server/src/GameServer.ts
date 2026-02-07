@@ -110,8 +110,9 @@ function restoreSavedFfaMatches(): void {
           continue;
         }
         
-        // Account for paused time since server shutdown
-        world.recordResume();
+        // Keep match frozen until a human player rejoins.
+        // Do NOT call world.recordResume() here — the pause duration should
+        // include server downtime + time waiting for a human to rejoin.
         
         const playerUserIds: Array<{ playerId: string; userId: string }> = JSON.parse(saved.player_user_ids);
         
@@ -125,7 +126,7 @@ function restoreSavedFfaMatches(): void {
           cpuIds: new Set(),
           readySet: new Set(),
           soloUserId: undefined,
-          frozen: false,
+          frozen: true,
           playerUserIds: new Map(),
           fightAllyChoices: new Map(),
           allyRequests: new Map(),
@@ -672,12 +673,14 @@ function removePlayerFromMatch(playerId: string, matchId: string): void {
     }
     
     // Check if all human players are now disconnected - pause match if so
+    // Only pause if there are NO bots; bots keep the match running on their own
     const humanPlayerIds = [...match.playerUserIds.keys()].filter(id => !id.startsWith('cpu-'));
     const anyHumanConnected = humanPlayerIds.some(id => match.players.has(id));
-    if (!anyHumanConnected && !match.frozen) {
+    const hasBots = match.cpuIds.size > 0;
+    if (!anyHumanConnected && !hasBots && !match.frozen) {
       match.world.recordPause();
       match.frozen = true;
-      log(`FFA/Teams match ${matchId} paused - all human players disconnected`);
+      log(`FFA/Teams match ${matchId} paused - all human players disconnected (no bots)`);
     }
     return;
   }
@@ -1556,15 +1559,17 @@ setInterval(() => {
         }
       } else if (match.phase === 'playing') {
         // FFA/Teams: check if all human players are disconnected - pause if so
+        // Only pause if there are NO bots; bots keep the match running on their own
         if (match.mode === 'ffa' || match.mode === 'teams') {
           const humanPlayerIds = [...match.playerUserIds.keys()].filter(id => !id.startsWith('cpu-'));
           const allDisconnected = humanPlayerIds.length > 0 && humanPlayerIds.every(id => !match.players.has(id));
+          const hasBots = match.cpuIds.size > 0;
           
-          if (allDisconnected && !match.frozen) {
-            // Pause the match - all humans disconnected
+          if (allDisconnected && !hasBots && !match.frozen) {
+            // Pause the match - all humans disconnected and no bots to keep playing
             match.world.recordPause();
             match.frozen = true;
-            log(`FFA/Teams match ${matchId} paused - all human players disconnected`);
+            log(`FFA/Teams match ${matchId} paused - all human players disconnected (no bots)`);
           } else if (!allDisconnected && match.frozen) {
             // Resume when someone connects
             match.world.recordResume();

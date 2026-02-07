@@ -179,7 +179,7 @@ export class World {
   
   // Timerless game mechanics
   private winnerId: string | null = null;
-  private strayLoss = false; // True when match ended due to >3000 strays (no RT, no bonus)
+  private strayLoss = false; // True when match ended due to >2000 strays (no RT, no bonus)
   private totalMatchAdoptions = 0;
   private lastGlobalAdoptionTick = 0;
   private scarcityLevel = 0;
@@ -283,7 +283,7 @@ export class World {
   
   // Match-wide announcements queue
   private pendingAnnouncements: string[] = [];
-  /** Stray count thresholds for which we have already shown a warning (600, 1200, 2500). */
+  /** Stray count thresholds for which we have already shown a warning (400, 1000, 1700). */
   private strayWarnings = new Set<number>();
 
   // Adoption events - timed events with pet type requirements
@@ -2159,21 +2159,21 @@ export class World {
     // Stray count for loss and warnings
     const strayCountVictory = Array.from(this.pets.values()).filter((p) => p.insideShelterId === null).length;
     if (!this.matchEndedEarly) {
-      if (strayCountVictory >= 600 && !this.strayWarnings.has(600)) {
-        this.strayWarnings.add(600);
-        this.pendingAnnouncements.push('Warning: 600 strays on the map! Rescue more pets!');
+      if (strayCountVictory >= 400 && !this.strayWarnings.has(400)) {
+        this.strayWarnings.add(400);
+        this.pendingAnnouncements.push('Warning: 400 strays on the map! Rescue more pets!');
       }
-      if (strayCountVictory >= 1500 && !this.strayWarnings.has(1500)) {
-        this.strayWarnings.add(1500);
-        this.pendingAnnouncements.push('Danger: 1500 strays! The situation is getting critical!');
+      if (strayCountVictory >= 1000 && !this.strayWarnings.has(1000)) {
+        this.strayWarnings.add(1000);
+        this.pendingAnnouncements.push('Danger: 1,000 strays! The situation is getting critical!');
       }
-      if (strayCountVictory >= 2500 && !this.strayWarnings.has(2500)) {
-        this.strayWarnings.add(2500);
-        this.pendingAnnouncements.push('URGENT: 2500 strays! Hurry and rescue more - game over at 3,000!');
+      if (strayCountVictory >= 1700 && !this.strayWarnings.has(1700)) {
+        this.strayWarnings.add(1700);
+        this.pendingAnnouncements.push('URGENT: 1,700 strays! Hurry and rescue more - game over at 2,000!');
       }
     }
-    // Loss check: >3000 strays = match over, no RT, no bonus
-    if (!this.matchEndedEarly && strayCountVictory > 3000) {
+    // Loss check: >2000 strays = match over, no RT, no bonus
+    if (!this.matchEndedEarly && strayCountVictory > 2000) {
       this.matchEndedEarly = true;
       this.matchEndAt = this.tick;
       this.winnerId = null;
