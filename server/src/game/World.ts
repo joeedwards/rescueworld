@@ -738,7 +738,7 @@ export class World {
     }
     
     // Check if van is near the shelter (within transfer range)
-    const sr = shelterVisualRadius(targetShelter.size);
+    const sr = Math.min(shelterVisualRadius(targetShelter.size), 300);
     const transferRange = sr + 100; // Can transfer from slightly outside shelter
     const dx = van.x - targetShelter.x;
     const dy = van.y - targetShelter.y;
@@ -981,7 +981,7 @@ export class World {
       if (shelter.ownerId === p.id) continue;
       if (this.isAlly(p.id, shelter.ownerId, this.lastAllyPairs)) continue;
       
-      const shelterR = shelterVisualRadius(shelter.size);
+      const shelterR = Math.min(shelterVisualRadius(shelter.size), 400);
       const dangerRadius = shelterR + 100; // Stay away from enemy shelters
       const d = dist(p.x, p.y, shelter.x, shelter.y);
       if (d < dangerRadius) {
@@ -1009,7 +1009,7 @@ export class World {
         if (!this.isAlly(p.id, other.id, this.lastAllyPairs)) continue;
         const allyShelter = this.getPlayerShelter(other.id);
         if (allyShelter && allyShelter.petsInside.length < shelterMaxPets(other.size)) {
-          const shelterR = shelterVisualRadius(allyShelter.size);
+          const shelterR = Math.min(shelterVisualRadius(allyShelter.size), 300);
           const d = dist(p.x, p.y, allyShelter.x, allyShelter.y);
           if (d <= shelterR) {
             // At ally shelter - stop to let pet transfer happen
@@ -1708,7 +1708,7 @@ export class World {
             // Check if position is inside a player shelter
             let insideShelter = false;
             for (const shelter of this.shelters.values()) {
-              const playerShelterR = shelterVisualRadius(shelter.size) + 50; // Capped visual radius + margin
+              const playerShelterR = Math.min(shelterVisualRadius(shelter.size), 400) + 50; // Capped for gameplay
               const dx = newX - shelter.x;
               const dy = newY - shelter.y;
               if (dx * dx + dy * dy < playerShelterR * playerShelterR) {
@@ -1830,7 +1830,7 @@ export class World {
       if (this.millInCombat.has(breederShelterId)) continue;
       for (const playerShelter of this.shelters.values()) {
         const bsr = 40 + breederShelter.size * 0.5; // Breeder shelter radius
-        const psr = shelterVisualRadius(playerShelter.size); // Use capped visual radius for combat
+        const psr = Math.min(shelterVisualRadius(playerShelter.size), 400); // Capped for gameplay
         
         if (!aabbOverlap(breederShelter.x, breederShelter.y, bsr, 
                          playerShelter.x, playerShelter.y, psr)) continue;
@@ -1978,7 +1978,7 @@ export class World {
       for (const shelter of this.shelters.values()) {
         if (shelter.ownerId === p.id) continue; // Don't collide with own shelter
         if (this.isAlly(p.id, shelter.ownerId, this.lastAllyPairs)) continue; // Allies can enter each other's shelters
-        const sr = shelterVisualRadius(shelter.size);
+        const sr = Math.min(shelterVisualRadius(shelter.size), 400);
         if (!aabbOverlap(nx, ny, radius, shelter.x, shelter.y, sr)) continue;
         const penX = radius + sr - Math.abs(nx - shelter.x);
         const penY = radius + sr - Math.abs(ny - shelter.y);
@@ -2027,8 +2027,8 @@ export class World {
           continue;
         }
         // Use shelter positions and sizes for combat detection
-        const ra = shelterVisualRadius(shelterA.size);
-        const rb = shelterVisualRadius(shelterB.size);
+        const ra = Math.min(shelterVisualRadius(shelterA.size), 400);
+        const rb = Math.min(shelterVisualRadius(shelterB.size), 400);
         if (!aabbOverlap(shelterA.x, shelterA.y, ra, shelterB.x, shelterB.y, rb)) {
           this.combatOverlapTicks.delete(key);
           continue;
