@@ -25,7 +25,7 @@ import {
 } from './referrals.js';
 import { getDailyGiftStatus, claimDailyGift, grantRegistrationGift, REGISTRATION_GIFT } from './dailyGifts.js';
 import { getLeaderboard, getUserRank } from './leaderboard.js';
-import { getInventory, depositAfterMatch, withdrawForMatch, purchaseBoost, BoostType, BOOST_PRICES } from './inventory.js';
+import { getInventory, depositAfterMatch, withdrawForMatch } from './inventory.js';
 import { recordMatchWin, recordRtEarned, updateReputationOnQuit } from './leaderboard.js';
 import { getGameStats } from './gameStats.js';
 import { getKarmaBalance, getKarmaInfo, awardKarmaPoints, getKarmaHistory } from './karmaService.js';
@@ -521,12 +521,19 @@ app.get('/api/user/:userId/matches', (req: Request, res: Response) => {
 // Inventory endpoints
 app.get('/api/inventory', (req: Request, res: Response) => {
   const userId = req.signedCookies?.session;
-  if (!userId) {
-    res.json({ storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, signedIn: false });
+  if (userId) {
+    const inventory = getInventory(userId);
+    res.json({ ...inventory, signedIn: true });
     return;
   }
-  const inventory = getInventory(userId);
-  res.json({ ...inventory, signedIn: true });
+  // Guest with guest_id cookie: return their server-side inventory
+  const guestId = req.signedCookies?.guest_id;
+  if (guestId) {
+    const inventory = getInventory(guestId);
+    res.json({ ...inventory, signedIn: false });
+    return;
+  }
+  res.json({ storedRt: 0, portCharges: 0, speedBoosts: 0, sizeBoosts: 0, signedIn: false });
 });
 
 // Withdraw inventory for match start (clears stored items)
@@ -575,31 +582,6 @@ app.post('/api/inventory/deposit', (req: Request, res: Response) => {
   res.json({ success: true, inventory });
 });
 
-// Purchase a boost using stored RT
-app.post('/api/inventory/purchase-boost', (req: Request, res: Response) => {
-  const userId = req.signedCookies?.session;
-  if (!userId) {
-    res.status(401).json({ error: 'not_signed_in' });
-    return;
-  }
-  
-  const { boostType } = req.body as { boostType?: string };
-  
-  if (!boostType || !BOOST_PRICES[boostType as BoostType]) {
-    res.status(400).json({ error: 'invalid_boost_type', validTypes: Object.keys(BOOST_PRICES) });
-    return;
-  }
-  
-  const result = purchaseBoost(userId, boostType as BoostType);
-  
-  if (!result.success) {
-    res.status(400).json({ error: result.error, inventory: result.inventory });
-    return;
-  }
-  
-  log(`Boost purchased for ${userId}: ${boostType}`);
-  res.json({ success: true, inventory: result.inventory });
-});
 
 // Karma Points API - shared across games (Rescue World / Shelter Sim)
 

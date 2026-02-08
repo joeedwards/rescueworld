@@ -151,12 +151,30 @@ function clampReputation(value: number): number {
 }
 
 /**
+ * Ensure a guest user has a row in the users table so they can appear on leaderboards.
+ * No-op for non-guest users (they already have a users row from auth).
+ */
+export function ensureGuestUser(userId: string, displayName: string): void {
+  if (!userId.startsWith('guest-')) return; // Registered users already have a row
+  const conn = db();
+  const existing = conn.prepare('SELECT id FROM users WHERE id = ?').get(userId);
+  if (existing) {
+    // Update display name in case it changed
+    conn.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(displayName, userId);
+    return;
+  }
+  const referralCode = 'g-' + userId.replace('guest-', '').slice(0, 12) + '-' + Math.random().toString(36).slice(2, 6);
+  conn.prepare(
+    'INSERT OR IGNORE INTO users (id, provider, provider_id, email, display_name, referral_code, created_at) VALUES (?, ?, ?, NULL, ?, ?, ?)'
+  ).run(userId, 'guest', userId, displayName, referralCode, Date.now());
+  log(`Created guest user record for ${userId} (${displayName})`);
+}
+
+/**
  * Formula B: on adoption, Reputation += 2*(Q - 1). Ideal matches raise it, poor lower it.
  * Returns new reputation after update.
  */
 export function updateReputationOnAdoption(userId: string, qualityMultiplier: number): number {
-  // Guest users don't have a row in the users table; skip to avoid FK violation
-  if (userId.startsWith('guest-')) return REPUTATION_DEFAULT;
   const conn = db();
   const row = conn.prepare('SELECT reputation FROM player_stats WHERE user_id = ?').get(userId) as { reputation: number } | undefined;
   const current = row ? clampReputation(row.reputation) : REPUTATION_DEFAULT;
@@ -226,8 +244,6 @@ export function updateReputationOnEventPodium(userId: string): number {
  * Record a match win for a user
  */
 export function recordMatchWin(userId: string, rtEarned: number): void {
-  // Guest users don't have a row in the users table; skip to avoid FK violation
-  if (userId.startsWith('guest-')) return;
   const today = getTodayUTC();
   const conn = db();
   
@@ -286,8 +302,6 @@ export function recordMatchWin(userId: string, rtEarned: number): void {
  * Record RT earned (even without winning) - also tracks daily participation
  */
 export function recordRtEarned(userId: string, rtEarned: number): void {
-  // Guest users don't have a row in the users table; skip to avoid FK violation
-  if (userId.startsWith('guest-')) return;
   const today = getTodayUTC();
   const thisWeek = getCurrentWeekUTC();
   const thisSeason = getCurrentSeasonUTC();
@@ -341,8 +355,6 @@ export function recordRtEarned(userId: string, rtEarned: number): void {
  * Record a match loss (or quit): increment games_played, losses, and add RT earned.
  */
 export function recordMatchLoss(userId: string, rtEarned: number): void {
-  // Guest users don't have a row in the users table; skip to avoid FK violation
-  if (userId.startsWith('guest-')) return;
   const today = getTodayUTC();
   const thisWeek = getCurrentWeekUTC();
   const thisSeason = getCurrentSeasonUTC();

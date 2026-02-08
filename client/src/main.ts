@@ -186,6 +186,7 @@ function enterMobileFullscreen(): void {
 
 /** Exit fullscreen when returning to lobby on mobile */
 function exitMobileFullscreen(): void {
+  releaseWakeLock();
   if (!isMobileBrowser || isIOS) return;
   try {
     if (document.fullscreenElement) {
@@ -202,6 +203,26 @@ function exitMobileFullscreen(): void {
   } catch {
     // Fullscreen exit failed
   }
+}
+
+// --- Screen Wake Lock (prevent mobile sleep during gameplay) ---
+let wakeLockSentinel: WakeLockSentinel | null = null;
+
+async function requestWakeLock(): Promise<void> {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    wakeLockSentinel = await navigator.wakeLock.request('screen');
+    wakeLockSentinel.addEventListener('release', () => {
+      wakeLockSentinel = null;
+    });
+  } catch {
+    // Wake lock request failed (low battery, etc.) - not critical
+  }
+}
+
+function releaseWakeLock(): void {
+  wakeLockSentinel?.release();
+  wakeLockSentinel = null;
 }
 
 // --- Virtual joystick state ---
@@ -694,7 +715,7 @@ const TOKENS_KEY = 'rescueworld_tokens';
 const COLOR_KEY = 'rescueworld_color';
 const UNLOCKED_COLORS_KEY = 'rescueworld_unlocked_colors';
 // Base prices for speed and adopt speed boosts
-const BOOST_PRICES = { speed: 30, adoptSpeed: 40 } as const;
+const BOOST_PRICES = { speed: 30 } as const;
 
 // Scaling prices for size boosts based on current pending size bonus
 function getSizeBoostPrice(currentSizeBonus: number): number {
@@ -721,6 +742,7 @@ type ReferralInfo = {
   tokensBonus: number;
 };
 let selectedMode: 'ffa' | 'teams' | 'solo' = 'ffa';
+let currentMatchMode: 'ffa' | 'teams' | 'solo' = 'ffa'; // Actual mode from server (vs selectedMode which is UI state)
 let selectedTeam: 'red' | 'blue' = 'red';
 let hasSavedMatch = false;
 const pendingBoosts = { sizeBonus: 0, speedBoost: false };  // adoptSpeed is now inventory-based
@@ -1197,8 +1219,9 @@ function setTokens(n: number): void {
   localStorage.setItem(TOKENS_KEY, String(Math.max(0, n)));
 }
 function updateLandingTokens(): void {
-  // For signed-in users, use server inventory; for guests, use localStorage
-  const tokens = isSignedIn ? currentInventory.storedRt : getTokens();
+  // Use server inventory for both signed-in and guests; fall back to localStorage for guests with no server data
+  const serverRt = currentInventory.storedRt ?? 0;
+  const tokens = isSignedIn ? serverRt : (serverRt > 0 ? serverRt : getTokens());
   
   // Update equipment panel RT display with human-readable format
   const equipRt = document.getElementById('equip-rt');
@@ -1222,9 +1245,6 @@ function updateLandingTokens(): void {
     if (b === 'size') return; // Handled above
     if (b === 'speed') {
       (btn as HTMLButtonElement).disabled = tokens < BOOST_PRICES.speed || pendingBoosts.speedBoost;
-    } else if (b === 'adoptSpeed') {
-      // Adopt speed uses stored RT from inventory (not localStorage tokens)
-      (btn as HTMLButtonElement).disabled = !isSignedIn || currentInventory.storedRt < BOOST_PRICES.adoptSpeed;
     }
   });
 }
@@ -2582,7 +2602,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     const displayName = await getOrCreateDisplayName();
     // NOTE: Don't withdraw inventory here! The server withdraws it after validating the match.
     // This prevents inventory loss if the player tries to resume an expired match.
-    // For guests: send starting RT (capped at MAX_RT_PER_MATCH) so server can give in-game money
+    // For guests: send localStorage RT as fallback (server prefers inventory, falls back to this)
     const guestRt = !isSignedIn ? Math.min(getTokens(), MAX_RT_PER_MATCH) : undefined;
     gameWs.send(JSON.stringify({ 
       type: 'mode', 
@@ -2595,9 +2615,11 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
       team: options?.mode === 'teams' ? selectedTeam : undefined,
       guestStartingRt: guestRt,
     }));
-    // Deduct guest RT from localStorage (brought into match)
-    if (!isSignedIn && guestRt && guestRt > 0) {
-      setTokens(getTokens() - guestRt);
+    // Clear guest localStorage RT only for NEW matches (not rejoins).
+    // On rejoin, the server reconnects to the existing player without withdrawing from inventory,
+    // so clearing localStorage would lose the RT.
+    if (!isSignedIn && guestRt && guestRt > 0 && !options?.rejoinMatchId) {
+      setTokens(0);
     }
     if (pendingBoosts.sizeBonus > 0 || pendingBoosts.speedBoost) {
       gameWs.send(JSON.stringify({
@@ -2609,28 +2631,17 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
       pendingBoosts.speedBoost = false;
     }
     // Send selected equipment items (from item selection modal)
+    // Both signed-in users and guests use server-side inventory withdrawal
     if (pendingItemSelection) {
-      if (isSignedIn) {
-        // Signed-in users: server withdraws selected items from inventory
-        gameWs.send(JSON.stringify({
-          type: 'selectedItems',
-          portCharges: pendingItemSelection.portCharges,
-          shelterPortCharges: pendingItemSelection.shelterPortCharges,
-          speedBoosts: pendingItemSelection.speedBoosts,
-          sizeBoosts: pendingItemSelection.sizeBoosts,
-          adoptSpeedBoosts: pendingItemSelection.adoptSpeedBoosts,
-          shelterTier3Boosts: pendingItemSelection.shelterTier3Boosts,
-        }));
-      } else {
-        // Guest: apply selected items as startingBoosts (items were purchased pre-match)
-        if (pendingItemSelection.sizeBoosts > 0 || pendingItemSelection.speedBoosts > 0) {
-          gameWs.send(JSON.stringify({
-            type: 'startingBoosts',
-            sizeBonus: pendingItemSelection.sizeBoosts,
-            speedBoost: pendingItemSelection.speedBoosts > 0,
-          }));
-        }
-      }
+      gameWs.send(JSON.stringify({
+        type: 'selectedItems',
+        portCharges: pendingItemSelection.portCharges,
+        shelterPortCharges: pendingItemSelection.shelterPortCharges,
+        speedBoosts: pendingItemSelection.speedBoosts,
+        sizeBoosts: pendingItemSelection.sizeBoosts,
+        adoptSpeedBoosts: pendingItemSelection.adoptSpeedBoosts,
+        shelterTier3Boosts: pendingItemSelection.shelterTier3Boosts,
+      }));
       pendingItemSelection = null;
     }
     // Send selected color
@@ -2698,10 +2709,16 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         if (msg.type === 'welcome' && msg.playerId) {
           myPlayerId = msg.playerId;
           playerIdToUserId.clear(); // Reset mapping for new match
+          // Track actual match mode from server
+          if (msg.mode === 'ffa' || msg.mode === 'teams' || msg.mode === 'solo') {
+            currentMatchMode = msg.mode;
+          } else {
+            currentMatchMode = selectedMode; // Fallback to selectedMode
+          }
           // Initialize in-match boost state
           inMatchAdoptSpeedBoosts = typeof msg.adoptSpeedBoosts === 'number' ? msg.adoptSpeedBoosts : 0;
-          adoptSpeedActiveUntilTick = 0;
-          adoptSpeedUsedSeconds = 0;
+          adoptSpeedActiveUntilTick = typeof msg.adoptSpeedActiveUntilTick === 'number' ? msg.adoptSpeedActiveUntilTick : 0;
+          adoptSpeedUsedSeconds = typeof msg.adoptSpeedUsedSeconds === 'number' ? msg.adoptSpeedUsedSeconds : 0;
           // Server withdrew RT (capped) - update client state to reflect remaining inventory
           if (isSignedIn && !msg.resumed) {
             if (msg.remainingInventory) {
@@ -2724,7 +2741,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
             showToast(`Starting with ${msg.startingRT} RT from chest!`, 'success');
           }
           // Track current matchId for FFA/Teams rejoin capability
-          if (msg.matchId && (selectedMode === 'ffa' || selectedMode === 'teams')) {
+          if (msg.matchId && (currentMatchMode === 'ffa' || currentMatchMode === 'teams')) {
             // If resumed, remove this match from pending list (we're back in it)
             if (msg.resumed) {
               removeActiveMultiplayerMatch(msg.matchId);
@@ -3010,7 +3027,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           }
           updateResumeMatchUI();
           // Refresh inventory from server after match end deposit
-          if (isSignedIn) fetchInventory();
+          fetchInventory();
           fetchSavedMatchStatus();
           fetchActiveMatchesInfo();
           // Show karma notification if awarded
@@ -3273,6 +3290,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     isObserver = false;
     observerOverlayEl.classList.add('hidden');
     wasBossModeActive = false;
+    releaseWakeLock();
     
     // Auto-reconnect if this was an unexpected disconnect during an active FFA/Teams match
     if (wasMatchId && !wasMatchEnded && !wasObserver && (wasMode === 'ffa' || wasMode === 'teams')) {
@@ -6925,7 +6943,16 @@ function render(dt: number): void {
     const teamScoreLine = selectedMode === 'teams' && latestSnapshot?.teamScores
       ? `<br><span style="color:#e74c3c;font-weight:700">Red: ${latestSnapshot.teamScores.red}</span> vs <span style="color:#3498db;font-weight:700">Blue: ${latestSnapshot.teamScores.blue}</span><br>`
       : '';
-    leaderboardEl.innerHTML = `<strong>${title}</strong>${teamScoreLine}<br>` + sorted.map((p, i) => playerLine(p, i)).join('<br>') + tokenLines + adHtml + '<div style="display:flex;gap:12px;margin-top:16px;"><button type="button" id="play-again-btn" class="fight-ally-btn ally-btn" style="flex:1">Play again</button><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn" style="flex:1">Back to lobby</button></div>';
+    // Guest save prompt: show after match if guest earned items
+    const didWin = latestSnapshot?.winnerId === myPlayerId || 
+                   (selectedMode === 'teams' && latestSnapshot?.winningTeam && me?.team === latestSnapshot.winningTeam);
+    const guestSavePrompt = (!isSignedIn && didWin)
+      ? `<div style="margin:12px 0;padding:10px 14px;background:rgba(123,237,159,0.15);border:1px solid #7bed9f;border-radius:8px;text-align:center;">
+           <div style="font:600 13px Rubik,sans-serif;color:#7bed9f;margin-bottom:6px;">Save your newly acquired items by creating an account!</div>
+           <a href="${buildAuthUrl('/auth/google')}" style="display:inline-block;padding:6px 16px;background:#fff;color:#333;border-radius:6px;font:600 12px Rubik,sans-serif;text-decoration:none;">Sign in with Google</a>
+         </div>`
+      : '';
+    leaderboardEl.innerHTML = `<strong>${title}</strong>${teamScoreLine}<br>` + sorted.map((p, i) => playerLine(p, i)).join('<br>') + tokenLines + guestSavePrompt + adHtml + '<div style="display:flex;gap:12px;margin-top:16px;"><button type="button" id="play-again-btn" class="fight-ally-btn ally-btn" style="flex:1">Play again</button><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn" style="flex:1">Back to lobby</button></div>';
   } else {
     leaderboardEl.classList.remove('show');
   }
@@ -6950,6 +6977,7 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
   if (btn.id === 'play-again-btn') {
     // Request fullscreen immediately while still in user gesture context
     enterMobileFullscreen();
+    requestWakeLock();
     if (gameWs) {
       gameWs.close();
       gameWs = null;
@@ -7268,7 +7296,7 @@ function updateActionMenu(): void {
   
   // Update upgrade buttons
   const canBuyAdoption = hasShelter && !shelter?.hasAdoptionCenter && tokens >= 250;
-  const canBuyGravity = hasShelter && !shelter?.hasGravity && tokens >= 300;
+  const canBuyGravity = hasShelter && !shelter?.hasGravity && shelter?.hasAdoptionCenter && tokens >= 300;
   const canBuyAdvertising = hasShelter && !shelter?.hasAdvertising && tokens >= 200;
   const canBuyVanSpeed = !hasVanSpeed && tokens >= 150;
   
@@ -7482,9 +7510,9 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
   
   // Show appropriate toast if connection is still open
   if (wasConnected) {
-    if (selectedMode === 'solo') {
+    if (currentMatchMode === 'solo') {
       showToast('Your match has been saved.', 'success');
-    } else if (selectedMode === 'ffa' || selectedMode === 'teams') {
+    } else if (currentMatchMode === 'ffa' || currentMatchMode === 'teams') {
       // Check if player has a shelter yet
       const me = latestSnapshot?.players.find(p => p.id === myPlayerId);
       const myShelter = me?.shelterId ? latestSnapshot?.shelters?.find(s => s.id === me.shelterId) : null;
@@ -7521,19 +7549,19 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
   authAreaEl.classList.remove('hidden');
   exitMobileFullscreen();
   // Refresh inventory from server so equipment chest shows accurate post-match values
-  if (isSignedIn) fetchInventory();
+  fetchInventory();
   updateLandingTokens();
   restoreModeSelection();
   // For solo mode with active connection, show Resume button (we know we just saved)
-  if (selectedMode === 'solo' && wasConnected) {
+  if (currentMatchMode === 'solo' && wasConnected) {
     hasSavedMatch = true;
     updateResumeMatchUI();
-  } else if ((selectedMode === 'ffa' || selectedMode === 'teams') && exitMatchId && (isSignedIn || currentUserId)) {
+  } else if ((currentMatchMode === 'ffa' || currentMatchMode === 'teams') && exitMatchId && (isSignedIn || currentUserId)) {
     // For FFA/Teams, add the match to the list (don't replace existing matches)
     // Works for both registered users and guests (who now have a guest_id)
     addActiveMultiplayerMatch({ 
       matchId: exitMatchId, 
-      mode: selectedMode, 
+      mode: currentMatchMode, 
       durationMs: exitMatchDurationMs,
       isPaused: false, // Will update on next poll
     });
@@ -7675,13 +7703,17 @@ referralClaimBtn.addEventListener('click', async () => {
 
 /** Check if player has any equipment items (non-RT) in their chest */
 function playerHasEquipmentItems(): boolean {
-  if (isSignedIn) {
-    return (currentInventory.portCharges > 0 || currentInventory.speedBoosts > 0 ||
-            currentInventory.sizeBoosts > 0 || currentInventory.adoptSpeedBoosts > 0 ||
-            (currentInventory.shelterTier3Boosts ?? 0) > 0);
+  // Check server inventory for both signed-in and guests
+  if ((currentInventory.portCharges ?? 0) > 0 || (currentInventory.speedBoosts ?? 0) > 0 ||
+      (currentInventory.sizeBoosts ?? 0) > 0 || (currentInventory.adoptSpeedBoosts ?? 0) > 0 ||
+      (currentInventory.shelterTier3Boosts ?? 0) > 0) {
+    return true;
   }
-  // Guests: check pendingBoosts (bought from Buy buttons)
-  return pendingBoosts.sizeBonus > 0 || pendingBoosts.speedBoost;
+  // Fallback: check guest pendingBoosts (bought from Buy buttons pre-match)
+  if (!isSignedIn) {
+    return pendingBoosts.sizeBonus > 0 || pendingBoosts.speedBoost;
+  }
+  return false;
 }
 
 /** Show item selection modal and return a promise that resolves with the selection */
@@ -7785,6 +7817,7 @@ function showItemSelectionModal(): Promise<ItemSelection> {
 function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boolean; resume?: boolean; rejoinMatchId?: string }): void {
   // Request fullscreen immediately while still in user gesture context
   enterMobileFullscreen();
+  requestWakeLock();
   playMusic();
   stopServerClock();
   stopMatchClockUpdates();
@@ -7894,14 +7927,6 @@ document.querySelectorAll('.landing-buy').forEach((btn) => {
       if (tokens < BOOST_PRICES.speed || pendingBoosts.speedBoost) return;
       setTokens(tokens - BOOST_PRICES.speed);
       pendingBoosts.speedBoost = true;
-    } else if (boost === 'adoptSpeed') {
-      // Purchase adopt speed boost via API (uses stored RT from inventory)
-      if (!isSignedIn) {
-        showToast('Sign in to purchase adopt speed boosts!', 'error');
-        return;
-      }
-      purchaseAdoptSpeedBoost();
-      return;  // Don't call updateLandingTokens, API will refresh
     }
     updateLandingTokens();
   });
@@ -9534,37 +9559,34 @@ function updateKarmaDisplay(): void {
 }
 
 function updateEquipmentPanel(): void {
-  // For signed-in users: show server inventory storedRt
-  // For guests: show localStorage tokens
-  const displayRt = isSignedIn ? currentInventory.storedRt : getTokens();
+  // Use server inventory for both signed-in and guests; fall back to localStorage for guests with no server data yet
+  const serverRt = currentInventory.storedRt ?? 0;
+  const displayRt = isSignedIn ? serverRt : (serverRt > 0 ? serverRt : getTokens());
   equipRtEl.textContent = formatNumber(displayRt);
   
-  // Ports from server inventory (persisted)
-  equipPortsEl.textContent = String(currentInventory.portCharges);
+  // Ports from server inventory (persisted for both signed-in and guests)
+  equipPortsEl.textContent = String(currentInventory.portCharges ?? 0);
   
-  // Speed: check if pending boost OR server inventory
-  const hasSpeed = pendingBoosts.speedBoost || currentInventory.speedBoosts > 0;
+  // Speed: check server inventory
+  const hasSpeed = pendingBoosts.speedBoost || (currentInventory.speedBoosts ?? 0) > 0;
   equipSpeedEl.textContent = hasSpeed ? '✓' : '0';
   
-  // Size: from inventory (signed-in) or pendingBoosts (guest)
-  const sizeCount = isSignedIn ? currentInventory.sizeBoosts : pendingBoosts.sizeBonus;
+  // Size: from server inventory (fall back to pendingBoosts for guests without server data)
+  const serverSize = currentInventory.sizeBoosts ?? 0;
+  const sizeCount = serverSize > 0 ? serverSize : (isSignedIn ? 0 : pendingBoosts.sizeBonus);
   equipSizeEl.textContent = sizeCount > 0 ? `+${sizeCount}` : '0';
   
-  // Adopt speed boosts from inventory (use during match for 60s each)
+  // Adopt speed boosts from inventory
   equipAdoptSpeedEl.textContent = String(currentInventory.adoptSpeedBoosts ?? 0);
   
-  if (currentInventory.signedIn) {
-    const hasItems = displayRt > 0 || currentInventory.portCharges > 0 || 
-                     currentInventory.sizeBoosts > 0 || currentInventory.adoptSpeedBoosts > 0 ||
-                     currentInventory.speedBoosts > 0;
-    if (hasItems) {
-      equipNoteEl.textContent = `Up to ${MAX_RT_PER_MATCH} RT auto-applied per match`;
-    } else {
-      equipNoteEl.textContent = 'Earn tokens by winning matches!';
-    }
+  const hasItems = displayRt > 0 || (currentInventory.portCharges ?? 0) > 0 || 
+                   (currentInventory.sizeBoosts ?? 0) > 0 || (currentInventory.adoptSpeedBoosts ?? 0) > 0 ||
+                   (currentInventory.speedBoosts ?? 0) > 0;
+  if (hasItems) {
+    equipNoteEl.textContent = `Up to ${MAX_RT_PER_MATCH} RT auto-applied per match`;
     equipNoteEl.classList.add('signed-in');
   } else {
-    equipNoteEl.textContent = 'Sign in to save equipment';
+    equipNoteEl.textContent = 'Earn tokens by winning matches!';
     equipNoteEl.classList.remove('signed-in');
   }
 }
@@ -9606,28 +9628,6 @@ async function depositInventory(rt: number, portCharges: number = 0, isWinner: b
   }
 }
 
-/** Purchase an adopt speed boost using stored RT */
-async function purchaseAdoptSpeedBoost(): Promise<void> {
-  try {
-    const res = await fetch('/api/inventory/purchase-boost', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ boostType: 'adoptSpeed' }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showToast(data.error === 'Not enough RT' ? 'Not enough stored RT!' : 'Failed to purchase boost', 'error');
-      return;
-    }
-    currentInventory = data.inventory;
-    updateEquipmentPanel();
-    updateLandingTokens();
-    showToast('Purchased adopt speed boost!', 'success');
-  } catch {
-    showToast('Failed to purchase boost', 'error');
-  }
-}
 
 /** Update the lobby gift button visibility and animation */
 function updateLobbyGiftButton(): void {
@@ -9704,6 +9704,11 @@ resize();
 // --- Page Visibility API: detect browser wake-from-sleep (mobile hibernation) ---
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
+
+  // Re-acquire wake lock if returning to an active match
+  if (gameWs && myPlayerId) {
+    requestWakeLock();
+  }
   
   // Check if we have an active match but the websocket is dead
   if (currentMatchId && (!gameWs || gameWs.readyState !== WebSocket.OPEN) && !matchEndedNormally) {

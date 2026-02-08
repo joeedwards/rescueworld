@@ -100,10 +100,6 @@ export function depositAfterMatch(
   sizeBoosts: number = 0,
   adoptSpeedBoosts: number = 0
 ): Inventory {
-  // Guest users don't have a row in the users table; skip to avoid FK violation
-  if (userId.startsWith('guest-')) {
-    return { storedRt: 0, portCharges: 0, shelterPortCharges: 0, speedBoosts: 0, sizeBoosts: 0, shelterTier3Boosts: 0, adoptSpeedBoosts: 0 };
-  }
   const conn = db();
   
   // Upsert - insert if not exists, otherwise update
@@ -274,42 +270,3 @@ export function addAdoptSpeedBoosts(userId: string, amount: number): void {
   `).run(userId, amount, amount);
 }
 
-/** Boost types that can be purchased */
-export type BoostType = 'adoptSpeed';
-
-/** Price for each boost type */
-export const BOOST_PRICES: Record<BoostType, number> = {
-  adoptSpeed: 40,
-};
-
-/**
- * Purchase a boost using stored RT
- * Returns the updated inventory or null if not enough RT
- */
-export function purchaseBoost(userId: string, boostType: BoostType): { success: boolean; inventory: Inventory; error?: string } {
-  const conn = db();
-  const price = BOOST_PRICES[boostType];
-  
-  if (!price) {
-    return { success: false, inventory: getInventory(userId), error: 'Invalid boost type' };
-  }
-  
-  const inventory = getInventory(userId);
-  
-  if (inventory.storedRt < price) {
-    return { success: false, inventory, error: 'Not enough RT' };
-  }
-  
-  // Deduct RT and add boost in one transaction
-  if (boostType === 'adoptSpeed') {
-    conn.prepare(`
-      UPDATE inventory 
-      SET stored_rt = stored_rt - ?, adopt_speed_boosts = adopt_speed_boosts + 1
-      WHERE user_id = ?
-    `).run(price, userId);
-  }
-  
-  log(`${userId} purchased ${boostType} boost for ${price} RT`);
-  
-  return { success: true, inventory: getInventory(userId) };
-}

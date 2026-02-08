@@ -502,8 +502,6 @@ export interface SavedMatchRow {
 }
 
 export function saveSavedMatch(userId: string, mode: string, worldState: string, matchId: string): void {
-  // Guest users don't have a row in the users table; skip to avoid FK violation
-  if (userId.startsWith('guest-')) return;
   const now = Date.now();
   const conn = db();
   const existing = conn.prepare('SELECT created_at FROM saved_matches WHERE user_id = ?').get(userId) as { created_at: number } | undefined;
@@ -590,8 +588,6 @@ export function insertMatchHistory(
   adoptions: number,
   durationSeconds: number,
 ): void {
-  // Guest users don't have a row in the users table; skip to avoid FK violation
-  if (userId.startsWith('guest-')) return;
   const now = Date.now();
   db().prepare(
     `INSERT INTO match_history (user_id, match_id, mode, result, rt_earned, adoptions, duration_seconds, played_at)

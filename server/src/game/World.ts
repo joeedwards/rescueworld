@@ -633,6 +633,7 @@ export class World {
   buyGravity(id: string): { success: boolean; reason?: string } {
     const shelter = this.getPlayerShelter(id);
     if (!shelter) return { success: false, reason: 'No shelter built' };
+    if (!shelter.hasAdoptionCenter) return { success: false, reason: 'Need adoption center first' };
     if (shelter.hasGravity) return { success: false, reason: 'Already have gravity' };
     
     const currentMoney = this.playerMoney.get(id) ?? 0;
@@ -1872,7 +1873,7 @@ export class World {
       }
       
       // Spawn wild strays (2x spawn rate compared to normal)
-      const spawnInterval = World.BREEDER_SHELTER_SPAWN_INTERVAL / 2; // 2x faster
+      const spawnInterval = Math.round(World.BREEDER_SHELTER_SPAWN_INTERVAL / 1.7); // ~1.7x (15% fewer strays than 2x rate)
       if (this.tick - shelter.lastSpawnTick >= spawnInterval) {
         shelter.lastSpawnTick = this.tick;
         
@@ -2312,47 +2313,12 @@ export class World {
       log(`Match end: too many strays (${strayCountVictory}) - loss for all, no RT`);
     }
     // Victory check: zero strays AND all breeders cleared (no camps, no mills)
+    // Triggers boss mode in ALL match modes (solo, ffa, teams)
     if (!this.matchEndedEarly && this.shelters.size > 0 && !this.bossMode?.active) {
       const allBreedersCleared = this.breederShelters.size === 0 && this.breederCamps.size === 0;
       if (strayCountVictory === 0 && allBreedersCleared) {
-        // In solo mode, trigger boss mode instead of ending
-        if (this.matchMode === 'solo') {
-          this.enterBossMode();
-          log(`Boss Mode triggered in solo match at tick ${this.tick}`);
-        } else {
-          this.matchEndedEarly = true;
-          this.matchEndAt = this.tick;
-          if (this.matchMode === 'teams') {
-            // Teams mode: winning team is the one with more points
-            const redScore = this.teamScores.get('red') ?? 0;
-            const blueScore = this.teamScores.get('blue') ?? 0;
-            this.winningTeam = redScore >= blueScore ? 'red' : 'blue';
-            // Winner is the top player on the winning team
-            let winnerId: string | null = null;
-            let maxAdoptions = 0;
-            for (const p of this.players.values()) {
-              const team = this.playerTeams.get(p.id);
-              if (team === this.winningTeam && p.totalAdoptions > maxAdoptions) {
-                maxAdoptions = p.totalAdoptions;
-                winnerId = p.id;
-              }
-            }
-            this.winnerId = winnerId;
-            log(`Teams match end: ${this.winningTeam} wins (red=${redScore}, blue=${blueScore}). MVP: ${this.winnerId ?? 'none'} (${maxAdoptions} adoptions)`);
-          } else {
-            // FFA: winner is the player with the most adoptions
-            let winnerId: string | null = null;
-            let maxAdoptions = 0;
-            for (const p of this.players.values()) {
-              if (p.totalAdoptions > maxAdoptions) {
-                maxAdoptions = p.totalAdoptions;
-                winnerId = p.id;
-              }
-            }
-            this.winnerId = winnerId;
-            log(`Match end: zero strays and all breeders cleared at level ${this.breederCurrentLevel}, tick ${this.tick}. Winner: ${this.winnerId ?? 'co-op'} (${maxAdoptions} adoptions)`);
-          }
-        }
+        this.enterBossMode();
+        log(`Boss Mode triggered in ${this.matchMode} match at tick ${this.tick}`);
       }
     }
     
@@ -3279,7 +3245,6 @@ export class World {
   /** Easter egg: Force enter boss mode */
   debugEnterBossMode(): boolean {
     if (this.bossMode?.active) return false;
-    if (this.matchMode !== 'solo') return false;
     this.enterBossMode();
     return true;
   }
@@ -3378,38 +3343,32 @@ export class World {
     if (!this.bossMode?.active) return;
     const bm = this.bossMode;
 
-    // Find the human player (non-CPU)
-    let humanPlayer: { id: string; x: number; y: number } | null = null;
-    for (const p of this.players.values()) {
-      if (!p.id.startsWith('cpu-') && !this.eliminatedPlayerIds.has(p.id)) {
-        humanPlayer = p;
-        break;
-      }
-    }
-
-    if (!humanPlayer) return;
-
-    // Check if player is near any uncompleted mill
+    // Find ANY human player (non-CPU) near a boss mill
     let nearMillId = -1;
-    for (let i = 0; i < bm.mills.length; i++) {
-      const mill = bm.mills[i];
-      if (mill.completed) continue;
-      
-      const bossMillR = BOSS_MILL_RADIUS + VAN_FIXED_RADIUS;
-      if (distSq(humanPlayer.x, humanPlayer.y, mill.x, mill.y) <= bossMillR * bossMillR) {
-        nearMillId = i;
-        break;
+    let nearPlayer: { id: string; x: number; y: number } | null = null;
+    for (const p of this.players.values()) {
+      if (p.id.startsWith('cpu-') || this.eliminatedPlayerIds.has(p.id)) continue;
+      for (let i = 0; i < bm.mills.length; i++) {
+        const mill = bm.mills[i];
+        if (mill.completed) continue;
+        const bossMillR = BOSS_MILL_RADIUS + VAN_FIXED_RADIUS;
+        if (distSq(p.x, p.y, mill.x, mill.y) <= bossMillR * bossMillR) {
+          nearMillId = i;
+          nearPlayer = p;
+          break;
+        }
       }
+      if (nearMillId >= 0) break;
     }
 
     // Update playerAtMill state
     if (nearMillId >= 0 && bm.playerAtMill !== nearMillId) {
       // Player entered a new mill
       bm.playerAtMill = nearMillId;
-      log(`Player ${humanPlayer.id} entered boss mill ${nearMillId} (${BOSS_MILL_NAMES[bm.mills[nearMillId].petType]})`);
+      log(`Player ${nearPlayer!.id} entered boss mill ${nearMillId} (${BOSS_MILL_NAMES[bm.mills[nearMillId].petType]})`);
     } else if (nearMillId < 0 && bm.playerAtMill >= 0) {
       // Player left the mill
-      log(`Player ${humanPlayer.id} exited boss mill`);
+      log(`Player exited boss mill`);
       bm.playerAtMill = -1;
     }
   }
@@ -3543,29 +3502,48 @@ export class World {
     }
 
     if (bm.millsCleared > 0) {
-      // Partial or full victory: award RT, end match as win
+      // Partial or full victory: award RT to ALL human players, end match as win
       for (const p of this.players.values()) {
-        if (!p.id.startsWith('cpu_')) {
+        if (!p.id.startsWith('cpu-') && !p.id.startsWith('cpu_')) {
           this.addPlayerMoney(p.id, rtBonus);
-          break; // Solo mode only has one human
         }
       }
 
       this.matchEndedEarly = true;
       this.matchEndAt = this.tick;
       
-      for (const p of this.players.values()) {
-        if (!p.id.startsWith('cpu_')) {
-          this.winnerId = p.id;
-          break;
+      // Determine winner: player with most adoptions (works for solo, ffa, teams)
+      if (this.matchMode === 'teams') {
+        const redScore = this.teamScores.get('red') ?? 0;
+        const blueScore = this.teamScores.get('blue') ?? 0;
+        this.winningTeam = redScore >= blueScore ? 'red' : 'blue';
+        let winnerId: string | null = null;
+        let maxAdoptions = 0;
+        for (const p of this.players.values()) {
+          const team = this.playerTeams.get(p.id);
+          if (team === this.winningTeam && p.totalAdoptions > maxAdoptions) {
+            maxAdoptions = p.totalAdoptions;
+            winnerId = p.id;
+          }
         }
+        this.winnerId = winnerId;
+      } else {
+        let winnerId: string | null = null;
+        let maxAdoptions = 0;
+        for (const p of this.players.values()) {
+          if (p.totalAdoptions > maxAdoptions) {
+            maxAdoptions = p.totalAdoptions;
+            winnerId = p.id;
+          }
+        }
+        this.winnerId = winnerId;
       }
 
       if (victory) {
-        this.pendingAnnouncements.push(`VICTORY! You rescued all pets from the PetMall! Bonus: ${rtBonus} RT + 1 Karma Point!`);
+        this.pendingAnnouncements.push(`VICTORY! All pets rescued from the PetMall! Bonus: ${rtBonus} RT + 1 Karma Point!`);
         log(`Boss Mode ended with FULL VICTORY. Awarded ${rtBonus} RT + 1 KP`);
       } else {
-        this.pendingAnnouncements.push(`Time's up! You rescued pets from ${bm.millsCleared} mills. Bonus: ${rtBonus} RT`);
+        this.pendingAnnouncements.push(`Time's up! Rescued pets from ${bm.millsCleared} mills. Bonus: ${rtBonus} RT`);
         log(`Boss Mode ended with partial victory (${bm.millsCleared}/5 mills). Awarded ${rtBonus} RT`);
       }
     } else {

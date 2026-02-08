@@ -11,7 +11,7 @@ import { TICK_RATE, TICK_MS, MAX_FFA_PLAYERS, MAX_RT_PER_MATCH } from 'shared';
 import { decodeInput, encodeSnapshot, MSG_INPUT } from 'shared';
 import { registerServer, appendReplay, getNextGuestName } from './registry.js';
 import { withdrawForMatch, withdrawForMatchSelective, depositAfterMatch, getInventory, type Inventory, type ItemSelection } from './inventory.js';
-import { recordMatchWin, recordMatchLoss, updateReputationOnQuit } from './leaderboard.js';
+import { recordMatchWin, recordMatchLoss, updateReputationOnQuit, ensureGuestUser } from './leaderboard.js';
 import { saveSavedMatch, getSavedMatch, deleteSavedMatch, insertMatchHistory, incrementGameCount, saveFfaMatch, getAllSavedFfaMatches, deleteSavedFfaMatch, getFriendsOf } from './referrals.js';
 import { awardKarmaPoints } from './karmaService.js';
 
@@ -643,6 +643,11 @@ function removePlayerFromMatch(playerId: string, matchId: string): void {
       log(`Solo match ended on leave - deposited ${finalRT} RT, ${portCharges} ports, ${adoptSpeedBoosts} adopt speed for ${userId}`);
     }
     
+    // Ensure guest users have a users row so they appear on leaderboards
+    if (userId.startsWith('guest-') && playerState) {
+      ensureGuestUser(userId, playerState.displayName);
+    }
+    
     if (isStrayLoss) {
       recordMatchLoss(userId, 0);
       insertMatchHistory(userId, matchId, match.mode, 'stray_loss', 0, adoptions, durationSeconds);
@@ -723,6 +728,14 @@ function removePlayerFromMatch(playerId: string, matchId: string): void {
   }
 
   if (!match.frozen) {
+    // Refund RT and items if leaving before match started (lobby/countdown phase)
+    if (userId && match.phase !== 'playing') {
+      const startInv = match.playerStartingInventory.get(playerId);
+      if (startInv && (startInv.storedRt > 0 || startInv.portCharges > 0 || startInv.shelterPortCharges > 0 || startInv.speedBoosts > 0 || startInv.sizeBoosts > 0 || startInv.adoptSpeedBoosts > 0)) {
+        depositAfterMatch(userId, startInv.storedRt, startInv.portCharges, startInv.shelterPortCharges, startInv.speedBoosts, startInv.sizeBoosts, startInv.adoptSpeedBoosts);
+        log(`Refunded pre-match inventory for ${userId}: ${startInv.storedRt} RT, ${startInv.portCharges} ports, ${startInv.shelterPortCharges} home ports, ${startInv.speedBoosts} speed, ${startInv.sizeBoosts} size, ${startInv.adoptSpeedBoosts} adopt speed`);
+      }
+    }
     // Solo save failed or other mode: full remove
     // Don't deposit again if match end was already processed (prevents duplicate RT)
     if (userId && match.phase === 'playing' && !match.world.isMatchProcessed()) {
@@ -779,9 +792,19 @@ wss.on('connection', async (ws) => {
     // Withdraw RT only (capped at MAX_RT_PER_MATCH) - items are deferred until client sends selectedItems
     if (playerUserId && !startingInventory) {
       // Only withdraw RT now; items withdrawn when client sends selectedItems
+      const prevGuestRt = startingRT; // Save guest localStorage fallback RT
       startingInventory = withdrawForMatchSelective(playerUserId, MAX_RT_PER_MATCH, {});
-      startingRT = startingInventory.storedRt;
-      log(`Registered user ${playerUserId} withdrawing RT: ${startingRT} (capped at ${MAX_RT_PER_MATCH})`);
+      if (startingInventory.storedRt > 0) {
+        startingRT = startingInventory.storedRt;
+        log(`User ${playerUserId} withdrawing RT from inventory: ${startingRT} (capped at ${MAX_RT_PER_MATCH})`);
+      } else if (prevGuestRt > 0 && playerUserId.startsWith('guest-')) {
+        // Guest with no server inventory yet: use localStorage RT fallback
+        startingRT = prevGuestRt;
+        log(`Guest ${playerUserId} using localStorage fallback RT: ${startingRT}`);
+      } else {
+        startingRT = 0;
+        log(`User ${playerUserId} has no RT to withdraw`);
+      }
     }
     if (playerUserId) {
       match.playerUserIds.set(effectivePlayerId, playerUserId);
@@ -803,6 +826,7 @@ wss.on('connection', async (ws) => {
       playerId: effectivePlayerId, 
       displayName, 
       matchId: match.id, 
+      mode: match.mode,
       startingRT, 
       startingPorts: 0, 
       adoptSpeedBoosts: 0,
@@ -847,6 +871,7 @@ wss.on('connection', async (ws) => {
       playerId: effectivePlayerId,
       displayName,
       matchId: match.id,
+      mode: match.mode,
       startingRT: rt,
       startingPorts: ports,
       shelterPortCharges: shelterPorts,
@@ -904,9 +929,13 @@ wss.on('connection', async (ws) => {
               log(`Registered user ${playerUserId} connecting...`);
             } else {
               log(`Guest ${playerUserId} connecting...`);
+              // Accept guest localStorage RT as fallback (used if server inventory is empty)
+              if (typeof msg.guestStartingRt === 'number' && msg.guestStartingRt > 0) {
+                startingRT = Math.min(Math.floor(msg.guestStartingRt), MAX_RT_PER_MATCH);
+              }
             }
           } else {
-            // Guest: accept starting RT from client (capped at MAX_RT_PER_MATCH)
+            // Anonymous guest without guest_id: accept starting RT from client
             if (typeof msg.guestStartingRt === 'number' && msg.guestStartingRt > 0) {
               startingRT = Math.min(Math.floor(msg.guestStartingRt), MAX_RT_PER_MATCH);
             } else if (typeof msg.startingRT === 'number' && msg.startingRT > 0) {
@@ -985,6 +1014,7 @@ wss.on('connection', async (ws) => {
                         playerId: humanId,
                         displayName: match.soloDisplayName,
                         matchId: match.id,
+                        mode: match.mode,
                         startingRT: rt,
                         startingPorts: ports,
                         shelterPortCharges: shelterPorts,
@@ -1046,14 +1076,19 @@ wss.on('connection', async (ws) => {
                     const ports = existingMatch.world.getPortCharges(ffaInfo.playerId);
                     const shelterPorts = existingMatch.world.getShelterPortCharges(ffaInfo.playerId);
                     
+                    const ffaAdoptStatus = existingMatch.world.getAdoptSpeedBoostStatus(ffaInfo.playerId);
                     ws.send(JSON.stringify({
                       type: 'welcome',
                       playerId: ffaInfo.playerId,
                       displayName: p?.displayName ?? displayNameToUse,
                       matchId: existingMatch.id,
+                      mode: existingMatch.mode,
                       startingRT: rt,
                       startingPorts: ports,
                       shelterPortCharges: shelterPorts,
+                      adoptSpeedBoosts: ffaAdoptStatus.remainingBoosts,
+                      adoptSpeedActiveUntilTick: ffaAdoptStatus.activeUntilTick,
+                      adoptSpeedUsedSeconds: ffaAdoptStatus.usedSeconds,
                       resumed: true,
                     }));
                     log(`FFA match rejoined by ${playerUserId} playerId=${ffaInfo.playerId} matchId=${existingMatch.id}`);
@@ -1154,14 +1189,19 @@ wss.on('connection', async (ws) => {
                     const ports = existingMatch.world.getPortCharges(teamsInfo.playerId);
                     const shelterPorts = existingMatch.world.getShelterPortCharges(teamsInfo.playerId);
                     
+                    const teamsAdoptStatus = existingMatch.world.getAdoptSpeedBoostStatus(teamsInfo.playerId);
                     ws.send(JSON.stringify({
                       type: 'welcome',
                       playerId: teamsInfo.playerId,
                       displayName: p?.displayName ?? displayNameToUse,
                       matchId: existingMatch.id,
+                      mode: existingMatch.mode,
                       startingRT: rt,
                       startingPorts: ports,
                       shelterPortCharges: shelterPorts,
+                      adoptSpeedBoosts: teamsAdoptStatus.remainingBoosts,
+                      adoptSpeedActiveUntilTick: teamsAdoptStatus.activeUntilTick,
+                      adoptSpeedUsedSeconds: teamsAdoptStatus.usedSeconds,
                       resumed: true,
                     }));
                     log(`Teams match rejoined by ${playerUserId} playerId=${teamsInfo.playerId} matchId=${existingMatch.id}`);
@@ -1665,10 +1705,6 @@ wss.on('connection', async (ws) => {
             ws.send(JSON.stringify({ type: 'easterEggBossModeResult', success: false, reason: 'easter eggs disabled' }));
             return;
           }
-          if (match.mode !== 'solo') {
-            ws.send(JSON.stringify({ type: 'easterEggBossModeResult', success: false, reason: 'not solo mode' }));
-            return;
-          }
           if (DEBUG_LOGGING) log(`Easter egg boss mode trigger requested by ${effectivePlayerId}`);
           const success = match.world.debugEnterBossMode();
           if (DEBUG_LOGGING) log(`Easter egg boss mode result: ${success}`);
@@ -1681,10 +1717,6 @@ wss.on('connection', async (ws) => {
             ws.send(JSON.stringify({ type: 'debugBossModeResult', success: false, reason: 'easter eggs disabled' }));
             return;
           }
-          if (match.mode !== 'solo') {
-            ws.send(JSON.stringify({ type: 'debugBossModeResult', success: false, reason: 'not solo mode' }));
-            return;
-          }
           if (DEBUG_LOGGING) log(`Easter egg boss mode (legacy) trigger requested by ${effectivePlayerId}`);
           const success = match.world.debugEnterBossMode();
           ws.send(JSON.stringify({ type: 'debugBossModeResult', success }));
@@ -1694,7 +1726,6 @@ wss.on('connection', async (ws) => {
         // Boss Mode: Purchase ingredient
         if (msg.type === 'bossPurchase' && typeof msg.ingredient === 'string' && typeof msg.amount === 'number') {
           if (DEBUG_LOGGING) log(`bossPurchase received: ingredient=${msg.ingredient}, amount=${msg.amount}`);
-          if (match.mode !== 'solo') return;
           const result = match.world.purchaseBossIngredient(effectivePlayerId, msg.ingredient, msg.amount);
           if (DEBUG_LOGGING) log(`bossPurchase result: ${JSON.stringify(result)}`);
           ws.send(JSON.stringify({ type: 'bossPurchaseResult', ...result }));
@@ -1703,7 +1734,6 @@ wss.on('connection', async (ws) => {
 
         // Boss Mode: Submit meal to rescue pets
         if (msg.type === 'bossSubmitMeal') {
-          if (match.mode !== 'solo') return;
           const result = match.world.submitBossMeal(effectivePlayerId);
           ws.send(JSON.stringify({ type: 'bossSubmitMealResult', ...result }));
           
@@ -2012,6 +2042,11 @@ setInterval(() => {
           for (const [pid, userId] of match.playerUserIds.entries()) {
             const playerState = snapshot.players.find(p => p.id === pid);
             if (!playerState) continue;
+            
+            // Ensure guest users have a users row so they appear on leaderboards
+            if (userId.startsWith('guest-')) {
+              ensureGuestUser(userId, playerState.displayName);
+            }
             
             // Teams mode: losing team gets 1/3 rewards
             const playerTeam = match.mode === 'teams' ? match.world.getPlayerTeam(pid) : undefined;
