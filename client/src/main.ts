@@ -274,9 +274,48 @@ let serverClockIntervalId: ReturnType<typeof setInterval> | null = null;
 const RTT_HIGH_MS = 200;
 const RTT_HIGH_DURATION_MS = 5000;
 
+// --- PixiJS rendering modules ---
+import {
+  renderFrame,
+  worldContainer, bgLayer, zoneLayer, pickupLayer,
+  shelterLayer, bossLayer, strayLayer, playerLayer,
+  effectLayer, hudContainer,
+  updateCamera as pixiUpdateCamera,
+  screenW as pixiScreenW, screenH as pixiScreenH,
+  type Camera,
+} from './renderer';
+import { adoptionEventTexture } from './sprites';
+import { getBreederCampTexture } from './sprites';
+import { BackgroundLayer } from './entities/background';
+import { updateAdoptionZones, updateAdoptionEvents, clearZones } from './entities/zones';
+import { updatePickups, clearPickups } from './entities/pickups';
+import { updateShelters, clearShelters } from './entities/shelters';
+import { updateVans, clearVans } from './entities/vans';
+import { updateStrays as pixiUpdateStrays, clearStrays } from './entities/strays';
+import { updateBreeders, clearBreeders } from './entities/breeders';
+import { updateBossMode as pixiUpdateBossMode, clearBoss } from './entities/boss';
+import {
+  renderPortEffects, renderSeasonParticles as pixiRenderSeasonParticles,
+  renderAdoptionAnimations as pixiRenderAdoptionAnimations,
+  updateSeasonParticles as pixiUpdateSeasonParticles,
+  spawnAdoption as pixiSpawnAdoption,
+  adoptionAnimations as pixiAdoptionAnimations,
+  clearEffects,
+  type PortAnimation as PixiPortAnimation,
+} from './effects';
+import { drawMinimap as pixiDrawMinimap } from './minimap';
+import { renderJoystick, renderGrowthPopup, renderShelterLocator } from './hud';
+import { Texture } from 'pixi.js';
+
+// PixiJS background layer instance
+const _bgLayer = new BackgroundLayer();
+bgLayer.addChild(_bgLayer.container);
+
 // --- Render ---
 const canvas = document.getElementById('game') as HTMLCanvasElement;
-const ctx = canvas.getContext('2d')!;
+// ctx is no longer used for rendering — all rendering goes through PixiJS WebGL.
+// Kept as a no-op reference for legacy Canvas 2D drawing functions (dead code).
+const ctx = (null as unknown as CanvasRenderingContext2D);
 const minimap = document.getElementById('minimap') as HTMLCanvasElement;
 const minimapCtx = minimap.getContext('2d')!;
 const scoreEl = document.getElementById('score')!;
@@ -1975,10 +2014,8 @@ function escapeHtml(s: string): string {
 }
 
 function resize(): void {
-  const w = window.innerWidth;
-  const h = window.innerHeight;
-  canvas.width = w;
-  canvas.height = h;
+  // PixiJS handles canvas resizing via its own resize listener (resizeTo: window).
+  // No manual canvas dimension update needed.
 }
 
 // --- Input handling ---
@@ -2185,8 +2222,8 @@ canvas.addEventListener('mousemove', (e) => {
     observerCameraX -= dx;
     observerCameraY -= dy;
     // Clamp to map bounds
-    observerCameraX = Math.max(canvas.width / 2, Math.min(MAP_WIDTH - canvas.width / 2, observerCameraX));
-    observerCameraY = Math.max(canvas.height / 2, Math.min(MAP_HEIGHT - canvas.height / 2, observerCameraY));
+    observerCameraX = Math.max(pixiScreenW / 2, Math.min(MAP_WIDTH - pixiScreenW / 2, observerCameraX));
+    observerCameraY = Math.max(pixiScreenH / 2, Math.min(MAP_HEIGHT - pixiScreenH / 2, observerCameraY));
     observerDragStartX = e.clientX;
     observerDragStartY = e.clientY;
   }
@@ -2225,8 +2262,8 @@ function handleAllyRequestAtPosition(screenX: number, screenY: number): void {
 canvas.addEventListener('click', (e) => {
   if (!latestSnapshot || !myPlayerId || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
   const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
+  const scaleX = pixiScreenW / rect.width;
+  const scaleY = pixiScreenH / rect.height;
   const screenX = (e.clientX - rect.left) * scaleX;
   const screenY = (e.clientY - rect.top) * scaleY;
   
@@ -2250,8 +2287,8 @@ canvas.addEventListener('touchend', (e) => {
   if (e.changedTouches.length !== 1) return;
   const touch = e.changedTouches[0];
   const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
+  const scaleX = pixiScreenW / rect.width;
+  const scaleY = pixiScreenH / rect.height;
   const screenX = (touch.clientX - rect.left) * scaleX;
   const screenY = (touch.clientY - rect.top) * scaleY;
   handleAllyRequestAtPosition(screenX, screenY);
@@ -2344,8 +2381,8 @@ let playerDisplayY: number | null = null;
 const PLAYER_DISPLAY_SMOOTH = 0.2; // Smoother camera follow (lower = more smoothing, less jitter)
 
 function getCamera(): { x: number; y: number; w: number; h: number } {
-  const w = canvas.width;
-  const h = canvas.height;
+  const w = pixiScreenW;
+  const h = pixiScreenH;
   
   // Check if player is eliminated (observer mode) or full spectator
   const me = latestSnapshot?.players.find((p) => p.id === myPlayerId);
@@ -2410,8 +2447,8 @@ function getCamera(): { x: number; y: number; w: number; h: number } {
 function applyPanDelta(deltaScreenX: number, deltaScreenY: number): void {
   cameraPanOffsetX -= deltaScreenX;
   cameraPanOffsetY -= deltaScreenY;
-  const w = canvas.width;
-  const h = canvas.height;
+  const w = pixiScreenW;
+  const h = pixiScreenH;
   const px = predictedPlayer?.x ?? MAP_WIDTH / 2;
   const py = predictedPlayer?.y ?? MAP_HEIGHT / 2;
   const maxX = Math.max(0, MAP_WIDTH - w);
@@ -3365,8 +3402,8 @@ function tick(now: number): void {
     if (keys['KeyA'] || keys['ArrowLeft']) observerCameraX -= OBSERVER_PAN_SPEED;
     if (keys['KeyD'] || keys['ArrowRight']) observerCameraX += OBSERVER_PAN_SPEED;
     // Clamp to map bounds
-    observerCameraX = Math.max(canvas.width / 2, Math.min(MAP_WIDTH - canvas.width / 2, observerCameraX));
-    observerCameraY = Math.max(canvas.height / 2, Math.min(MAP_HEIGHT - canvas.height / 2, observerCameraY));
+    observerCameraX = Math.max(pixiScreenW / 2, Math.min(MAP_WIDTH - pixiScreenW / 2, observerCameraX));
+    observerCameraY = Math.max(pixiScreenH / 2, Math.min(MAP_HEIGHT - pixiScreenH / 2, observerCameraY));
   }
 
   const matchOver = latestSnapshot != null && latestSnapshot.matchEndAt > 0 && latestSnapshot.tick >= latestSnapshot.matchEndAt;
@@ -3561,3161 +3598,170 @@ function getInterpolatedPet(id: string): PetState | null {
   return _interpPetBuf;
 }
 
-// --- World rendering (agar.io / territorial.io style) ---
-const DOT_SPACING = 36;
-const DOT_R = 1.8;
-
-// ============================================
-// SEASON VISUALS
-// ============================================
-
-// --- Snowflake particle system (Winter) ---
-interface Snowflake { x: number; y: number; r: number; speed: number; drift: number; }
-const snowflakes: Snowflake[] = [];
-const SNOWFLAKE_COUNT = 120;
-for (let i = 0; i < SNOWFLAKE_COUNT; i++) {
-  snowflakes.push({
-    x: Math.random() * 2000,
-    y: Math.random() * 2000,
-    r: 1 + Math.random() * 2.5,
-    speed: 20 + Math.random() * 40,
-    drift: (Math.random() - 0.5) * 15,
-  });
-}
-
-// --- Leaf particle system (Fall) ---
-interface Leaf { x: number; y: number; r: number; angle: number; speed: number; color: string; rotSpeed: number; }
-const leaves: Leaf[] = [];
-const LEAF_COUNT = 80;
-const LEAF_COLORS = ['#c0392b', '#e67e22', '#d4a017', '#b8860b', '#8B4513'];
-for (let i = 0; i < LEAF_COUNT; i++) {
-  leaves.push({
-    x: Math.random() * 2000,
-    y: Math.random() * 2000,
-    r: 2 + Math.random() * 3,
-    angle: Math.random() * Math.PI * 2,
-    speed: 30 + Math.random() * 50,
-    color: LEAF_COLORS[Math.floor(Math.random() * LEAF_COLORS.length)],
-    rotSpeed: (Math.random() - 0.5) * 4,
-  });
-}
-
-/** Season background colors */
-const SEASON_BG: Record<Season, string> = {
-  winter: '#b8cce0',
-  spring: '#2d7a2d',
-  summer: '#5a7a3d',
-  fall: '#4a6b3d',
-};
-
-/** Season dot colors */
-const SEASON_DOT: Record<Season, string> = {
-  winter: 'rgba(255,255,255,0.5)',
-  spring: 'rgba(255,255,255,0.3)',
-  summer: 'rgba(255,255,200,0.3)',
-  fall: 'rgba(255,240,220,0.3)',
-};
-
-function hashColor(id: string): string {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  const hue = (h % 360);
-  return `hsl(${hue}, 72%, 58%)`;
-}
-
-/** Update snowflake/leaf positions each frame (called from render). */
-function updateSeasonParticles(dt: number, cam: { x: number; y: number; w: number; h: number }): void {
-  if (currentSeason === 'winter') {
-    for (const s of snowflakes) {
-      s.y += s.speed * dt;
-      s.x += s.drift * dt;
-      // Wrap around the camera viewport
-      if (s.y > cam.y + cam.h + 20) { s.y = cam.y - 20; s.x = cam.x + Math.random() * cam.w; }
-      if (s.x < cam.x - 20) s.x = cam.x + cam.w + 10;
-      if (s.x > cam.x + cam.w + 20) s.x = cam.x - 10;
-    }
-  }
-  if (currentSeason === 'fall') {
-    const tick = latestSnapshot?.tick ?? 0;
-    const wind = getWindMultiplier(tick);
-    const windAngle = wind > 1 ? -0.5 : 0.5; // wind direction shifts
-    for (const l of leaves) {
-      l.x += (l.speed * wind * 0.8 + Math.sin(l.angle) * 10) * dt;
-      l.y += (l.speed * 0.4 + Math.cos(l.angle) * 5) * dt;
-      l.angle += l.rotSpeed * dt;
-      // Wrap around the camera viewport
-      if (l.y > cam.y + cam.h + 20) { l.y = cam.y - 20; l.x = cam.x + Math.random() * cam.w; }
-      if (l.x > cam.x + cam.w + 40) { l.x = cam.x - 30; l.y = cam.y + Math.random() * cam.h; }
-      if (l.x < cam.x - 40) { l.x = cam.x + cam.w + 20; }
-    }
-  }
-}
-
-/** Draw seasonal particles on top of the world (called after world entities, before UI). */
-function drawSeasonParticles(cam: { x: number; y: number; w: number; h: number }): void {
-  if (currentSeason === 'winter') {
-    ctx.fillStyle = 'rgba(255,255,255,0.8)';
-    for (const s of snowflakes) {
-      if (s.x < cam.x - 10 || s.x > cam.x + cam.w + 10) continue;
-      if (s.y < cam.y - 10 || s.y > cam.y + cam.h + 10) continue;
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-  if (currentSeason === 'fall') {
-    const tick = latestSnapshot?.tick ?? 0;
-    const wind = getWindMultiplier(tick);
-    // Draw wind streaks
-    ctx.save();
-    ctx.globalAlpha = 0.08 + Math.abs(wind - 1) * 0.3;
-    ctx.strokeStyle = 'rgba(200,200,200,0.5)';
-    ctx.lineWidth = 1;
-    const streakAngle = wind > 1 ? -0.3 : 0.3;
-    for (let i = 0; i < 25; i++) {
-      const sx = cam.x + (((i * 137 + tick * 2) % (cam.w + 200)) - 100);
-      const sy = cam.y + (((i * 89 + tick * 3) % (cam.h + 200)) - 100);
-      const len = 30 + Math.abs(wind - 1) * 80;
-      ctx.beginPath();
-      ctx.moveTo(sx, sy);
-      ctx.lineTo(sx + Math.cos(streakAngle) * len, sy + Math.sin(streakAngle) * len);
-      ctx.stroke();
-    }
-    ctx.restore();
-    // Draw leaves
-    for (const l of leaves) {
-      if (l.x < cam.x - 10 || l.x > cam.x + cam.w + 10) continue;
-      if (l.y < cam.y - 10 || l.y > cam.y + cam.h + 10) continue;
-      ctx.save();
-      ctx.translate(l.x, l.y);
-      ctx.rotate(l.angle);
-      ctx.fillStyle = l.color;
-      ctx.beginPath();
-      // Leaf shape: two curves
-      ctx.moveTo(0, -l.r);
-      ctx.quadraticCurveTo(l.r * 1.5, 0, 0, l.r);
-      ctx.quadraticCurveTo(-l.r * 1.5, 0, 0, -l.r);
-      ctx.fill();
-      ctx.restore();
-    }
-  }
-}
-
-function drawMapBackground(cam: { x: number; y: number; w: number; h: number }): void {
-  const pad = DOT_SPACING * 2;
-  const x0 = Math.floor((cam.x - pad) / DOT_SPACING) * DOT_SPACING;
-  const y0 = Math.floor((cam.y - pad) / DOT_SPACING) * DOT_SPACING;
-  const x1 = Math.ceil((cam.x + cam.w + pad) / DOT_SPACING) * DOT_SPACING;
-  const y1 = Math.ceil((cam.y + cam.h + pad) / DOT_SPACING) * DOT_SPACING;
-
-  // Season-aware background
-  ctx.fillStyle = SEASON_BG[currentSeason];
-  ctx.fillRect(cam.x, cam.y, cam.w, cam.h);
-
-  // Season-specific terrain patches
-  if (currentSeason === 'winter') {
-    // Ice/snow patches
-    const patchSpacing = 300;
-    const px0 = Math.floor((cam.x - patchSpacing) / patchSpacing) * patchSpacing;
-    const py0 = Math.floor((cam.y - patchSpacing) / patchSpacing) * patchSpacing;
-    const px1 = Math.ceil((cam.x + cam.w + patchSpacing) / patchSpacing) * patchSpacing;
-    const py1 = Math.ceil((cam.y + cam.h + patchSpacing) / patchSpacing) * patchSpacing;
-    for (let py = py0; py <= py1; py += patchSpacing) {
-      for (let px = px0; px <= px1; px += patchSpacing) {
-        // Deterministic placement using spatial hash
-        const hash = Math.sin(px * 0.017 + py * 0.013) * 43758.5453;
-        const t = hash - Math.floor(hash);
-        if (t > 0.55) continue; // ~55% chance of a patch
-        const patchR = 30 + t * 60;
-        const offX = (hash * 7) % patchSpacing * 0.5;
-        const offY = (hash * 13) % patchSpacing * 0.5;
-        ctx.fillStyle = t > 0.3 ? 'rgba(220,235,248,0.4)' : 'rgba(200,220,240,0.3)';
-        ctx.beginPath();
-        ctx.ellipse(px + offX, py + offY, patchR, patchR * 0.7, t * Math.PI, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-  } else if (currentSeason === 'spring') {
-    // Thick vegetation patches (matching server isInVegetationPatch)
-    const vegSpacing = 60;
-    const vx0 = Math.floor((cam.x - vegSpacing) / vegSpacing) * vegSpacing;
-    const vy0 = Math.floor((cam.y - vegSpacing) / vegSpacing) * vegSpacing;
-    const vx1 = Math.ceil((cam.x + cam.w + vegSpacing) / vegSpacing) * vegSpacing;
-    const vy1 = Math.ceil((cam.y + cam.h + vegSpacing) / vegSpacing) * vegSpacing;
-    for (let vy = vy0; vy <= vy1; vy += vegSpacing) {
-      for (let vx = vx0; vx <= vx1; vx += vegSpacing) {
-        if (isInVegetationPatch(vx, vy)) {
-          ctx.fillStyle = 'rgba(20,90,20,0.25)';
-          ctx.fillRect(vx - vegSpacing / 2, vy - vegSpacing / 2, vegSpacing, vegSpacing);
-        }
-      }
-    }
-    // Small flower dots
-    const flowerSpacing = 150;
-    const fx0 = Math.floor((cam.x - flowerSpacing) / flowerSpacing) * flowerSpacing;
-    const fy0 = Math.floor((cam.y - flowerSpacing) / flowerSpacing) * flowerSpacing;
-    const fx1 = Math.ceil((cam.x + cam.w + flowerSpacing) / flowerSpacing) * flowerSpacing;
-    const fy1 = Math.ceil((cam.y + cam.h + flowerSpacing) / flowerSpacing) * flowerSpacing;
-    const flowerColors = ['#ff69b4', '#ff6347', '#ffd700', '#da70d6', '#fff'];
-    for (let fy = fy0; fy <= fy1; fy += flowerSpacing) {
-      for (let fx = fx0; fx <= fx1; fx += flowerSpacing) {
-        const fHash = Math.sin(fx * 0.031 + fy * 0.023) * 43758.5453;
-        const ft = fHash - Math.floor(fHash);
-        if (ft > 0.4) continue;
-        const color = flowerColors[Math.floor(ft * 5 * flowerColors.length) % flowerColors.length];
-        const fOx = (fHash * 11) % flowerSpacing * 0.6;
-        const fOy = (fHash * 17) % flowerSpacing * 0.6;
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.arc(fx + fOx, fy + fOy, 2, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-  } else if (currentSeason === 'summer') {
-    // Brown/dry patches
-    const drySpacing = 280;
-    const dx0 = Math.floor((cam.x - drySpacing) / drySpacing) * drySpacing;
-    const dy0 = Math.floor((cam.y - drySpacing) / drySpacing) * drySpacing;
-    const dx1 = Math.ceil((cam.x + cam.w + drySpacing) / drySpacing) * drySpacing;
-    const dy1 = Math.ceil((cam.y + cam.h + drySpacing) / drySpacing) * drySpacing;
-    for (let dy = dy0; dy <= dy1; dy += drySpacing) {
-      for (let dx = dx0; dx <= dx1; dx += drySpacing) {
-        const dHash = Math.sin(dx * 0.019 + dy * 0.011) * 43758.5453;
-        const dt = dHash - Math.floor(dHash);
-        if (dt > 0.45) continue;
-        const patchR = 25 + dt * 55;
-        const doX = (dHash * 9) % drySpacing * 0.4;
-        const doY = (dHash * 15) % drySpacing * 0.4;
-        ctx.fillStyle = dt > 0.25 ? 'rgba(160,140,80,0.2)' : 'rgba(140,120,60,0.15)';
-        ctx.beginPath();
-        ctx.ellipse(dx + doX, dy + doY, patchR, patchR * 0.65, dt * Math.PI * 2, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-  }
-  // Fall terrain: slight orange/brown hue patches (leaves on ground)
-  if (currentSeason === 'fall') {
-    const fallSpacing = 200;
-    const ax0 = Math.floor((cam.x - fallSpacing) / fallSpacing) * fallSpacing;
-    const ay0 = Math.floor((cam.y - fallSpacing) / fallSpacing) * fallSpacing;
-    const ax1 = Math.ceil((cam.x + cam.w + fallSpacing) / fallSpacing) * fallSpacing;
-    const ay1 = Math.ceil((cam.y + cam.h + fallSpacing) / fallSpacing) * fallSpacing;
-    for (let ay = ay0; ay <= ay1; ay += fallSpacing) {
-      for (let ax = ax0; ax <= ax1; ax += fallSpacing) {
-        const aHash = Math.sin(ax * 0.021 + ay * 0.017) * 43758.5453;
-        const at = aHash - Math.floor(aHash);
-        if (at > 0.5) continue;
-        const patchR = 20 + at * 40;
-        const aoX = (aHash * 7) % fallSpacing * 0.5;
-        const aoY = (aHash * 11) % fallSpacing * 0.5;
-        ctx.fillStyle = at > 0.3 ? 'rgba(180,120,50,0.12)' : 'rgba(160,100,40,0.1)';
-        ctx.beginPath();
-        ctx.ellipse(ax + aoX, ay + aoY, patchR, patchR * 0.7, at * Math.PI, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-  }
-
-  // Grid dots
-  ctx.fillStyle = SEASON_DOT[currentSeason];
-  for (let yy = y0; yy <= y1; yy += DOT_SPACING) {
-    for (let xx = x0; xx <= x1; xx += DOT_SPACING) {
-      ctx.fillRect(xx - DOT_R, yy - DOT_R, DOT_R * 2, DOT_R * 2);
-    }
-  }
-}
-
-function drawAdoptionZone(z: AdoptionZoneState): void {
-  const cx = z.x;
-  const cy = z.y;
-  const r = z.radius || ADOPTION_ZONE_RADIUS; // Fallback if radius is missing
-  if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(r)) return;
-  ctx.save();
-  ctx.strokeStyle = 'rgba(123, 237, 159, 0.6)';
-  ctx.lineWidth = 4;
-  ctx.setLineDash([8, 8]);
-  ctx.strokeRect(cx - r, cy - r, r * 2, r * 2);
-  ctx.setLineDash([]);
-  ctx.fillStyle = 'rgba(74, 124, 89, 0.2)';
-  ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
-  ctx.fillStyle = '#7bed9f';
-  ctx.font = 'bold 14px Rubik, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('ADOPTION CENTER', cx, cy - r - 8);
-  ctx.fillText('Bring pets here to adopt out', cx, cy);
-  ctx.restore();
-}
-
-function drawAdoptionEvent(ev: AdoptionEvent, nowTick: number): void {
-  const cx = ev.x;
-  const cy = ev.y;
-  const r = ev.radius || 300; // Use event's radius or default to 300
-  const remaining = Math.max(0, ev.startTick + ev.durationTicks - nowTick);
-  const secLeft = Math.ceil(remaining / 25);
-  const imgSize = 100; // Larger for better visibility
-  
-  // Pulsing effect based on tick
-  const pulse = 0.8 + 0.2 * Math.sin(nowTick * 0.15);
-  
-  // Check if player is nearby (for enhanced glow)
-  const me = latestSnapshot?.players.find(p => p.id === myPlayerId);
-  const playerDist = me ? Math.hypot(me.x - cx, me.y - cy) : Infinity;
-  const isNearby = playerDist <= r;
-
-  ctx.save();
-  
-  // Draw outer glow when nearby (pulsing)
-  if (isNearby) {
-    ctx.fillStyle = `rgba(255, 193, 7, ${0.15 * pulse})`;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r + 20, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  
-  // Draw main event image or fallback
-  if (adoptionEventImageLoaded) {
-    ctx.drawImage(adoptionEventImage, cx - imgSize / 2, cy - imgSize / 2, imgSize, imgSize);
-  } else {
-    // Fallback: bright yellow circle with icon
-    ctx.fillStyle = `rgba(255, 193, 7, ${0.5 * pulse})`;
-    ctx.beginPath();
-    ctx.arc(cx, cy, imgSize / 2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#ffc107';
-    ctx.lineWidth = 4;
-    ctx.stroke();
-    // Draw a tent/event icon
-    ctx.fillStyle = '#1a1a2e';
-    ctx.font = 'bold 36px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('🎪', cx, cy);
-  }
-  
-  // Draw radius circle (dashed border)
-  ctx.strokeStyle = isNearby ? `rgba(123, 237, 159, ${0.9 * pulse})` : `rgba(255, 193, 7, ${0.8 * pulse})`;
-  ctx.lineWidth = isNearby ? 6 : 4;
-  ctx.setLineDash([12, 8]);
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  
-  // Semi-transparent fill
-  ctx.fillStyle = isNearby ? `rgba(123, 237, 159, 0.15)` : `rgba(255, 193, 7, 0.15)`;
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fill();
-  
-  // Event name label (above the radius)
-  ctx.fillStyle = isNearby ? '#7bed9f' : '#ffc107';
-  ctx.font = 'bold 16px Rubik, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'alphabetic';
-  const typeName = ev.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-  ctx.fillText(`📢 ${typeName}`, cx, cy - r - 12);
-  
-  // Timer and progress label (below the image)
-  ctx.font = 'bold 14px Rubik, sans-serif';
-  const totalNeeded = ev.totalNeeded ?? 100;
-  const totalRescued = ev.totalRescued ?? 0;
-  const progressText = `${totalRescued}/${totalNeeded} rescued`;
-  const timerText = isNearby ? `${secLeft}s - DROP PETS HERE!` : `${secLeft}s left - bring pets here!`;
-  ctx.fillText(timerText, cx, cy + imgSize / 2 + 18);
-  ctx.fillText(progressText, cx, cy + imgSize / 2 + 36);
-  
-  ctx.restore();
-}
-
-/** Draw teleport/port effect at a location */
-function drawPortEffect(x: number, y: number, progress: number, isAppearing: boolean): void {
-  ctx.save();
-  
-  const radius = 60;
-  const alpha = isAppearing ? progress : (1 - progress);
-  const scale = isAppearing ? (0.5 + progress * 0.5) : (1 + progress * 0.5);
-  
-  ctx.translate(x, y);
-  ctx.scale(scale, scale);
-  
-  // Outer ring
-  ctx.beginPath();
-  ctx.arc(0, 0, radius, 0, Math.PI * 2);
-  ctx.strokeStyle = `rgba(200, 150, 255, ${alpha * 0.8})`;
-  ctx.lineWidth = 4;
-  ctx.stroke();
-  
-  // Inner glow
-  const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
-  gradient.addColorStop(0, `rgba(180, 120, 255, ${alpha * 0.6})`);
-  gradient.addColorStop(0.5, `rgba(140, 80, 220, ${alpha * 0.3})`);
-  gradient.addColorStop(1, 'rgba(100, 50, 180, 0)');
-  ctx.fillStyle = gradient;
-  ctx.beginPath();
-  ctx.arc(0, 0, radius, 0, Math.PI * 2);
-  ctx.fill();
-  
-  // Sparkles
-  const sparkleCount = 8;
-  const time = Date.now() / 100;
-  for (let i = 0; i < sparkleCount; i++) {
-    const angle = (i / sparkleCount) * Math.PI * 2 + time * 0.5;
-    const dist = radius * 0.6 * (0.8 + Math.sin(time + i) * 0.2);
-    const sx = Math.cos(angle) * dist;
-    const sy = Math.sin(angle) * dist;
-    const sparkleSize = 3 + Math.sin(time * 2 + i) * 1.5;
-    
-    ctx.beginPath();
-    ctx.arc(sx, sy, sparkleSize, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(255, 255, 255, ${alpha * 0.9})`;
-    ctx.fill();
-  }
-  
-  ctx.restore();
-}
-
-/** Draw animated fire/boost flames behind the van when speed boost is active
- * @param facingDir 1 = facing right, -1 = facing left
- * @param size 'small' for permanent 20% upgrade, 'large' for temporary boost */
-function drawSpeedBoostFire(cx: number, cy: number, vanHalf: number, facingDir: number, size: 'small' | 'large' = 'large'): void {
-  ctx.save();
-  
-  // Scale factors based on flame size
-  const scale = size === 'small' ? 0.5 : 1.0;
-  const alphaMultiplier = size === 'small' ? 0.6 : 1.0;
-  
-  // Fire is at the back of the van (opposite of facing direction)
-  const fireDistance = vanHalf + 8 * scale;
-  const fireX = cx - facingDir * fireDistance; // Back is opposite of facing
-  const fireY = cy;
-  
-  // Animated flame effect using time
-  const time = Date.now() / 100;
-  const flicker = Math.sin(time * 3) * 0.3 + 0.7;
-  const flicker2 = Math.cos(time * 4) * 0.2 + 0.8;
-  
-  // Outer glow
-  const glowRadius = 25 * scale;
-  const gradient = ctx.createRadialGradient(fireX, fireY, 0, fireX, fireY, glowRadius);
-  gradient.addColorStop(0, `rgba(255, 200, 50, ${0.6 * flicker * alphaMultiplier})`);
-  gradient.addColorStop(0.5, `rgba(255, 100, 20, ${0.4 * flicker * alphaMultiplier})`);
-  gradient.addColorStop(1, 'rgba(255, 50, 0, 0)');
-  ctx.fillStyle = gradient;
-  ctx.beginPath();
-  ctx.arc(fireX, fireY, glowRadius, 0, Math.PI * 2);
-  ctx.fill();
-  
-  // Main flame (pointing away from van, in the back direction)
-  const baseFlameLength = 18 * scale;
-  const baseFlameWidth = 10 * scale;
-  const flameLength = baseFlameLength + Math.sin(time * 5) * 4 * scale;
-  const flameWidth = baseFlameWidth + Math.cos(time * 6) * 2 * scale;
-  
-  // Translate to fire position
-  ctx.translate(fireX, fireY);
-  // Rotate to point away from van (left if facing right, right if facing left)
-  if (facingDir > 0) {
-    ctx.rotate(Math.PI); // Point left (backward)
-  }
-  // If facing left, flame already points right (backward)
-  
-  // Draw flame pointing in +X direction
-  ctx.beginPath();
-  ctx.moveTo(-5, -flameWidth / 2);
-  ctx.quadraticCurveTo(
-    flameLength * 0.6, -flameWidth * 0.3 * flicker2,
-    flameLength, 0
-  );
-  ctx.quadraticCurveTo(
-    flameLength * 0.6, flameWidth * 0.3 * flicker2,
-    -5, flameWidth / 2
-  );
-  ctx.closePath();
-  
-  const flameGrad = ctx.createLinearGradient(-5, 0, flameLength, 0);
-  flameGrad.addColorStop(0, '#FFD700');
-  flameGrad.addColorStop(0.3, '#FF8C00');
-  flameGrad.addColorStop(0.7, '#FF4500');
-  flameGrad.addColorStop(1, 'rgba(255, 69, 0, 0.3)');
-  ctx.fillStyle = flameGrad;
-  ctx.fill();
-  
-  // Inner bright flame
-  const innerLength = flameLength * 0.6;
-  const innerWidth = flameWidth * 0.5;
-  ctx.beginPath();
-  ctx.moveTo(-5, -innerWidth / 2);
-  ctx.quadraticCurveTo(
-    innerLength * 0.5, -innerWidth * 0.2,
-    innerLength, 0
-  );
-  ctx.quadraticCurveTo(
-    innerLength * 0.5, innerWidth * 0.2,
-    -5, innerWidth / 2
-  );
-  ctx.closePath();
-  ctx.fillStyle = '#FFFF80';
-  ctx.fill();
-  
-  ctx.restore();
-}
-
-function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
-  // Vans are ALWAYS fixed size - shelters are now separate entities drawn by drawShelter()
-  const VAN_FIXED_SIZE = 50;
-  const half = VAN_FIXED_SIZE; // Vans never grow visually
-  const cx = p.x;
-  const cy = p.y;
-  
-  // Handle port animation
-  const portAnim = portAnimations.get(p.id);
-  let portAlpha = 1;
-  if (portAnim) {
-    const elapsed = Date.now() - portAnim.startTime;
-    if (portAnim.phase === 'fadeIn') {
-      // Fading in at new location
-      portAlpha = Math.min(1, elapsed / PORT_ANIMATION_DURATION);
-      if (elapsed >= PORT_ANIMATION_DURATION) {
-        portAnimations.delete(p.id);
-        portAlpha = 1;
-      }
-    }
-  }
-  
-  // Facing direction: 1 = right, -1 = left (updated in render() based on vx)
-  const speed = Math.hypot(p.vx, p.vy);
-  const facingDir = vanFacingDir.get(p.id) ?? 1; // Default to facing right
-  
-  // Bobbing: when moving, add a small vertical bounce (shocks)
-  const bobAmplitude = 3;
-  const bobFreq = 0.012;
-  const drawCy = speed > 0.01 ? cy + Math.sin(Date.now() * bobFreq) * bobAmplitude : cy;
-  
-  ctx.save();
-  ctx.globalAlpha = portAlpha;
-  ctx.shadowColor = 'rgba(0,0,0,0.4)';
-  ctx.shadowBlur = 10;
-  
-  // Check if speed boost is active (temporary or permanent)
-  const nowTick = latestSnapshot?.tick ?? 0;
-  const hasTemporaryBoost = (p.speedBoostUntil ?? 0) > nowTick;
-  const hasPermanentSpeed = !!p.vanSpeedUpgrade;
-  
-  // Draw speed boost fire effect behind van (before van body)
-  // Large flame for temporary boost, small flame for permanent 20% upgrade
-  if (!p.eliminated) {
-    if (hasTemporaryBoost) {
-      drawSpeedBoostFire(cx, drawCy, half, facingDir, 'large');
-    } else if (hasPermanentSpeed) {
-      drawSpeedBoostFire(cx, drawCy, half, facingDir, 'small');
-    }
-  }
-  
-  // Determine fill color/gradient
-  let fillStyle: string | CanvasGradient;
-  const isBot = p.id.startsWith('cpu-');
-  let baseColor = isMe ? '#7bed9f' : hashColor(p.id);
-  if (p.eliminated) {
-    fillStyle = 'rgba(100,100,100,0.5)';
-    baseColor = '#666';
-  } else if (isBot && p.team) {
-    // Bots in Teams mode: entire van matches team color
-    baseColor = p.team === 'red' ? '#c0392b' : '#2980b9';
-    fillStyle = baseColor;
-  } else if (p.shelterColor) {
-    if (p.shelterColor.startsWith('gradient:')) {
-      const parts = p.shelterColor.split(':');
-      const color1 = parts[1] || '#ff5500';
-      const color2 = parts[2] || '#00aaff';
-      fillStyle = color1; // Will create gradient after transform
-      baseColor = color1;
-    } else {
-      fillStyle = p.shelterColor;
-      baseColor = p.shelterColor;
-    }
-  } else {
-    fillStyle = baseColor;
-  }
-  // Team window color (used below when drawing the cabin window)
-  const teamWindowColor = p.team === 'red' ? 'rgba(231,76,60,0.75)' : p.team === 'blue' ? 'rgba(52,152,219,0.75)' : null;
-  
-  // Van dimensions - always van shape (shelters are separate entities now)
-  const vanWidth = half * 2;
-  const vanHeight = half * 1.2; // Van is elongated rectangle
-  const cornerRadius = Math.min(12, half * 0.3);
-  const wheelRadius = Math.min(10, half * 0.25);
-  
-  // Translate to center - NO rotation, just horizontal flip based on facing direction
-  ctx.translate(cx, drawCy);
-  // Flip horizontally if facing left (wheels always stay at bottom)
-  if (facingDir < 0) {
-    ctx.scale(-1, 1);
-  }
-  
-  // Handle gradient
-  if (p.shelterColor?.startsWith('gradient:') && !p.eliminated) {
-    const parts = p.shelterColor.split(':');
-    const color1 = parts[1] || '#ff5500';
-    const color2 = parts[2] || '#00aaff';
-    const grad = ctx.createLinearGradient(-half, 0, half, 0);
-    grad.addColorStop(0, color1);
-    grad.addColorStop(1, color2);
-    fillStyle = grad;
-  }
-  
-  // Draw van body relative to origin (rounded rectangle)
-  // Van is drawn pointing right (+x is front), horizontal flip handles left direction
-  ctx.fillStyle = fillStyle;
-  ctx.beginPath();
-  ctx.roundRect(-half, -vanHeight * 0.5, vanWidth, vanHeight, cornerRadius);
-  ctx.fill();
-  
-  // Van cabin (front section - darker) - front is on the right (+x direction)
-  const cabinWidth = vanWidth * 0.3;
-  ctx.fillStyle = 'rgba(0,0,0,0.15)';
-  ctx.beginPath();
-  ctx.roundRect(-half + vanWidth - cabinWidth, -vanHeight * 0.5, cabinWidth, vanHeight, [0, cornerRadius, cornerRadius, 0]);
-  ctx.fill();
-  
-  // Window (in cabin) - tinted with team color in Teams mode
-  const windowPad = 4;
-  const windowWidth = cabinWidth - windowPad * 2;
-  const windowHeight = vanHeight * 0.4;
-  ctx.fillStyle = teamWindowColor ?? 'rgba(135,206,250,0.7)';
-  ctx.beginPath();
-  ctx.roundRect(-half + vanWidth - cabinWidth + windowPad, -vanHeight * 0.5 + windowPad, windowWidth, windowHeight, 4);
-  ctx.fill();
-  
-  // Van border (draw before wheels so border is on body only)
-  const hasAllyRequest = !isMe && sentAllyRequests.has(p.id);
-  if (hasAllyRequest) {
-    ctx.strokeStyle = '#7bed9f';
-    ctx.lineWidth = 3;
-    ctx.setLineDash([6, 4]);
-  } else {
-    ctx.strokeStyle = isMe ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)';
-    ctx.lineWidth = isMe ? 3 : 2;
-  }
-  ctx.beginPath();
-  ctx.roundRect(-half, -vanHeight * 0.5, vanWidth, vanHeight, cornerRadius);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  
-  // Wheels (always at bottom - wheels stay on ground/south)
-  ctx.fillStyle = '#333';
-  // Front wheel (right side in local coordinates, which is the front)
-  const frontWheelX = half - vanWidth * 0.3;
-  // Rear wheel (left side in local coordinates)
-  const rearWheelX = -half + vanWidth * 0.3;
-  // Wheels are below the van body (always at bottom/south)
-  const wheelY = vanHeight * 0.5 + wheelRadius * 0.3;
-  ctx.beginPath();
-  ctx.arc(rearWheelX, wheelY, wheelRadius, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(frontWheelX, wheelY, wheelRadius, 0, Math.PI * 2);
-  ctx.fill();
-  // Wheel hubcaps
-  ctx.fillStyle = '#888';
-  ctx.beginPath();
-  ctx.arc(rearWheelX, wheelY, wheelRadius * 0.4, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(frontWheelX, wheelY, wheelRadius * 0.4, 0, Math.PI * 2);
-  ctx.fill();
-  
-  // Undo horizontal flip so text is always readable
-  if (facingDir < 0) {
-    ctx.scale(-1, 1);
-  }
-  
-  // Pet count label (move into center of van with white font)
-  const displayCapacity = Math.min(Math.floor(p.size), VAN_MAX_CAPACITY);
-  ctx.fillStyle = '#fff'; // Use white for in-van label
-  ctx.font = 'bold 13px Rubik, sans-serif';
-  //we need this to align under the window - add 10px to the y position
-  const yOffset = 10;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(`Pets: ${p.petsInside.length}/${displayCapacity}`, 0, yOffset); // center of van
-  // Show player name only for other players (not "You" for local player)
-  if (!isMe) {
-    const nameText = p.displayName ?? p.id;
-    const nameY = -vanHeight * 0.5 - 10; // Just above the van top with small gap
-    ctx.fillText(nameText, 0, nameY);
-    // Draw friend/foe indicator dot next to name
-    const rel = getRelationshipByPlayerId(p.id);
-    if (rel) {
-      const nameWidth = ctx.measureText(nameText).width;
-      const dotX = nameWidth / 2 + 8;
-      ctx.beginPath();
-      ctx.arc(dotX, nameY, 5, 0, Math.PI * 2);
-      ctx.fillStyle = rel === 'friend' ? '#2ecc71' : '#e74c3c';
-      ctx.fill();
-      ctx.fillStyle = '#fff'; // Reset
-    }
-  }
-  if (hasAllyRequest) {
-    ctx.fillStyle = '#7bed9f';
-    ctx.fillText('\uD83E\uDD1D', half + 10, -half);
-    ctx.fillStyle = '#2d2d2d';
-  }
-  if (p.eliminated) {
-    ctx.font = '18px sans-serif';
-    ctx.fillText('\uD83D\uDC7B', 0, 0);
-    ctx.font = 'bold 12px Rubik, sans-serif';
-  }
-  ctx.restore();
-}
-
-// ============================================================
-// SHELTER TOP-DOWN FLOORPLAN RENDERER
-// ============================================================
-
-/** Room type determines floor color and label */
-type ShelterRoomType = 'kennel' | 'medical' | 'reception' | 'corridor' | 'grooming' | 'catRoom' | 'birdRoom' | 'education' | 'community' | 'breakRoom';
-/** Room definition for shelter layout */
-interface ShelterRoom {
-  /** Offset from shelter center */
-  rx: number; ry: number;
-  w: number; h: number;
-  type: ShelterRoomType;
-  label?: string;
-  /** Number of kennel cells in this room (only for kennel type) */
-  kennelSlots?: number;
-}
-/** Outdoor yard definition */
-interface ShelterYard {
-  rx: number; ry: number;
-  w: number; h: number;
-  label?: string;
-  /** Has exercise equipment (circles) */
-  hasEquipment?: boolean;
-  /** Has walking path */
-  hasPath?: boolean;
-}
-
-/** Floor colors per room type */
-const ROOM_FLOOR_COLORS: Record<ShelterRoomType, string> = {
-  kennel: '#f5e6c8',
-  medical: '#e0f0f5',
-  reception: '#f0dbb8',
-  corridor: '#d9d0c4',
-  grooming: '#e6d8ef',
-  catRoom: '#fce4d6',
-  birdRoom: '#daf0e0',
-  education: '#e2e8f0',
-  community: '#fff5e0',
-  breakRoom: '#e8f5e8',
-};
-
-/** Kennel pet mini-emojis (smaller text) */
-const KENNEL_PET_EMOJIS: Record<number, string> = {
-  [PET_TYPE_CAT]: '🐱',
-  [PET_TYPE_DOG]: '🐶',
-  [PET_TYPE_BIRD]: '🐦',
-  [PET_TYPE_RABBIT]: '🐰',
-  [PET_TYPE_SPECIAL]: '⭐',
-};
-
-/** Draw a single room (floor + walls) in shelter-local coordinates */
-function drawShelterRoom(rx: number, ry: number, w: number, h: number, type: ShelterRoomType, label?: string, hasKennels?: boolean): void {
-  // Floor
-  ctx.fillStyle = ROOM_FLOOR_COLORS[type] || '#d9d0c4';
-  ctx.beginPath();
-  ctx.roundRect(rx, ry, w, h, 3);
-  ctx.fill();
-
-  // Wall outline
-  ctx.strokeStyle = '#8a7b6b';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-
-  // Room label -- position at bottom for kennel rooms so it doesn't overlap cells
-  if (label) {
-    ctx.fillStyle = 'rgba(100, 80, 60, 0.55)';
-    ctx.font = '7px Rubik, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    if (hasKennels) {
-      ctx.fillText(label, rx + w / 2, ry + h - 6);
-    } else {
-      ctx.fillText(label, rx + w / 2, ry + h / 2);
-    }
-  }
-}
-
-/** Draw individual kennel cells inside a kennel room, populating with pets */
-function drawShelterKennels(
-  rx: number, ry: number, roomW: number, roomH: number,
-  slots: number, petIds: string[], petStartIdx: number
-): number {
-  const cellW = 14;
-  const cellH = 14;
-  const pad = 3;
-  const cols = Math.max(1, Math.floor((roomW - 6) / (cellW + pad)));
-  let drawn = 0;
-
-  for (let i = 0; i < slots; i++) {
-    const row = Math.floor(i / cols);
-    const col = i % cols;
-    const kx = rx + 4 + col * (cellW + pad);
-    const ky = ry + 4 + row * (cellH + pad);
-    if (ky + cellH > ry + roomH - 2) break; // Don't draw outside room
-
-    const petIdx = petStartIdx + i;
-    const hasPet = petIdx < petIds.length;
-
-    // Cell background
-    ctx.fillStyle = hasPet ? '#f5e0b8' : '#e0d8cc';
-    ctx.fillRect(kx, ky, cellW, cellH);
-
-    // Cell bars/gate
-    ctx.strokeStyle = hasPet ? '#8a7050' : '#b0a898';
-    ctx.lineWidth = 0.8;
-    ctx.strokeRect(kx, ky, cellW, cellH);
-    // Gate line (bottom)
-    ctx.beginPath();
-    ctx.moveTo(kx + 2, ky + cellH);
-    ctx.lineTo(kx + cellW - 2, ky + cellH);
-    ctx.strokeStyle = '#a08060';
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-
-    // Pet emoji if occupied
-    if (hasPet) {
-      const petId = petIds[petIdx];
-      const petType = lastPetTypesById.get(petId) ?? PET_TYPE_CAT;
-      const emoji = KENNEL_PET_EMOJIS[petType] ?? KENNEL_PET_EMOJIS[PET_TYPE_CAT];
-      ctx.font = '9px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(emoji, kx + cellW / 2, ky + cellH / 2);
-    }
-    drawn++;
-  }
-  return drawn;
-}
-
-/** Draw an outdoor yard area with grass, fence posts, optional equipment and paths */
-function drawShelterYard(rx: number, ry: number, w: number, h: number, label?: string, hasEquipment?: boolean, hasPath?: boolean, accentColor?: string): void {
-  // Grass background
-  ctx.fillStyle = '#90c67c';
-  ctx.beginPath();
-  ctx.roundRect(rx, ry, w, h, 4);
-  ctx.fill();
-
-  // Grass texture - small darker patches
-  ctx.fillStyle = '#7db86a';
-  for (let i = 0; i < 6; i++) {
-    const gx = rx + 6 + ((i * 37 + 13) % (w - 12));
-    const gy = ry + 6 + ((i * 23 + 7) % (h - 12));
-    ctx.beginPath();
-    ctx.arc(gx, gy, 2 + (i % 2), 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // Fence posts around perimeter
-  const postColor = accentColor || '#8B6914';
-  ctx.fillStyle = postColor;
-  const postSpacing = 12;
-  // Top & bottom
-  for (let x = rx + 4; x < rx + w - 2; x += postSpacing) {
-    ctx.fillRect(x, ry, 2, 3);
-    ctx.fillRect(x, ry + h - 3, 2, 3);
-  }
-  // Left & right
-  for (let y = ry + 4; y < ry + h - 2; y += postSpacing) {
-    ctx.fillRect(rx, y, 3, 2);
-    ctx.fillRect(rx + w - 3, y, 3, 2);
-  }
-
-  // Fence wire
-  ctx.strokeStyle = accentColor || '#a08040';
-  ctx.lineWidth = 0.7;
-  ctx.setLineDash([3, 2]);
-  ctx.strokeRect(rx + 1, ry + 1, w - 2, h - 2);
-  ctx.setLineDash([]);
-
-  // Walking path
-  if (hasPath) {
-    ctx.strokeStyle = '#c8b898';
-    ctx.lineWidth = 3;
-    ctx.setLineDash([4, 3]);
-    ctx.beginPath();
-    ctx.moveTo(rx + 8, ry + h / 2);
-    ctx.quadraticCurveTo(rx + w / 2, ry + 8, rx + w - 8, ry + h / 2);
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  // Exercise equipment (agility circles)
-  if (hasEquipment) {
-    ctx.strokeStyle = '#6b8f5a';
-    ctx.lineWidth = 1.2;
-    // Jump hoop
-    ctx.beginPath();
-    ctx.arc(rx + w * 0.3, ry + h * 0.6, 5, 0, Math.PI * 2);
-    ctx.stroke();
-    // Tunnel (elongated)
-    ctx.beginPath();
-    ctx.ellipse(rx + w * 0.7, ry + h * 0.4, 8, 4, 0, 0, Math.PI * 2);
-    ctx.stroke();
-    // Weave poles
-    for (let i = 0; i < 3; i++) {
-      ctx.fillStyle = '#6b8f5a';
-      ctx.beginPath();
-      ctx.arc(rx + w * 0.4 + i * 8, ry + h * 0.75, 1.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  // Label
-  if (label) {
-    ctx.fillStyle = 'rgba(40, 80, 30, 0.5)';
-    ctx.font = '6px Rubik, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillText(label, rx + w / 2, ry + 3);
-  }
-}
-
-/** Draw an animated worker or volunteer at given position */
-function drawShelterWorker(
-  x: number, y: number,
-  isVolunteer: boolean,
-  phase: number,
-  workerIndex: number = 0
-): void {
-  // Body color: workers wear blue, volunteers wear green
-  const bodyColor = isVolunteer ? '#5ab87a' : '#4a8ec9';
-  // Pick a consistent skin tone based on worker index (stable across frames)
-  const skinIdx = ((workerIndex * 3 + (isVolunteer ? 5 : 0)) % ADOPTER_APPEARANCES.length + ADOPTER_APPEARANCES.length) % ADOPTER_APPEARANCES.length;
-  const workerSkin = ADOPTER_APPEARANCES[skinIdx];
-
-  // Body (oval)
-  ctx.fillStyle = bodyColor;
-  ctx.beginPath();
-  ctx.ellipse(x, y + 1, 3.5, 4.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = isVolunteer ? '#3a8a5a' : '#2a6a9a';
-  ctx.lineWidth = 0.6;
-  ctx.stroke();
-
-  // Head
-  ctx.fillStyle = workerSkin.skin;
-  ctx.beginPath();
-  ctx.arc(x, y - 4, 2.8, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = workerSkin.skinStroke;
-  ctx.lineWidth = 0.5;
-  ctx.stroke();
-
-  // Arms (reaching toward animals - subtle animation)
-  const armAngle = Math.sin(phase * 3) * 0.3;
-  ctx.strokeStyle = bodyColor;
-  ctx.lineWidth = 1.2;
-  ctx.beginPath();
-  ctx.moveTo(x - 3, y - 1);
-  ctx.lineTo(x - 6 + Math.cos(armAngle) * 2, y + 1);
-  ctx.moveTo(x + 3, y - 1);
-  ctx.lineTo(x + 6 - Math.cos(armAngle) * 2, y + 1);
-  ctx.stroke();
-}
-
-/** Get tier-specific room layouts (all coordinates relative to shelter center) */
-function getShelterRooms(tier: number, half: number): ShelterRoom[] {
-  const rooms: ShelterRoom[] = [];
-  const s = half / 100; // scale factor
-
-  // === TIER 1: Basic shelter ===
-  // Reception/lobby (center-left)
-  rooms.push({ rx: -50 * s, ry: -30 * s, w: 35 * s, h: 30 * s, type: 'reception', label: 'Lobby' });
-  // Main kennel wing (right side)
-  rooms.push({ rx: -10 * s, ry: -30 * s, w: 55 * s, h: 55 * s, type: 'kennel', label: 'Kennels', kennelSlots: 6 });
-  // Corridor connecting
-  rooms.push({ rx: -52 * s, ry: 2 * s, w: 100 * s, h: 12 * s, type: 'corridor' });
-
-  if (tier >= 2) {
-    // === TIER 2: Dog wing + grooming ===
-    // Second kennel wing (below corridor)
-    rooms.push({ rx: -10 * s, ry: 16 * s, w: 55 * s, h: 45 * s, type: 'kennel', label: 'Dog Wing', kennelSlots: 8 });
-    // Grooming room (left of corridor)
-    rooms.push({ rx: -50 * s, ry: 16 * s, w: 35 * s, h: 25 * s, type: 'grooming', label: 'Grooming' });
-  }
-
-  if (tier >= 3) {
-    // === TIER 3: Cat room + bird/rabbit room + medical ===
-    // Cat room (left wing)
-    rooms.push({ rx: -90 * s, ry: -30 * s, w: 36 * s, h: 30 * s, type: 'catRoom', label: 'Cat Room', kennelSlots: 5 });
-    // Bird/rabbit room (right of main kennels)
-    rooms.push({ rx: 50 * s, ry: -30 * s, w: 36 * s, h: 30 * s, type: 'birdRoom', label: 'Small Animals', kennelSlots: 4 });
-    // Medical/intake (far left, below cat room)
-    rooms.push({ rx: -90 * s, ry: 2 * s, w: 36 * s, h: 25 * s, type: 'medical', label: 'Medical' });
-    // Extended corridors connecting wings
-    rooms.push({ rx: -92 * s, ry: 2 * s, w: 40 * s, h: 12 * s, type: 'corridor' });
-    rooms.push({ rx: 48 * s, ry: 2 * s, w: 40 * s, h: 12 * s, type: 'corridor' });
-  }
-
-  if (tier >= 4) {
-    // === TIER 4: Education + staff room + right wing starts ===
-    // Education wing (right of small animals)
-    rooms.push({ rx: 50 * s, ry: 16 * s, w: 36 * s, h: 35 * s, type: 'education', label: 'Education' });
-    // Staff/volunteer break room (left bottom)
-    rooms.push({ rx: -90 * s, ry: 30 * s, w: 36 * s, h: 28 * s, type: 'breakRoom', label: 'Staff Room' });
-    // Lower corridor connecting left-to-right
-    rooms.push({ rx: -92 * s, ry: 28 * s, w: 182 * s, h: 10 * s, type: 'corridor' });
-  }
-
-  if (tier >= 5) {
-    // === TIER 5: Full facility with right wing, central courtyard, community ===
-    // -- RIGHT WING (fills the empty right side) --
-    // Community room (large, right wing)
-    rooms.push({ rx: 90 * s, ry: -30 * s, w: 42 * s, h: 40 * s, type: 'community', label: 'Community' });
-    // Overflow kennels (right wing, below community)
-    rooms.push({ rx: 90 * s, ry: 14 * s, w: 42 * s, h: 38 * s, type: 'kennel', label: 'Overflow', kennelSlots: 6 });
-    // Right wing corridor connecting to main building
-    rooms.push({ rx: 86 * s, ry: 2 * s, w: 48 * s, h: 12 * s, type: 'corridor' });
-
-    // -- TOP WING (adopt events + entrance) --
-    // Adoption event hall (top center)
-    rooms.push({ rx: -45 * s, ry: -68 * s, w: 50 * s, h: 34 * s, type: 'reception', label: 'Adopt Events' });
-    // Top corridor connecting adopt events to main
-    rooms.push({ rx: -47 * s, ry: -34 * s, w: 54 * s, h: 6 * s, type: 'corridor' });
-
-    // -- BOTTOM WING --
-    // Quarantine/isolation room (bottom left, below staff room)
-    rooms.push({ rx: -90 * s, ry: 60 * s, w: 36 * s, h: 26 * s, type: 'medical', label: 'Quarantine' });
-    // Supply/laundry room (bottom center-left)
-    rooms.push({ rx: -50 * s, ry: 60 * s, w: 35 * s, h: 26 * s, type: 'breakRoom', label: 'Supply' });
-    // Lower-lower corridor
-    rooms.push({ rx: -92 * s, ry: 56 * s, w: 182 * s, h: 8 * s, type: 'corridor' });
-  }
-
-  return rooms;
-}
-
-/** Get tier-specific outdoor yard layouts */
-function getShelterYards(tier: number, half: number): ShelterYard[] {
-  const yards: ShelterYard[] = [];
-  const s = half / 100;
-
-  if (tier < 2) {
-    // Tier 1 only: Small front yard (left side, below lobby - replaced by grooming at tier 2)
-    yards.push({ rx: -50 * s, ry: 16 * s, w: 35 * s, h: 30 * s, label: 'Yard' });
-  }
-
-  if (tier >= 2 && tier < 4) {
-    // Dog walk yard (right side) - only at tier 2-3 before education takes this spot
-    yards.push({ rx: 50 * s, ry: 16 * s, w: 36 * s, h: 40 * s, label: 'Dog Walk', hasEquipment: true, hasPath: true });
-    // Small yard below grooming
-    yards.push({ rx: -50 * s, ry: 44 * s, w: 35 * s, h: 22 * s, label: 'Yard' });
-  }
-
-  if (tier >= 3 && tier < 5) {
-    // Cat courtyard (left, above cat room)
-    yards.push({ rx: -90 * s, ry: -65 * s, w: 36 * s, h: 30 * s, label: 'Cat Yard' });
-    // Small animal outdoor area (right, above small animals room)
-    yards.push({ rx: 50 * s, ry: -65 * s, w: 36 * s, h: 30 * s, label: 'Play Area', hasEquipment: true });
-  }
-
-  if (tier >= 4) {
-    // Dog walk moves down-right when education takes its old spot
-    yards.push({ rx: 50 * s, ry: 55 * s, w: 36 * s, h: 30 * s, label: 'Dog Walk', hasEquipment: true, hasPath: true });
-    // Garden (left bottom)
-    yards.push({ rx: -90 * s, ry: 62 * s, w: 36 * s, h: 22 * s, label: 'Garden', hasPath: true });
-    // Small yard below grooming (carried forward from tier 2)
-    yards.push({ rx: -50 * s, ry: 44 * s, w: 35 * s, h: 12 * s, label: 'Yard' });
-  }
-
-  if (tier >= 5) {
-    // === Central courtyard: the heart of the complex, surrounded by rooms ===
-    yards.push({ rx: -10 * s, ry: 64 * s, w: 55 * s, h: 24 * s, label: 'Courtyard', hasPath: true });
-
-    // Entrance gardens (full width across the top)
-    yards.push({ rx: -90 * s, ry: -100 * s, w: 222 * s, h: 28 * s, label: 'Entrance Gardens', hasPath: true });
-
-    // Cat courtyard (expanded, left wing)
-    yards.push({ rx: -90 * s, ry: -68 * s, w: 40 * s, h: 34 * s, label: 'Cat Yard' });
-
-    // Play area (right wing, above community)
-    yards.push({ rx: 90 * s, ry: -68 * s, w: 42 * s, h: 34 * s, label: 'Play Area', hasEquipment: true });
-
-    // Agility course (right wing, bottom)
-    yards.push({ rx: 90 * s, ry: 56 * s, w: 42 * s, h: 30 * s, label: 'Agility', hasEquipment: true, hasPath: true });
-
-    // Garden expands (below quarantine, bottom-left)
-    yards.push({ rx: -90 * s, ry: 88 * s, w: 36 * s, h: 20 * s, label: 'Garden', hasPath: true });
-  }
-
-  return yards;
-}
-
-/** Draw a stationary pet shelter building - realistic top-down floorplan view */
-function drawShelter(shelter: ShelterState, isOwner: boolean, ownerColor?: string): void {
-  const cx = shelter.x;
-  const cy = shelter.y;
-  const baseSize = SHELTER_BASE_RADIUS + shelter.size * SHELTER_RADIUS_PER_SIZE;
-  const half = Math.min(200, Math.max(100, baseSize));
-  const tier = shelter.tier ?? 1;
-  const now = Date.now();
-
-  // Resolve accent color from owner color
-  let accentColor: string;
-  if (ownerColor?.startsWith('gradient:')) {
-    accentColor = ownerColor.split(':')[1] || '#7bed9f';
-  } else if (ownerColor) {
-    accentColor = ownerColor;
-  } else {
-    accentColor = isOwner ? '#7bed9f' : hashColor(shelter.ownerId);
-  }
-
-  ctx.save();
-  ctx.translate(cx, cy);
-
-  // ---- Ground shadow beneath the whole complex ----
-  ctx.shadowColor = 'rgba(0,0,0,0.25)';
-  ctx.shadowBlur = 18;
-  ctx.shadowOffsetX = 4;
-  ctx.shadowOffsetY = 4;
-
-  // ---- Foundation / ground slab ----
-  const s = half / 100;
-  const foundW = (tier >= 5 ? 240 : tier >= 4 ? 185 : tier >= 3 ? 185 : tier >= 2 ? 110 : 110) * s;
-  const foundH = (tier >= 5 ? 200 : tier >= 4 ? 120 : tier >= 3 ? 100 : tier >= 2 ? 80 : 55) * s;
-  const foundX = (tier >= 3 ? -95 : -55) * s;
-  const foundY = (tier >= 5 ? -105 : tier >= 3 ? -70 : -35) * s;
-  ctx.fillStyle = '#e8e0d8';
-  ctx.beginPath();
-  ctx.roundRect(foundX, foundY, foundW, foundH, 6);
-  ctx.fill();
-
-  // Foundation border (accent colored)
-  ctx.shadowColor = 'transparent';
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
-  ctx.strokeStyle = accentColor;
-  ctx.lineWidth = 2;
-  ctx.stroke();
-
-  // ---- Draw outdoor yards FIRST (below rooms) ----
-  const yards = getShelterYards(tier, half);
-  for (const yard of yards) {
-    drawShelterYard(yard.rx, yard.ry, yard.w, yard.h, yard.label, yard.hasEquipment, yard.hasPath, accentColor);
-  }
-
-  // ---- Draw rooms ----
-  const rooms = getShelterRooms(tier, half);
-  let petIdx = 0;
-  for (const room of rooms) {
-    drawShelterRoom(room.rx, room.ry, room.w, room.h, room.type, room.label, (room.kennelSlots ?? 0) > 0);
-    // Populate kennel rooms with actual pets
-    if (room.kennelSlots && room.kennelSlots > 0) {
-      const drawn = drawShelterKennels(
-        room.rx, room.ry, room.w, room.h,
-        room.kennelSlots, shelter.petsInside, petIdx
-      );
-      petIdx += drawn;
-    }
-  }
-
-  // ---- Reception desk accent ----
-  const lobbyRoom = rooms.find(r => r.type === 'reception');
-  if (lobbyRoom) {
-    const deskX = lobbyRoom.rx + lobbyRoom.w * 0.2;
-    const deskY = lobbyRoom.ry + lobbyRoom.h * 0.6;
-    const deskW = lobbyRoom.w * 0.6;
-    const deskH = 5 * s;
-    ctx.fillStyle = accentColor;
-    ctx.globalAlpha = 0.7;
-    ctx.beginPath();
-    ctx.roundRect(deskX, deskY, deskW, deskH, 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    // Chair behind desk
-    ctx.fillStyle = '#6b5b4b';
-    ctx.beginPath();
-    ctx.arc(deskX + deskW / 2, deskY + deskH + 4 * s, 3 * s, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // ---- Medical room details ----
-  const medRoom = rooms.find(r => r.type === 'medical');
-  if (medRoom) {
-    // Exam table
-    ctx.fillStyle = '#c8d8e0';
-    const tableX = medRoom.rx + medRoom.w * 0.25;
-    const tableY = medRoom.ry + medRoom.h * 0.35;
-    ctx.fillRect(tableX, tableY, medRoom.w * 0.5, medRoom.h * 0.3);
-    ctx.strokeStyle = '#90a8b8';
-    ctx.lineWidth = 0.8;
-    ctx.strokeRect(tableX, tableY, medRoom.w * 0.5, medRoom.h * 0.3);
-    // Red cross
-    ctx.fillStyle = '#e05050';
-    const crossX = medRoom.rx + medRoom.w * 0.5;
-    const crossY = medRoom.ry + medRoom.h * 0.2;
-    ctx.fillRect(crossX - 2, crossY - 4, 4, 8);
-    ctx.fillRect(crossX - 4, crossY - 2, 8, 4);
-  }
-
-  // ---- Grooming room details ----
-  const groomRoom = rooms.find(r => r.type === 'grooming');
-  if (groomRoom) {
-    // Bath tub
-    ctx.fillStyle = '#b8d8e8';
-    ctx.beginPath();
-    ctx.roundRect(
-      groomRoom.rx + groomRoom.w * 0.15,
-      groomRoom.ry + groomRoom.h * 0.25,
-      groomRoom.w * 0.7,
-      groomRoom.h * 0.4,
-      3
-    );
-    ctx.fill();
-    ctx.strokeStyle = '#88a8b8';
-    ctx.lineWidth = 0.8;
-    ctx.stroke();
-    // Grooming table
-    ctx.fillStyle = '#d8c8b8';
-    ctx.fillRect(
-      groomRoom.rx + groomRoom.w * 0.3,
-      groomRoom.ry + groomRoom.h * 0.72,
-      groomRoom.w * 0.4,
-      groomRoom.h * 0.2
-    );
-  }
-
-  // ---- Workers and volunteers ----
-  const petCount = shelter.petsInside.length;
-  const workerCount = petCount > 0 ? Math.min(3, Math.ceil(petCount / 3)) : 0;
-  const volunteerCount = petCount > 0 ? Math.min(2, Math.ceil(petCount / 5)) : 0;
-
-  // Workers patrol the kennel areas
-  const kennelRooms = rooms.filter(r => r.type === 'kennel');
-  for (let i = 0; i < workerCount; i++) {
-    const room = kennelRooms[i % kennelRooms.length] || rooms[0];
-    const phase = (now / 2000 + i * 2.1);
-    const wx = room.rx + room.w * 0.3 + Math.sin(phase) * room.w * 0.25;
-    const wy = room.ry + room.h * 0.5 + Math.cos(phase * 0.7 + i) * room.h * 0.2;
-    drawShelterWorker(wx, wy, false, phase, i);
-  }
-
-  // Volunteers patrol yards and other rooms
-  const yardAreas = yards.length > 0 ? yards : [{ rx: -30 * s, ry: 16 * s, w: 30 * s, h: 25 * s }];
-  for (let i = 0; i < volunteerCount; i++) {
-    const yard = yardAreas[i % yardAreas.length];
-    const phase = (now / 2500 + i * 1.7 + 3.14);
-    const vx = yard.rx + yard.w * 0.35 + Math.sin(phase) * yard.w * 0.2;
-    const vy = yard.ry + yard.h * 0.5 + Math.cos(phase * 0.6 + i * 2) * yard.h * 0.15;
-    drawShelterWorker(vx, vy, true, phase, i);
-  }
-
-  // ---- Entrance door / gate marker ----
-  const doorX = -4 * s;
-  const doorY = foundY + foundH - 6 * s;
-  ctx.fillStyle = '#8B6914';
-  ctx.beginPath();
-  ctx.roundRect(doorX - 6 * s, doorY, 12 * s, 5 * s, 2);
-  ctx.fill();
-  ctx.fillStyle = accentColor;
-  ctx.beginPath();
-  ctx.roundRect(doorX - 4 * s, doorY + 1 * s, 8 * s, 3 * s, 1);
-  ctx.fill();
-
-  // ---- Owner label / name banner ----
-  const bannerY = foundY - 14;
-  // Banner background
-  ctx.fillStyle = accentColor;
-  ctx.globalAlpha = 0.85;
-  const ownerLabel = isOwner ? 'Your Shelter' : 'Shelter';
-  ctx.font = 'bold 11px Rubik, sans-serif';
-  ctx.textAlign = 'center';
-  const labelW = ctx.measureText(ownerLabel).width + 14;
-  ctx.beginPath();
-  ctx.roundRect(-labelW / 2, bannerY - 10, labelW, 16, 4);
-  ctx.fill();
-  ctx.globalAlpha = 1;
-  // Banner text
-  ctx.fillStyle = '#fff';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(ownerLabel, 0, bannerY - 2);
-  ctx.textBaseline = 'alphabetic';
-
-  // ---- Upgrade indicators (icons) ----
-  let iconX = -24;
-  const iconY = bannerY - 22;
-  ctx.font = '14px sans-serif';
-  ctx.textAlign = 'center';
-  if (shelter.hasAdoptionCenter) {
-    ctx.fillText('🐾', iconX, iconY);
-    iconX += 20;
-  }
-  if (shelter.hasGravity) {
-    ctx.fillText('🧲', iconX, iconY);
-    iconX += 20;
-  }
-  if (shelter.hasAdvertising) {
-    ctx.fillText('📢', iconX, iconY);
-    iconX += 20;
-  }
-
-  // ---- Tier badge (top-right of foundation) ----
-  const tierColors = ['#888', '#7bed9f', '#70a3ff', '#c77dff', '#ffd700'];
-  const tierColor = tierColors[Math.min(tier - 1, 4)];
-  const badgeX = foundX + foundW - 8;
-  const badgeY = foundY + 8;
-
-  ctx.fillStyle = tierColor;
-  ctx.beginPath();
-  ctx.arc(badgeX, badgeY, 12, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 2;
-  ctx.stroke();
-
-  ctx.fillStyle = tier >= 5 ? '#333' : '#fff';
-  ctx.font = 'bold 11px Rubik, sans-serif';
-  ctx.textBaseline = 'middle';
-  ctx.textAlign = 'center';
-  if (tier >= 5) {
-    ctx.fillText('★' + tier, badgeX, badgeY);
-  } else {
-    ctx.fillText(String(tier), badgeX, badgeY);
-  }
-  ctx.textBaseline = 'alphabetic';
-
-  // ---- Stats text below shelter ----
-  const statsY = foundY + foundH + 10;
-  ctx.fillStyle = '#fff';
-  ctx.font = '10px Rubik, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.shadowColor = 'rgba(0,0,0,0.6)';
-  ctx.shadowBlur = 3;
-  ctx.fillText(`Pets: ${shelter.petsInside.length}`, 0, statsY);
-  ctx.fillStyle = '#7bed9f';
-  ctx.fillText(`Adoptions: ${shelter.totalAdoptions}`, 0, statsY + 13);
-  ctx.shadowBlur = 0;
-
-  ctx.restore();
-}
-
-/** Draw a breeder mill - enemy structure that spawns wild strays */
-/** Sad pet emojis for breeder mill cages */
-const BREEDER_CAGE_PETS = ['🐱', '🐶', '🐰', '🐦', '🐱', '🐶', '🐰', '🐱'];
-
-/** Simple seeded PRNG so each mill looks unique but stable across frames */
-function millRng(seed: number): () => number {
-  let s = seed | 0;
-  return () => {
-    s = (s * 1103515245 + 12345) & 0x7fffffff;
-    return (s >>> 16) / 32768; // 0-1 range
-  };
-}
-
-/** Hash a shelter id string into a numeric seed */
-function millSeed(id: string): number {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = ((h << 5) - h + id.charCodeAt(i)) | 0;
-  return h;
-}
-
-/**
- * Cell types for the breeder mill grid:
- *  'cage1'  = single sad animal
- *  'cage2'  = 2 animals crammed in
- *  'cage3'  = 3 animals (worst)
- *  'crate'  = sealed crate/box (no animal visible)
- *  'empty'  = dirty empty floor space
- *  'water'  = filthy water bowl / neglected supplies
- */
-type MillCellType = 'cage1' | 'cage2' | 'cage3' | 'crate' | 'empty' | 'water';
-
-function drawBreederShelter(shelter: BreederShelterState): void {
-  const cx = shelter.x;
-  const cy = shelter.y;
-  const now = Date.now();
-  const pulse = 0.5 + 0.5 * Math.sin(now / 200);
-  const flickerDim = 0.85 + 0.15 * Math.sin(now / 400 + 1.3) * Math.sin(now / 170);
-
-  // Scale with level: more cages, bigger building
-  const lvl = shelter.level ?? 1;
-  const s = Math.min(2.2, 0.8 + lvl * 0.08);
-
-  // Seeded RNG for this specific mill
-  const rng = millRng(millSeed(shelter.id));
-
-  ctx.save();
-  ctx.translate(cx, cy);
-
-  // ---- Ominous red glow beneath the complex ----
-  ctx.shadowColor = `rgba(180, 20, 0, ${0.35 + pulse * 0.25})`;
-  ctx.shadowBlur = 22 + pulse * 12;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
-
-  // ---- Foundation: cracked dark concrete ----
-  const foundW = 120 * s;
-  const foundH = 100 * s;
-  ctx.fillStyle = '#2a2018';
-  ctx.beginPath();
-  ctx.roundRect(-foundW / 2, -foundH / 2, foundW, foundH, 4);
-  ctx.fill();
-
-  // Foundation border - rusty/bloodstained
-  ctx.strokeStyle = `rgba(140, 40, 20, ${0.6 + pulse * 0.3})`;
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
-
-  // Clear shadow for interior details
-  ctx.shadowColor = 'transparent';
-  ctx.shadowBlur = 0;
-
-  // ---- Dirty floor stains ----
-  ctx.fillStyle = 'rgba(80, 40, 20, 0.3)';
-  for (let i = 0; i < 7; i++) {
-    const sx = -foundW / 2 + 12 + rng() * (foundW - 24);
-    const sy = -foundH / 2 + 10 + rng() * (foundH - 20);
-    ctx.beginPath();
-    ctx.ellipse(sx, sy, 4 * s + rng() * 4 * s, 3 * s + rng() * 3 * s, rng() * 3, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // ---- Flickering dim light overlay ----
-  ctx.globalAlpha = flickerDim;
-
-  // ---- Generate the cell grid (seeded per mill) ----
-  const cageW = 14 * s;
-  const cageH = 12 * s;
-  const cagePad = 2 * s;
-  const cageCols = Math.min(6, 3 + Math.floor(lvl / 3));
-  const cageRows = Math.min(5, 2 + Math.floor(lvl / 3));
-  const cageBlockW = cageCols * (cageW + cagePad);
-  const cageBlockH = cageRows * (cageH + cagePad);
-  const cageStartX = -cageBlockW / 2;
-  const cageStartY = -foundH / 2 + 10 * s;
-
-  // Pre-generate cell types: ~60% single, ~15% double, ~5% triple, ~10% crate, ~5% empty, ~5% water
-  const cells: MillCellType[] = [];
-  const totalCells = cageCols * cageRows;
-  for (let i = 0; i < totalCells; i++) {
-    const r = rng();
-    if (r < 0.55) cells.push('cage1');
-    else if (r < 0.72) cells.push('cage2');
-    else if (r < 0.78) cells.push('cage3');
-    else if (r < 0.88) cells.push('crate');
-    else if (r < 0.94) cells.push('empty');
-    else cells.push('water');
-  }
-
-  // Pre-generate random pet emoji index for each cell (seeded)
-  const cellPets: number[] = [];
-  for (let i = 0; i < totalCells; i++) {
-    cellPets.push(Math.floor(rng() * BREEDER_CAGE_PETS.length));
-  }
-
-  // Cage room floor (filthy)
-  ctx.fillStyle = '#3d2e1e';
-  ctx.beginPath();
-  ctx.roundRect(cageStartX - 4 * s, cageStartY - 4 * s, cageBlockW + 8 * s, cageBlockH + 8 * s, 2);
-  ctx.fill();
-  ctx.strokeStyle = '#5a3a20';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  // ---- Draw each cell ----
-  for (let row = 0; row < cageRows; row++) {
-    for (let col = 0; col < cageCols; col++) {
-      const idx = row * cageCols + col;
-      const cellType = cells[idx];
-      const kx = cageStartX + col * (cageW + cagePad);
-      const ky = cageStartY + row * (cageH + cagePad);
-      const petIdx = cellPets[idx];
-      const petEmoji = BREEDER_CAGE_PETS[petIdx];
-      // Secondary pet (different from first) for overcrowded
-      const pet2Emoji = BREEDER_CAGE_PETS[(petIdx + 2) % BREEDER_CAGE_PETS.length];
-      const pet3Emoji = BREEDER_CAGE_PETS[(petIdx + 4) % BREEDER_CAGE_PETS.length];
-      const animalDim = flickerDim * (0.5 + 0.25 * Math.sin(now / 1200 + row * 1.3 + col * 0.7));
-      const emojiSize = 7 * s;
-
-      if (cellType === 'empty') {
-        // Dirty empty floor patch
-        ctx.fillStyle = '#3a2a1a';
-        ctx.fillRect(kx, ky, cageW, cageH);
-        ctx.strokeStyle = 'rgba(80, 55, 30, 0.3)';
-        ctx.lineWidth = 0.5;
-        ctx.strokeRect(kx, ky, cageW, cageH);
-        // Debris
-        ctx.fillStyle = 'rgba(90, 60, 30, 0.4)';
-        ctx.fillRect(kx + 3 * s, ky + 4 * s, 3 * s, 2 * s);
-      } else if (cellType === 'crate') {
-        // Sealed wooden crate
-        ctx.fillStyle = '#5a4228';
-        ctx.fillRect(kx, ky, cageW, cageH);
-        ctx.strokeStyle = '#7a5a38';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(kx, ky, cageW, cageH);
-        // Crate cross-slats
-        ctx.strokeStyle = 'rgba(120, 90, 50, 0.5)';
-        ctx.lineWidth = 0.8;
-        ctx.beginPath();
-        ctx.moveTo(kx, ky + cageH / 2);
-        ctx.lineTo(kx + cageW, ky + cageH / 2);
-        ctx.moveTo(kx + cageW / 2, ky);
-        ctx.lineTo(kx + cageW / 2, ky + cageH);
-        ctx.stroke();
-        // Crate label
-        ctx.fillStyle = 'rgba(200, 150, 80, 0.3)';
-        ctx.font = `${4 * s}px Rubik, sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('📦', kx + cageW / 2, ky + cageH / 2);
-      } else if (cellType === 'water') {
-        // Filthy water / neglected supplies
-        ctx.fillStyle = '#3a2a1a';
-        ctx.fillRect(kx, ky, cageW, cageH);
-        ctx.strokeStyle = 'rgba(80, 55, 30, 0.4)';
-        ctx.lineWidth = 0.5;
-        ctx.strokeRect(kx, ky, cageW, cageH);
-        // Dirty water bowl
-        ctx.fillStyle = '#4a5a3a';
-        ctx.beginPath();
-        ctx.ellipse(kx + cageW / 2, ky + cageH * 0.4, 4 * s, 2.5 * s, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#6a7a5a';
-        ctx.lineWidth = 0.5;
-        ctx.stroke();
-        // Spilled water stain
-        ctx.fillStyle = 'rgba(70, 90, 60, 0.25)';
-        ctx.beginPath();
-        ctx.ellipse(kx + cageW * 0.6, ky + cageH * 0.7, 3 * s, 2 * s, 0.4, 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        // ---- Cage with animals (cage1, cage2, cage3) ----
-        // Dirty cage floor
-        ctx.fillStyle = '#4a3828';
-        ctx.fillRect(kx, ky, cageW, cageH);
-
-        // Rusted bars outline
-        ctx.strokeStyle = `rgba(120, 70, 30, ${0.7 + pulse * 0.15})`;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(kx, ky, cageW, cageH);
-
-        // Vertical bars (cramped)
-        ctx.strokeStyle = 'rgba(100, 60, 25, 0.5)';
-        ctx.lineWidth = 0.6;
-        const barCount = cellType === 'cage3' ? 4 : 3;
-        for (let b = 1; b < barCount; b++) {
-          ctx.beginPath();
-          ctx.moveTo(kx + b * cageW / barCount, ky);
-          ctx.lineTo(kx + b * cageW / barCount, ky + cageH);
-          ctx.stroke();
-        }
-
-        ctx.font = `${emojiSize}px sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-
-        if (cellType === 'cage1') {
-          // Single sad animal
-          ctx.globalAlpha = animalDim;
-          ctx.fillText(petEmoji, kx + cageW / 2, ky + cageH / 2);
-        } else if (cellType === 'cage2') {
-          // 2 crammed in - offset left/right
-          ctx.globalAlpha = animalDim;
-          ctx.font = `${emojiSize * 0.8}px sans-serif`;
-          ctx.fillText(petEmoji, kx + cageW * 0.32, ky + cageH * 0.45);
-          ctx.globalAlpha = animalDim * 0.85;
-          ctx.fillText(pet2Emoji, kx + cageW * 0.68, ky + cageH * 0.6);
-        } else {
-          // cage3: 3 crammed in - triangle arrangement
-          ctx.font = `${emojiSize * 0.7}px sans-serif`;
-          ctx.globalAlpha = animalDim;
-          ctx.fillText(petEmoji, kx + cageW * 0.28, ky + cageH * 0.35);
-          ctx.globalAlpha = animalDim * 0.8;
-          ctx.fillText(pet2Emoji, kx + cageW * 0.72, ky + cageH * 0.35);
-          ctx.globalAlpha = animalDim * 0.7;
-          ctx.fillText(pet3Emoji, kx + cageW * 0.5, ky + cageH * 0.72);
-        }
-        ctx.globalAlpha = flickerDim;
-      }
-    }
-  }
-
-  // ---- Dark corridor below cages ----
-  const corrY = cageStartY + cageBlockH + 6 * s;
-  const corrH = 8 * s;
-  ctx.fillStyle = '#241a10';
-  ctx.fillRect(-foundW / 2 + 4 * s, corrY, foundW - 8 * s, corrH);
-  ctx.strokeStyle = '#3a2a18';
-  ctx.lineWidth = 0.8;
-  ctx.strokeRect(-foundW / 2 + 4 * s, corrY, foundW - 8 * s, corrH);
-
-  // ---- Bottom rooms ----
-  const bottomY = corrY + corrH + 3 * s;
-  const bottomH = foundH / 2 - (bottomY) - 4 * s;
-
-  // "Breeding room" (bottom-left)
-  const breedX = -foundW / 2 + 6 * s;
-  const breedW = foundW * 0.35;
-  if (bottomH > 8) {
-    ctx.fillStyle = '#3a1a1a';
-    ctx.beginPath();
-    ctx.roundRect(breedX, bottomY, breedW, bottomH, 2);
-    ctx.fill();
-    ctx.strokeStyle = '#5a2020';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.fillStyle = 'rgba(200, 80, 60, 0.5)';
-    ctx.font = `${6 * s}px Rubik, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('Breeding', breedX + breedW / 2, bottomY + bottomH / 2);
-  }
-
-  // ---- Breeder Tyrant "office" (bottom-right) ----
-  const officeX = foundW / 2 - 6 * s - foundW * 0.4;
-  const officeW = foundW * 0.4;
-  if (bottomH > 8) {
-    // Dark office room
-    ctx.fillStyle = '#2e1e14';
-    ctx.beginPath();
-    ctx.roundRect(officeX, bottomY, officeW, bottomH, 2);
-    ctx.fill();
-    ctx.strokeStyle = '#4a3020';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-
-    // Desk (dark wood)
-    const deskX = officeX + officeW * 0.3;
-    const deskY = bottomY + bottomH * 0.25;
-    const deskW = officeW * 0.45;
-    const deskH = bottomH * 0.2;
-    ctx.fillStyle = '#4a3018';
-    ctx.fillRect(deskX, deskY, deskW, deskH);
-    ctx.strokeStyle = '#5a4028';
-    ctx.lineWidth = 0.7;
-    ctx.strokeRect(deskX, deskY, deskW, deskH);
-
-    // Money stacks on desk
-    ctx.font = `${5 * s}px sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('💰', deskX + deskW * 0.3, deskY + deskH / 2);
-    ctx.fillText('💵', deskX + deskW * 0.7, deskY + deskH / 2);
-
-    // ---- Breeder Tyrant (back turned to animals, facing desk) ----
-    const tyrantX = officeX + officeW * 0.5;
-    const tyrantY = bottomY + bottomH * 0.65;
-    const tyrantPhase = now / 800;
-
-    // Chair
-    ctx.fillStyle = '#3a2010';
-    ctx.beginPath();
-    ctx.arc(tyrantX, tyrantY + 2 * s, 4 * s, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Body (dark suit, facing UP toward desk = back to animals above)
-    ctx.fillStyle = '#1a0808';
-    ctx.beginPath();
-    ctx.ellipse(tyrantX, tyrantY, 4 * s, 5.5 * s, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#3a1010';
-    ctx.lineWidth = 0.6;
-    ctx.stroke();
-
-    // Head (facing desk/up)
-    ctx.fillStyle = '#d4a878';
-    ctx.beginPath();
-    ctx.arc(tyrantX, tyrantY - 5.5 * s, 3 * s, 0, Math.PI * 2);
-    ctx.fill();
-    // Dark hat
-    ctx.fillStyle = '#1a0505';
-    ctx.beginPath();
-    ctx.arc(tyrantX, tyrantY - 6 * s, 3.2 * s, Math.PI, Math.PI * 2);
-    ctx.fill();
-
-    // Arms reaching toward money (animated)
-    const armReach = Math.sin(tyrantPhase) * 1.5;
-    ctx.strokeStyle = '#1a0808';
-    ctx.lineWidth = 1.5 * s;
-    // Left arm to money
-    ctx.beginPath();
-    ctx.moveTo(tyrantX - 3.5 * s, tyrantY - 2 * s);
-    ctx.lineTo(deskX + deskW * 0.3 + armReach, deskY + deskH);
-    ctx.stroke();
-    // Right arm to money
-    ctx.beginPath();
-    ctx.moveTo(tyrantX + 3.5 * s, tyrantY - 2 * s);
-    ctx.lineTo(deskX + deskW * 0.7 - armReach, deskY + deskH);
-    ctx.stroke();
-
-    // Money counting animation (floating $ near hands)
-    const moneyBob = Math.sin(tyrantPhase * 2) * 2;
-    ctx.fillStyle = '#4a8a2a';
-    ctx.font = `bold ${4 * s}px Rubik, sans-serif`;
-    ctx.globalAlpha = flickerDim * 0.7;
-    ctx.fillText('$', deskX + deskW * 0.15 + armReach, deskY - 2 + moneyBob);
-    ctx.fillText('$', deskX + deskW * 0.85 - armReach, deskY - 1 - moneyBob);
-    ctx.globalAlpha = flickerDim;
-  }
-
-  ctx.globalAlpha = 1;
-
-  // ---- Boarded-up windows (along sides) ----
-  ctx.strokeStyle = '#5a3a1a';
-  ctx.lineWidth = 1.5 * s;
-  const winCount = Math.min(4, 1 + Math.floor(lvl / 3));
-  for (let i = 0; i < winCount; i++) {
-    const wy = -foundH / 2 + 15 * s + i * 18 * s;
-    if (wy + 8 * s > foundH / 2 - 5 * s) break;
-    // Left side
-    const wx = -foundW / 2;
-    ctx.fillStyle = '#1a1008';
-    ctx.fillRect(wx, wy, 5 * s, 8 * s);
-    ctx.beginPath();
-    ctx.moveTo(wx, wy); ctx.lineTo(wx + 5 * s, wy + 8 * s);
-    ctx.moveTo(wx + 5 * s, wy); ctx.lineTo(wx, wy + 8 * s);
-    ctx.stroke();
-    // Right side
-    const rwx = foundW / 2 - 5 * s;
-    ctx.fillStyle = '#1a1008';
-    ctx.fillRect(rwx, wy, 5 * s, 8 * s);
-    ctx.beginPath();
-    ctx.moveTo(rwx, wy); ctx.lineTo(rwx + 5 * s, wy + 8 * s);
-    ctx.moveTo(rwx + 5 * s, wy); ctx.lineTo(rwx, wy + 8 * s);
-    ctx.stroke();
-  }
-
-  // ---- Pulsing red "fire" glow at entrance (bottom center) ----
-  const fireX = 0;
-  const fireY = foundH / 2 - 3 * s;
-  const fireGrad = ctx.createRadialGradient(fireX, fireY, 0, fireX, fireY, 14 * s);
-  fireGrad.addColorStop(0, `rgba(255, 60, 0, ${0.4 + pulse * 0.3})`);
-  fireGrad.addColorStop(0.5, `rgba(200, 30, 0, ${0.15 + pulse * 0.1})`);
-  fireGrad.addColorStop(1, 'rgba(100, 10, 0, 0)');
-  ctx.fillStyle = fireGrad;
-  ctx.beginPath();
-  ctx.arc(fireX, fireY, 14 * s, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.font = `${12 * s}px sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('🔥', fireX, fireY - 2 * s);
-
-  // ---- Chains / barbed wire along top ----
-  ctx.strokeStyle = 'rgba(100, 60, 30, 0.6)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([2 * s, 3 * s]);
-  ctx.beginPath();
-  ctx.moveTo(-foundW / 2, -foundH / 2 - 3 * s);
-  ctx.lineTo(foundW / 2, -foundH / 2 - 3 * s);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.fillStyle = '#8a5a2a';
-  for (let i = 0; i < 6; i++) {
-    const bx = -foundW / 2 + 10 * s + i * (foundW - 20 * s) / 5;
-    ctx.beginPath();
-    ctx.moveTo(bx, -foundH / 2 - 3 * s);
-    ctx.lineTo(bx - 2, -foundH / 2 - 7 * s);
-    ctx.lineTo(bx + 2, -foundH / 2 - 7 * s);
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  // ---- Label above (red, menacing) ----
-  ctx.fillStyle = '#ff3333';
-  ctx.font = 'bold 12px Rubik, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'bottom';
-  ctx.shadowColor = 'rgba(200, 0, 0, 0.7)';
-  ctx.shadowBlur = 6;
-  ctx.fillText(`Breeder Mill Lv${shelter.level}`, 0, -foundH / 2 - 10 * s);
-  ctx.shadowBlur = 0;
-
-  // ---- Warning text below ----
-  ctx.fillStyle = '#ff8800';
-  ctx.font = '10px Rubik, sans-serif';
-  ctx.textBaseline = 'top';
-  ctx.fillText('Spawning wild strays!', 0, foundH / 2 + 5 * s);
-
-  ctx.restore();
-}
-
-// ============================================
-// BOSS MODE RENDERING
-// ============================================
-
-/** Boss mill pet type emojis */
-const BOSS_MILL_EMOJIS: Record<number, string> = {
-  [BOSS_MILL_HORSE]: '🐴',
-  [BOSS_MILL_CAT]: '🐈',
-  [BOSS_MILL_DOG]: '🐕',
-  [BOSS_MILL_BIRD]: '🐦',
-  [BOSS_MILL_RABBIT]: '🐰',
-};
-
-/** Draw the PetMall and all boss mills */
-function drawBossMode(bossMode: BossModeState, vL: number, vR: number, vT: number, vB: number): void {
-  const { mallX, mallY, mills, tycoonX, tycoonY, tycoonTargetMill, playerAtMill, millsCleared, rebuildingMill } = bossMode;
-  
-  ctx.save();
-  
-  // Draw PetMall center area (plaza) — only if visible
-  const mallMargin = BOSS_PETMALL_RADIUS;
-  if (!(mallX + mallMargin < vL || mallX - mallMargin > vR || mallY + mallMargin < vT || mallY - mallMargin > vB)) {
-    ctx.fillStyle = 'rgba(139, 69, 19, 0.3)';
-    ctx.beginPath();
-    ctx.arc(mallX, mallY, BOSS_PETMALL_RADIUS * 0.6, 0, Math.PI * 2);
-    ctx.fill();
-    
-    // Draw "PetMall" title above center
-    ctx.fillStyle = '#ffd700';
-    ctx.font = 'bold 24px Rubik, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.shadowColor = 'rgba(0,0,0,0.8)';
-    ctx.shadowBlur = 6;
-    ctx.fillText('🏪 PETMALL', mallX, mallY - 40);
-    ctx.font = '16px Rubik, sans-serif';
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(`Bring strays, get them out`, mallX, mallY);
-    ctx.shadowBlur = 0;
-  }
-  
-  // Draw each mill — viewport culled
-  const millMargin = 150;
-  for (const mill of mills) {
-    if (mill.x + millMargin < vL || mill.x - millMargin > vR || mill.y + millMargin < vT || mill.y - millMargin > vB) continue;
-    const isRebuilding = rebuildingMill !== undefined && rebuildingMill === mill.id;
-    drawBossMill(mill, mill.id === playerAtMill, mill.id === tycoonTargetMill, isRebuilding);
-  }
-  
-  // Draw Breeder Tycoon — viewport culled
-  const tycoonMargin = 80;
-  if (!(tycoonX + tycoonMargin < vL || tycoonX - tycoonMargin > vR || tycoonY + tycoonMargin < vT || tycoonY - tycoonMargin > vB)) {
-    drawBreederTycoon(tycoonX, tycoonY);
-  }
-  
-  ctx.restore();
-}
-
-// ---- Pre-rendered boss mill sprites keyed by "petType-state" ----
-type BossMillVisualState = 'normal' | 'completed' | 'rebuilding';
-const BOSS_MILL_SPRITE_W = BOSS_MILL_RADIUS * 2 + 40; // 240 — room for roof overhang + stroke
-const BOSS_MILL_SPRITE_H = BOSS_MILL_RADIUS * 2 + 80; // 280 — room for roof peak + name label
-const bossMillSprites = new Map<string, HTMLCanvasElement>();
-
-function prerenderBossMillSprites(): void {
-  const petTypes = [BOSS_MILL_HORSE, BOSS_MILL_CAT, BOSS_MILL_DOG, BOSS_MILL_BIRD, BOSS_MILL_RABBIT];
-  const states: BossMillVisualState[] = ['normal', 'completed', 'rebuilding'];
-
-  for (const petType of petTypes) {
-    const emoji = BOSS_MILL_EMOJIS[petType] ?? '🐾';
-    const name = BOSS_MILL_NAMES[petType] ?? 'Mill';
-
-    for (const state of states) {
-      const c = document.createElement('canvas');
-      c.width = BOSS_MILL_SPRITE_W;
-      c.height = BOSS_MILL_SPRITE_H;
-      const sctx = c.getContext('2d')!;
-
-      // Center of sprite
-      const cx = BOSS_MILL_SPRITE_W / 2;
-      const cy = BOSS_MILL_SPRITE_H / 2 + 10; // shift down to make room for name label above roof
-
-      const bw = BOSS_MILL_RADIUS * 1.4;
-      const bh = BOSS_MILL_RADIUS * 1.2;
-
-      // Base circle fill (neutral — dynamic glow overlays applied live)
-      sctx.fillStyle = 'rgba(139, 69, 19, 0.2)';
-      sctx.beginPath();
-      sctx.arc(cx, cy, BOSS_MILL_RADIUS, 0, Math.PI * 2);
-      sctx.fill();
-
-      // Building body
-      if (state === 'completed') {
-        sctx.fillStyle = '#3d8b40';
-        sctx.strokeStyle = '#2d6a30';
-      } else if (state === 'rebuilding') {
-        sctx.fillStyle = '#8b3500';
-        sctx.strokeStyle = '#5c2d0e';
-      } else {
-        sctx.fillStyle = '#8b4513';
-        sctx.strokeStyle = '#5c2d0e';
-      }
-      sctx.lineWidth = 3;
-      sctx.beginPath();
-      sctx.roundRect(cx - bw / 2, cy - bh / 2, bw, bh, 8);
-      sctx.fill();
-      sctx.stroke();
-
-      // Roof
-      sctx.beginPath();
-      sctx.moveTo(cx - bw / 2 - 10, cy - bh / 2);
-      sctx.lineTo(cx, cy - bh / 2 - 30);
-      sctx.lineTo(cx + bw / 2 + 10, cy - bh / 2);
-      sctx.closePath();
-      sctx.fillStyle = state === 'completed' ? '#2d6a30' : state === 'rebuilding' ? '#5c2000' : '#654321';
-      sctx.fill();
-      sctx.stroke();
-
-      // Pet emoji in center
-      sctx.font = '36px sans-serif';
-      sctx.textAlign = 'center';
-      sctx.textBaseline = 'middle';
-      sctx.fillText(emoji, cx, cy);
-
-      // Name label above roof
-      sctx.fillStyle = state === 'completed' ? '#90ee90' : '#ffd700';
-      sctx.font = 'bold 12px Rubik, sans-serif';
-      sctx.textBaseline = 'bottom';
-      sctx.fillText(name, cx, cy - bh / 2 - 35);
-
-      bossMillSprites.set(`${petType}-${state}`, c);
-    }
-  }
-}
-prerenderBossMillSprites();
-
-/** Draw a single boss mill using pre-rendered sprite + live glow overlays. */
-function drawBossMill(mill: BossMill, isPlayerHere: boolean, isTycoonTarget: boolean, isRebuilding: boolean): void {
-  const { x, y, petType, completed } = mill;
-  const bh = BOSS_MILL_RADIUS * 1.2;
-
-  ctx.save();
-
-  // ---- Live glow overlay (cheap single arc+fill, no shadowBlur) ----
-  if (isRebuilding) {
-    const rebuildPulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
-    ctx.fillStyle = `rgba(255, 100, 0, ${0.15 + rebuildPulse * 0.1})`;
-    ctx.beginPath();
-    ctx.arc(x, y, BOSS_MILL_RADIUS + 10, 0, Math.PI * 2);
-    ctx.fill();
-  } else if (isPlayerHere) {
-    ctx.fillStyle = 'rgba(0, 170, 255, 0.15)';
-    ctx.beginPath();
-    ctx.arc(x, y, BOSS_MILL_RADIUS + 10, 0, Math.PI * 2);
-    ctx.fill();
-  } else if (isTycoonTarget) {
-    ctx.fillStyle = 'rgba(255, 0, 0, 0.1)';
-    ctx.beginPath();
-    ctx.arc(x, y, BOSS_MILL_RADIUS + 10, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // ---- Draw pre-rendered sprite ----
-  const state: BossMillVisualState = isRebuilding ? 'rebuilding' : completed ? 'completed' : 'normal';
-  const sprite = bossMillSprites.get(`${petType}-${state}`) ?? bossMillSprites.get(`${petType}-normal`);
-  if (sprite) {
-    if (completed && !isRebuilding) ctx.globalAlpha = 0.5;
-    // cy in sprite = BOSS_MILL_SPRITE_H/2 + 10 (shifted down for name label headroom)
-    ctx.drawImage(sprite, x - BOSS_MILL_SPRITE_W / 2, y - BOSS_MILL_SPRITE_H / 2 - 10);
-    ctx.globalAlpha = 1;
-  }
-
-  // ---- Live status text below ----
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  if (isRebuilding) {
-    ctx.fillStyle = '#ff6600';
-    ctx.font = 'bold 11px Rubik, sans-serif';
-    ctx.fillText('REBUILDING...', x, y + bh / 2 + 5);
-  } else if (completed) {
-    ctx.fillStyle = '#90ee90';
-    ctx.font = '11px Rubik, sans-serif';
-    ctx.fillText('✓ RESCUED!', x, y + bh / 2 + 5);
-  } else if (isPlayerHere) {
-    ctx.fillStyle = '#00aaff';
-    ctx.font = '11px Rubik, sans-serif';
-    ctx.fillText('PREPARING MEAL...', x, y + bh / 2 + 5);
-  }
-
-  ctx.restore();
-}
-
-/** Draw the Breeder Tycoon NPC */
-function drawBreederTycoon(x: number, y: number): void {
-  ctx.save();
-  
-  // Pulsing red aura
-  const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 150);
-  ctx.shadowColor = `rgba(255, 0, 0, ${0.6 + pulse * 0.4})`;
-  ctx.shadowBlur = 25 + pulse * 15;
-  
-  // Body
-  ctx.fillStyle = '#2d0a0a';
-  ctx.beginPath();
-  ctx.arc(x, y, 35, 0, Math.PI * 2);
-  ctx.fill();
-  
-  ctx.strokeStyle = '#ff4444';
-  ctx.lineWidth = 3;
-  ctx.stroke();
-  
-  // Top hat
-  ctx.fillStyle = '#1a0505';
-  ctx.beginPath();
-  ctx.fillRect(x - 20, y - 50, 40, 25);
-  ctx.fillRect(x - 28, y - 28, 56, 8);
-  ctx.fill();
-  
-  ctx.shadowBlur = 0;
-  
-  // Face (angry eyes)
-  ctx.fillStyle = '#ff0000';
-  ctx.font = '24px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('😈', x, y + 5);
-  
-  // Label
-  ctx.fillStyle = '#ff4444';
-  ctx.font = 'bold 11px Rubik, sans-serif';
-  ctx.textBaseline = 'bottom';
-  ctx.fillText('BREEDER TYCOON', x, y - 55);
-  
-  ctx.restore();
-}
-
-/** Pet type emojis for map strays (same as adoption drop-off graphic) */
-const STRAY_PET_EMOJIS: Record<number, string> = {
-  [PET_TYPE_CAT]: '🐈',
-  [PET_TYPE_DOG]: '🐕',
-  [PET_TYPE_BIRD]: '🐦',
-  [PET_TYPE_RABBIT]: '🐰',
-  [PET_TYPE_SPECIAL]: '⭐',
-};
-
-// --- Pre-rendered stray sprites (offscreen canvases) for fast drawImage ---
-const STRAY_SPRITE_SIZE = 40;
-const straySprites = new Map<number, HTMLCanvasElement>();
-
-/** Pre-render each pet-type emoji to an offscreen canvas (called once at startup).
- *  Bakes shadow into the sprite so no per-frame shadowBlur cost. */
-function prerenderStraySprites(): void {
-  for (const [typeStr, emoji] of Object.entries(STRAY_PET_EMOJIS)) {
-    const petType = Number(typeStr);
-    const c = document.createElement('canvas');
-    c.width = STRAY_SPRITE_SIZE;
-    c.height = STRAY_SPRITE_SIZE;
-    const sctx = c.getContext('2d')!;
-    sctx.font = '30px sans-serif';
-    sctx.textAlign = 'center';
-    sctx.textBaseline = 'middle';
-    // Bake the shadow into the sprite (no per-frame blur cost)
-    sctx.shadowColor = 'rgba(0,0,0,0.8)';
-    sctx.shadowBlur = 4;
-    sctx.fillText(emoji, STRAY_SPRITE_SIZE / 2, STRAY_SPRITE_SIZE / 2);
-    // For special pets, add a gold glow layer
-    if (petType === PET_TYPE_SPECIAL) {
-      sctx.shadowColor = '#ffd700';
-      sctx.shadowBlur = 12;
-      sctx.fillText(emoji, STRAY_SPRITE_SIZE / 2, STRAY_SPRITE_SIZE / 2);
-    }
-    straySprites.set(petType, c);
-  }
-}
-prerenderStraySprites();
-
-/** Set up shared canvas state for batched stray drawing. Call before the stray loop. */
-function beginStrayBatch(): void {
-  ctx.save();
-  ctx.globalAlpha = 1;
-}
-
-/** Reset canvas state after batched stray drawing. Call after the stray loop. */
-function endStrayBatch(): void {
-  ctx.restore();
-}
-
-/** Draw a single stray using pre-rendered sprite. Must be called between beginStrayBatch/endStrayBatch. */
-function drawStray(x: number, y: number, petType: number = PET_TYPE_CAT): void {
-  const sprite = straySprites.get(petType) ?? straySprites.get(PET_TYPE_CAT)!;
-  ctx.drawImage(sprite, x - STRAY_SPRITE_SIZE / 2, y - STRAY_SPRITE_SIZE / 2);
-}
-
-/** Draw a breeder camp: bigger tent, small enclosed pen, random pets breeding inside */
-/** Breeder camp pet emojis by type index */
-const CAMP_PET_EMOJIS = ['🐱', '🐶', '🐰', '🐦'];
-
-// ---- Pre-rendered breeder camp sprites (offscreen canvases) keyed by level ----
-const CAMP_SPRITE_W = 130; // 110 camp + 10px padding each side for shadow
-const CAMP_SPRITE_H = 100; // 80 camp + 10px padding each side for shadow
-const breederCampSprites = new Map<number, HTMLCanvasElement>();
-
-/** Pre-render breeder camp sprites for levels 1-20 at startup.
- *  Bakes shadow, emojis, cages, tent, and fence into the sprite so no per-frame cost. */
-function prerenderBreederCampSprites(): void {
-  for (let level = 1; level <= 20; level++) {
-    const c = document.createElement('canvas');
-    c.width = CAMP_SPRITE_W;
-    c.height = CAMP_SPRITE_H;
-    const sctx = c.getContext('2d')!;
-
-    // Seed from level so each level looks unique but stable
-    const seed0 = ((level * 101) | 0) >>> 0;
-    const rng = millRng(seed0);
-
-    const campW = 110;
-    const campH = 80;
-    // Center of sprite canvas
-    const cx = CAMP_SPRITE_W / 2;
-    const cy = CAMP_SPRITE_H / 2;
-
-    sctx.save();
-    sctx.translate(cx, cy);
-
-    // ---- Dark ground slab (shadow baked in) ----
-    sctx.shadowColor = 'rgba(100, 30, 0, 0.3)';
-    sctx.shadowBlur = 10;
-    sctx.fillStyle = '#3a2e20';
-    sctx.beginPath();
-    sctx.roundRect(-campW / 2, -campH / 2, campW, campH, 5);
-    sctx.fill();
-    sctx.strokeStyle = '#5a3a1a';
-    sctx.lineWidth = 2;
-    sctx.stroke();
-    sctx.shadowColor = 'transparent';
-    sctx.shadowBlur = 0;
-
-    // ---- Dirt floor stains ----
-    sctx.fillStyle = 'rgba(70, 40, 20, 0.25)';
-    for (let i = 0; i < 4; i++) {
-      const sx = -campW / 2 + 10 + rng() * (campW - 20);
-      const sy = -campH / 2 + 8 + rng() * (campH - 16);
-      sctx.beginPath();
-      sctx.ellipse(sx, sy, 4 + rng() * 5, 3 + rng() * 3, rng() * 3, 0, Math.PI * 2);
-      sctx.fill();
-    }
-
-    // ---- Determine cage layout ----
-    const breedTypeIdx = Math.floor(rng() * CAMP_PET_EMOJIS.length);
-    const breedEmoji = CAMP_PET_EMOJIS[breedTypeIdx];
-    const breedCount = 2 + Math.floor(rng() * 3);
-    const regularCages = Math.min(3, 1 + Math.floor(level / 4));
-    const totalCages = 1 + regularCages;
-    const cageW = 22;
-    const cageH = 18;
-    const cagePad = 4;
-    const cageBlockW = totalCages * (cageW + cagePad) - cagePad;
-    const cageStartX = -cageBlockW / 2;
-    const cageY = -campH / 2 + 10;
-
-    // Cage area floor
-    sctx.fillStyle = '#4a3828';
-    sctx.beginPath();
-    sctx.roundRect(cageStartX - 4, cageY - 4, cageBlockW + 8, cageH + 8, 2);
-    sctx.fill();
-    sctx.strokeStyle = '#5a4030';
-    sctx.lineWidth = 0.8;
-    sctx.stroke();
-
-    // ---- Breeding cage ----
-    const bkx = cageStartX;
-    const bky = cageY;
-    sctx.fillStyle = '#4a3020';
-    sctx.fillRect(bkx, bky, cageW, cageH);
-    sctx.strokeStyle = 'rgba(140, 70, 30, 0.8)';
-    sctx.lineWidth = 1.2;
-    sctx.strokeRect(bkx, bky, cageW, cageH);
-    sctx.strokeStyle = 'rgba(110, 60, 25, 0.5)';
-    sctx.lineWidth = 0.6;
-    for (let b = 1; b <= 3; b++) {
-      sctx.beginPath();
-      sctx.moveTo(bkx + b * cageW / 4, bky);
-      sctx.lineTo(bkx + b * cageW / 4, bky + cageH);
-      sctx.stroke();
-    }
-    // Same-type animals crammed in
-    sctx.font = '8px sans-serif';
-    sctx.textAlign = 'center';
-    sctx.textBaseline = 'middle';
-    if (breedCount === 2) {
-      sctx.globalAlpha = 0.7;
-      sctx.fillText(breedEmoji, bkx + cageW * 0.35, bky + cageH * 0.45);
-      sctx.globalAlpha = 0.6;
-      sctx.fillText(breedEmoji, bkx + cageW * 0.65, bky + cageH * 0.6);
-    } else if (breedCount === 3) {
-      sctx.globalAlpha = 0.7;
-      sctx.fillText(breedEmoji, bkx + cageW * 0.25, bky + cageH * 0.4);
-      sctx.globalAlpha = 0.6;
-      sctx.fillText(breedEmoji, bkx + cageW * 0.6, bky + cageH * 0.35);
-      sctx.globalAlpha = 0.55;
-      sctx.fillText(breedEmoji, bkx + cageW * 0.45, bky + cageH * 0.72);
-    } else {
-      sctx.font = '7px sans-serif';
-      sctx.globalAlpha = 0.7;
-      sctx.fillText(breedEmoji, bkx + cageW * 0.28, bky + cageH * 0.3);
-      sctx.globalAlpha = 0.65;
-      sctx.fillText(breedEmoji, bkx + cageW * 0.72, bky + cageH * 0.3);
-      sctx.globalAlpha = 0.6;
-      sctx.fillText(breedEmoji, bkx + cageW * 0.28, bky + cageH * 0.72);
-      sctx.globalAlpha = 0.55;
-      sctx.fillText(breedEmoji, bkx + cageW * 0.72, bky + cageH * 0.72);
-    }
-    sctx.globalAlpha = 1;
-
-    // ---- Regular cages ----
-    for (let i = 0; i < regularCages; i++) {
-      const kx = cageStartX + (i + 1) * (cageW + cagePad);
-      sctx.fillStyle = '#4a3828';
-      sctx.fillRect(kx, cageY, cageW, cageH);
-      sctx.strokeStyle = 'rgba(120, 70, 30, 0.7)';
-      sctx.lineWidth = 1;
-      sctx.strokeRect(kx, cageY, cageW, cageH);
-      sctx.strokeStyle = 'rgba(100, 60, 25, 0.4)';
-      sctx.lineWidth = 0.5;
-      for (let b = 1; b < 3; b++) {
-        sctx.beginPath();
-        sctx.moveTo(kx + b * cageW / 3, cageY);
-        sctx.lineTo(kx + b * cageW / 3, cageY + cageH);
-        sctx.stroke();
-      }
-      const petIdx = Math.floor(rng() * CAMP_PET_EMOJIS.length);
-      sctx.font = '9px sans-serif';
-      sctx.textAlign = 'center';
-      sctx.textBaseline = 'middle';
-      sctx.globalAlpha = 0.6;
-      sctx.fillText(CAMP_PET_EMOJIS[petIdx], kx + cageW / 2, cageY + cageH / 2);
-      sctx.globalAlpha = 1;
-    }
-
-    // ---- Tent structure ----
-    const tentCx = 0;
-    const tentY = 8;
-    sctx.beginPath();
-    sctx.moveTo(tentCx - 28, tentY + 18);
-    sctx.lineTo(tentCx, tentY - 14);
-    sctx.lineTo(tentCx + 28, tentY + 18);
-    sctx.closePath();
-    sctx.fillStyle = '#c4a47a';
-    sctx.fill();
-    sctx.strokeStyle = '#8a7050';
-    sctx.lineWidth = 1.5;
-    sctx.stroke();
-    sctx.beginPath();
-    sctx.moveTo(tentCx - 9, tentY + 18);
-    sctx.lineTo(tentCx, tentY + 6);
-    sctx.lineTo(tentCx + 9, tentY + 18);
-    sctx.fillStyle = '#3a2a1a';
-    sctx.fill();
-
-    // ---- Fence posts ----
-    sctx.fillStyle = '#6a4a28';
-    const postSpacing = 16;
-    for (let px = -campW / 2 + 6; px < campW / 2 - 4; px += postSpacing) {
-      sctx.fillRect(px, -campH / 2, 2, 3);
-      sctx.fillRect(px, campH / 2 - 3, 2, 3);
-    }
-    for (let py = -campH / 2 + 6; py < campH / 2 - 4; py += postSpacing) {
-      sctx.fillRect(-campW / 2, py, 3, 2);
-      sctx.fillRect(campW / 2 - 3, py, 3, 2);
-    }
-    // Fence wire
-    sctx.strokeStyle = 'rgba(100, 70, 40, 0.4)';
-    sctx.lineWidth = 0.6;
-    sctx.setLineDash([3, 2]);
-    sctx.strokeRect(-campW / 2 + 1, -campH / 2 + 1, campW - 2, campH - 2);
-    sctx.setLineDash([]);
-
-    sctx.restore();
-    breederCampSprites.set(level, c);
-  }
-}
-prerenderBreederCampSprites();
-
-/** Draw a breeder camp using pre-rendered sprite + live text overlays. */
-function drawBreederCamp(x: number, y: number, level: number = 1): void {
-  const campW = 110;
-  const campH = 80;
-  const clampedLevel = Math.max(1, Math.min(20, level));
-  const sprite = breederCampSprites.get(clampedLevel) ?? breederCampSprites.get(1)!;
-  ctx.drawImage(sprite, x - CAMP_SPRITE_W / 2, y - CAMP_SPRITE_H / 2);
-
-  // ---- Level badge (top-right) — live overlay ----
-  const badgeX = x + campW / 2 - 6;
-  const badgeY = y - campH / 2 + 6;
-  ctx.fillStyle = '#fff';
-  ctx.beginPath();
-  ctx.roundRect(badgeX - 10, badgeY - 8, 20, 16, 3);
-  ctx.fill();
-  ctx.strokeStyle = '#333';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-  ctx.fillStyle = '#000';
-  ctx.font = 'bold 11px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(`${level}`, badgeX, badgeY);
-
-  // ---- RT cost label below — live overlay ----
-  const basePets = 3 + Math.min(2, Math.floor(level / 2));
-  const petCount = Math.min(basePets + Math.floor(level / 2), 8);
-  let ingredientCount = 1;
-  let avgIngredientCost = 8;
-  if (level >= 10) {
-    ingredientCount = 4;
-    avgIngredientCost = 13;
-  } else if (level >= 6) {
-    ingredientCount = 3;
-    avgIngredientCost = 11;
-  } else if (level >= 3) {
-    ingredientCount = 2;
-  }
-  const estimatedRtCost = petCount * ingredientCount * avgIngredientCost;
-
-  ctx.font = 'bold 10px Rubik, sans-serif';
-  ctx.fillStyle = '#ff6b6b';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'alphabetic';
-  ctx.fillText(`Lv${level} ~${estimatedRtCost}RT`, x, y + campH / 2 + 14);
-}
-
-function drawPickup(u: PickupState): void {
-  const h = GROWTH_ORB_RADIUS;
-  ctx.save();
-  
-  // Breeder camps get special detailed rendering
-  if (u.type === PICKUP_TYPE_BREEDER) {
-    drawBreederCamp(u.x, u.y, u.level ?? 1);
-    ctx.restore();
-    return;
-  }
-  
-  // Color by type: green=growth, blue=speed, purple=random port, teal=shelter port
-  let fillColor = '#7bed9f';
-  let strokeColor = '#2d5a38';
-  let label = '+Size';
-  if (u.type === PICKUP_TYPE_SPEED) {
-    fillColor = '#70a3ff';
-    strokeColor = '#2d4a6e';
-    label = 'Speed';
-  } else if (u.type === PICKUP_TYPE_PORT) {
-    fillColor = '#c77dff';
-    strokeColor = '#6a3d7a';
-    label = 'Random';
-  } else if (u.type === PICKUP_TYPE_SHELTER_PORT) {
-    fillColor = '#10b981';
-    strokeColor = '#047857';
-    label = 'Home';
-  }
-  ctx.fillStyle = fillColor;
-  ctx.fillRect(u.x - h, u.y - h, h * 2, h * 2);
-  ctx.strokeStyle = strokeColor;
-  ctx.lineWidth = 2;
-  ctx.strokeRect(u.x - h, u.y - h, h * 2, h * 2);
-  ctx.fillStyle = '#333';
-  ctx.font = '10px Rubik, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText(label, u.x, u.y + GROWTH_ORB_RADIUS + 10);
-  ctx.restore();
-}
+// --- Canvas 2D world rendering code has been removed ---
+// All rendering (drawMapBackground, drawShelter, drawStray, drawBreederCamp,
+// drawPickup, drawSeasonParticles, drawAdoptionZone, drawPortEffect, etc.)
+// has been moved to the PixiJS entity modules in client/src/entities/.
 
 function render(dt: number): void {
   try {
     // Update van facing direction (left/right) based on horizontal velocity
     if (latestSnapshot) {
       for (const p of latestSnapshot.players) {
-        // Only update direction when there's significant horizontal movement
         if (Math.abs(p.vx) > 0.5) {
           vanFacingDir.set(p.id, p.vx > 0 ? 1 : -1);
         }
-        // When stopped or moving mostly vertically, keep last facing direction
       }
     }
 
-    const cam = getCamera();
-    const camX = Number.isFinite(cam.x) ? Math.max(0, Math.min(MAP_WIDTH - cam.w, cam.x)) : 0;
-    const camY = Number.isFinite(cam.y) ? Math.max(0, Math.min(MAP_HEIGHT - cam.h, cam.y)) : 0;
-    const safeCam = { x: camX, y: camY, w: cam.w, h: cam.h };
-    updateSeasonParticles(dt, safeCam);
-    ctx.save();
-    ctx.translate(-safeCam.x, -safeCam.y);
-    drawMapBackground(safeCam);
+    // ---- PixiJS camera & scene graph update ----
+    const me = latestSnapshot?.players.find(p => p.id === myPlayerId);
+    const safeCam = pixiUpdateCamera({
+      predictedX: playerDisplayX,
+      predictedY: playerDisplayY,
+      isObserver,
+      isFullSpectator: isObserver,
+      spectatorPlayers: latestSnapshot?.players.filter(p => !p.eliminated),
+      spectatorIndex: observerFollowIndex,
+      isEliminated: !!(me?.eliminated),
+    });
 
-  // Viewport culling bounds — reused by all entity loops below
+    // Rebuild background if season changed
+    _bgLayer.build(currentSeason);
+
+    // Seasonal particle update
+    pixiUpdateSeasonParticles(dt, safeCam, currentSeason, latestSnapshot?.tick ?? 0);
+
+  // Viewport culling bounds
   const viewL = safeCam.x;
   const viewR = safeCam.x + safeCam.w;
   const viewT = safeCam.y;
   const viewB = safeCam.y + safeCam.h;
 
   if (latestSnapshot) {
-    // Draw adoption zones - fallback to center zone if empty
-    const zones = latestSnapshot.adoptionZones.length > 0 
-      ? latestSnapshot.adoptionZones 
-      : [{ id: 'adopt-fallback', x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2, radius: ADOPTION_ZONE_RADIUS }];
-    for (const z of zones) {
-      drawAdoptionZone(z);
-    }
-    for (const ev of latestSnapshot.adoptionEvents ?? []) {
-      drawAdoptionEvent(ev, latestSnapshot.tick);
-    }
-    // Draw pickups with viewport culling
-    for (const u of latestSnapshot.pickups ?? []) {
-      const margin = u.type === PICKUP_TYPE_BREEDER ? 70 : 30;
-      if (u.x + margin < viewL || u.x - margin > viewR || u.y + margin < viewT || u.y - margin > viewB) continue;
-      drawPickup(u);
-    }
-    // Draw player-built shelters (stationary buildings) with viewport culling
-    for (const shelter of latestSnapshot.shelters ?? []) {
-      const shelterHalf = Math.min(200, Math.max(100, SHELTER_BASE_RADIUS + shelter.size * SHELTER_RADIUS_PER_SIZE)) + 50;
-      if (shelter.x + shelterHalf < viewL || shelter.x - shelterHalf > viewR || shelter.y + shelterHalf < viewT || shelter.y - shelterHalf > viewB) continue;
-      const isOwner = shelter.ownerId === myPlayerId;
-      const owner = latestSnapshot.players.find(p => p.id === shelter.ownerId);
-      const ownerColor = owner?.shelterColor;
-      drawShelter(shelter, isOwner, ownerColor);
-    }
-    // Draw breeder shelters (enemy structures) with viewport culling
-    for (const breederShelter of latestSnapshot.breederShelters ?? []) {
-      const bsMargin = 180;
-      if (breederShelter.x + bsMargin < viewL || breederShelter.x - bsMargin > viewR || breederShelter.y + bsMargin < viewT || breederShelter.y - bsMargin > viewB) continue;
-      drawBreederShelter(breederShelter);
-    }
+    // Adoption zones
+    updateAdoptionZones(latestSnapshot.adoptionZones, zoneLayer);
+    // Adoption events
+    updateAdoptionEvents(
+      latestSnapshot.adoptionEvents ?? [],
+      latestSnapshot.tick,
+      me?.x ?? 0, me?.y ?? 0,
+      adoptionEventTexture,
+      zoneLayer,
+    );
+    // Pickups — build camp texture map from sprites module
+    const campTexMap = new Map<number, Texture>();
+    for (let lvl = 1; lvl <= 20; lvl++) campTexMap.set(lvl, getBreederCampTexture(lvl));
+    updatePickups(latestSnapshot.pickups ?? [], pickupLayer, campTexMap, viewL, viewR, viewT, viewB);
+    // Shelters
+    updateShelters(
+      latestSnapshot.shelters ?? [], myPlayerId, latestSnapshot.players,
+      lastPetTypesById, shelterLayer, viewL, viewR, viewT, viewB,
+    );
+    // Breeder shelters
+    updateBreeders(latestSnapshot.breederShelters ?? [], shelterLayer, viewL, viewR, viewT, viewB);
   }
 
-  // Draw boss mode PetMall and mills
-  if (latestSnapshot?.bossMode?.active) {
-    drawBossMode(latestSnapshot.bossMode, viewL, viewR, viewT, viewB);
+  // Boss mode
+  pixiUpdateBossMode(latestSnapshot?.bossMode, bossLayer, viewL, viewR, viewT, viewB);
+
+  // Strays — rendered via PixiJS sprite pool
+  pixiUpdateStrays(
+    latestSnapshot?.pets ?? [],
+    (id) => getInterpolatedPet(id),
+    viewL, viewR, viewT, viewB,
+    strayLayer,
+  );
+
+  // Build player-keyed relationships map for van renderer
+  const _relMap = new Map<string, 'friend' | 'foe'>();
+  for (const pl of latestSnapshot?.players ?? []) {
+    const rel = getRelationshipByPlayerId(pl.id);
+    if (rel) _relMap.set(pl.id, rel);
   }
+  // Vans (player vehicles)
+  updateVans(
+    latestSnapshot?.players ?? [],
+    myPlayerId,
+    predictedPlayer,
+    playerDisplayX, playerDisplayY,
+    vanFacingDir,
+    latestSnapshot?.tick ?? 0,
+    sentAllyRequests,
+    _relMap,
+    playerLayer,
+  );
 
-  // Stray viewport culling with extra margin for interpolation drift
-  const strayMargin = 50;
-  const strayL = viewL - strayMargin;
-  const strayR = viewR + strayMargin;
-  const strayT = viewT - strayMargin;
-  const strayB = viewB + strayMargin;
+  // Growth popup
+  renderGrowthPopup(growthPopUntil > Date.now(), hudContainer, pixiScreenW, pixiScreenH);
 
-  beginStrayBatch();
-  for (const pet of latestSnapshot?.pets ?? []) {
-    if (pet.insideShelterId !== null) continue;
-    // Skip uninitialized pets at (0,0) - ghost stray fix
-    if (pet.x === 0 && pet.y === 0) continue;
-    // Cull BEFORE interpolation using raw snapshot position (within ~4 units of true pos)
-    if (pet.x < strayL || pet.x > strayR || pet.y < strayT || pet.y > strayB) continue;
-    const p = getInterpolatedPet(pet.id) ?? pet;
-    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
-    drawStray(p.x, p.y, pet.petType ?? PET_TYPE_CAT);
-  }
-  endStrayBatch();
+  // Adoption animations (PixiJS)
+  pixiRenderAdoptionAnimations(effectLayer);
 
-  // Sort players by size so larger ones render on top
-  const sortedPlayers = [...(latestSnapshot?.players ?? [])].sort((a, b) => a.size - b.size);
-  for (const pl of sortedPlayers) {
-    const isMe = pl.id === myPlayerId;
-    let p: PlayerState;
-    if (isMe && predictedPlayer) {
-      // Use smoothed display position for local player so shelter doesn't snap on server updates
-      let drawX = playerDisplayX ?? predictedPlayer.x;
-      let drawY = playerDisplayY ?? predictedPlayer.y;
-      if (!Number.isFinite(drawX) || !Number.isFinite(drawY)) {
-        drawX = predictedPlayer.x;
-        drawY = predictedPlayer.y;
-      }
-      if (!Number.isFinite(drawX) || !Number.isFinite(drawY)) {
-        drawX = MAP_WIDTH / 2;
-        drawY = MAP_HEIGHT / 2;
-      }
-      p = { ...predictedPlayer, x: drawX, y: drawY };
-    } else {
-      p = getInterpolatedPlayer(pl.id) ?? pl;
-    }
-    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
-    drawPlayerShelter(p, isMe);
-    if (isMe && growthPopUntil > Date.now()) {
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      const sx = canvas.width / 2;
-      const sy = canvas.height / 2 - 60;
-      ctx.fillStyle = '#7bed9f';
-      ctx.font = 'bold 28px Rubik, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('+1 Size!', sx, sy);
-      ctx.restore();
-    }
-  }
-  
-  // Draw adoption animations: people walking away with their adopted pets
-  const nowMs = Date.now();
-  for (let i = adoptionAnimations.length - 1; i >= 0; i--) {
-    const anim = adoptionAnimations[i];
-    const elapsed = nowMs - anim.startTime;
+  // Port effects (PixiJS)
+  renderPortEffects(portAnimations, effectLayer);
 
-    if (elapsed < 0) continue; // Hasn't started yet (staggered)
+  // Seasonal particles (PixiJS)
+  pixiRenderSeasonParticles(safeCam, currentSeason, effectLayer);
 
-    if (elapsed > ADOPTION_ANIMATION_DURATION) {
-      adoptionAnimations.splice(i, 1);
-      continue;
-    }
-
-    const progress = elapsed / ADOPTION_ANIMATION_DURATION;
-    const easedProgress = 1 - Math.pow(1 - progress, 3); // ease-out
-
-    // Fade out in the last 20%
-    const alpha = progress < 0.8 ? 1 : 1 - (progress - 0.8) / 0.2;
-
-    ctx.save();
-    ctx.globalAlpha = alpha;
-
-    if (anim.isBird) {
-      // ---- BIRD: flies free, no person, ascending with flutter ----
-      const birdX = anim.fromX + (anim.toX - anim.fromX) * easedProgress
-                   + Math.sin(progress * Math.PI * 4) * 12; // side-to-side flutter
-      const birdY = anim.fromY + (anim.toY - anim.fromY) * easedProgress
-                   - progress * 80 // rise upward
-                   + Math.sin(progress * Math.PI * 6) * 5; // vertical flutter
-      // Bird gets smaller as it flies away
-      const birdScale = 1 - progress * 0.4;
-      ctx.font = `${Math.round(22 * birdScale)}px sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('🐦', birdX, birdY);
-
-      // Small freedom sparkle trail
-      if (progress > 0.1 && progress < 0.7) {
-        ctx.globalAlpha = alpha * 0.4;
-        ctx.font = `${Math.round(8 * birdScale)}px sans-serif`;
-        ctx.fillText('✨', birdX - 8, birdY + 6);
-      }
-    } else {
-      // ---- NON-BIRD: person walking away with pet on leash ----
-      const personX = anim.fromX + (anim.toX - anim.fromX) * easedProgress;
-      const personY = anim.fromY + (anim.toY - anim.fromY) * easedProgress;
-
-      // Walking bob animation
-      const walkCycle = progress * 12; // fast walking cycle
-      const headBob = Math.sin(walkCycle * Math.PI) * 1.2;
-      const legSwing = Math.sin(walkCycle * Math.PI) * 2;
-
-      // Person body (facing walk direction)
-      const angle = anim.walkAngle;
-
-      ctx.save();
-      ctx.translate(personX, personY);
-
-      // -- Person sprite (similar to shelter volunteer) --
-      const ap = anim.appearance;
-      // Body (oval)
-      ctx.fillStyle = ap.clothing;
-      ctx.beginPath();
-      ctx.ellipse(0, 1 + headBob * 0.3, 3.5, 5, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = ap.clothingStroke;
-      ctx.lineWidth = 0.6;
-      ctx.stroke();
-
-      // Head
-      ctx.fillStyle = ap.skin;
-      ctx.beginPath();
-      ctx.arc(0, -4.5 + headBob, 3, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = ap.skinStroke;
-      ctx.lineWidth = 0.5;
-      ctx.stroke();
-
-      // Hair
-      ctx.fillStyle = ap.hair;
-      ctx.beginPath();
-      ctx.arc(0, -5.5 + headBob, 3, Math.PI, Math.PI * 2);
-      ctx.fill();
-
-      // Legs (walking animation)
-      ctx.strokeStyle = '#4a6a8a';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(-1.5, 5);
-      ctx.lineTo(-1.5 - legSwing, 10);
-      ctx.moveTo(1.5, 5);
-      ctx.lineTo(1.5 + legSwing, 10);
-      ctx.stroke();
-
-      // -- Leash + pet --
-      // Pet position: behind/beside the person in the direction they came from
-      const leashLen = 14;
-      const petOffX = -Math.cos(angle) * leashLen + Math.sin(walkCycle * Math.PI * 0.7) * 2;
-      const petOffY = -Math.sin(angle) * leashLen + Math.abs(Math.sin(walkCycle * Math.PI)) * 1.5;
-
-      // Leash line (from person's hand to pet)
-      const handX = Math.cos(angle) * 3;
-      const handY = 1 + Math.sin(angle) * 2;
-      ctx.strokeStyle = '#8a6a4a';
-      ctx.lineWidth = 0.8;
-      ctx.setLineDash([2, 1]);
-      ctx.beginPath();
-      ctx.moveTo(handX, handY);
-      // Slight droop in the leash
-      const midX = (handX + petOffX) / 2;
-      const midY = (handY + petOffY) / 2 + 4;
-      ctx.quadraticCurveTo(midX, midY, petOffX, petOffY);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Pet emoji at leash end
-      const petEmoji = ADOPTION_PET_EMOJIS[anim.petType] ?? '🐾';
-      ctx.font = '14px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(petEmoji, petOffX, petOffY);
-
-      ctx.restore();
-    }
-
-    // Small heart above the person/bird periodically
-    if (progress > 0.05 && progress < 0.6 && Math.sin(progress * 20) > 0.8) {
-      const heartX = anim.fromX + (anim.toX - anim.fromX) * easedProgress;
-      const heartY = anim.fromY + (anim.toY - anim.fromY) * easedProgress
-                    - (anim.isBird ? progress * 80 + 15 : 14);
-      ctx.globalAlpha = alpha * 0.6;
-      ctx.font = '8px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('❤️', heartX, heartY);
-    }
-
-    ctx.restore();
-  }
-
-  // Draw port animations (teleport effects at old locations)
-  for (const [playerId, anim] of portAnimations) {
-    const elapsed = Date.now() - anim.startTime;
-    const progress = Math.min(1, elapsed / PORT_ANIMATION_DURATION);
-    
-    if (anim.phase === 'fadeIn') {
-      // Draw appearing effect at new location
-      drawPortEffect(anim.toX, anim.toY, progress, true);
-      
-      // Also draw disappearing effect at old location (only in first half)
-      if (progress < 0.5) {
-        drawPortEffect(anim.fromX, anim.fromY, progress * 2, false);
-      }
-    }
-  }
-
-  // Draw seasonal particle overlays (snowflakes, leaves, wind streaks)
-  drawSeasonParticles(safeCam);
-
-  ctx.restore();
-
-  const scale = 120 / MAP_WIDTH;
-  // Season-aware minimap background
-  const minimapBg: Record<Season, string> = {
-    winter: 'rgba(140, 160, 180, 0.85)',
-    spring: 'rgba(30, 80, 30, 0.85)',
-    summer: 'rgba(70, 90, 45, 0.85)',
-    fall: 'rgba(55, 75, 45, 0.85)',
-  };
-  minimapCtx.fillStyle = minimapBg[currentSeason];
-  minimapCtx.fillRect(0, 0, 120, 120);
-  for (let yy = 0; yy <= MAP_HEIGHT; yy += DOT_SPACING * 3) {
-    for (let xx = 0; xx <= MAP_WIDTH; xx += DOT_SPACING * 3) {
-      minimapCtx.fillStyle = 'rgba(255,255,255,0.15)';
-      minimapCtx.fillRect(xx * scale - 0.8, yy * scale - 0.8, 1.6, 1.6);
-    }
-  }
-  if (latestSnapshot) {
-    // Draw adoption zones on minimap - fallback to center zone if empty
-    const minimapZones = latestSnapshot.adoptionZones.length > 0 
-      ? latestSnapshot.adoptionZones 
-      : [{ id: 'adopt-fallback', x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2, radius: ADOPTION_ZONE_RADIUS }];
-    for (const z of minimapZones) {
-      const zRadius = z.radius || ADOPTION_ZONE_RADIUS;
-      const r = Math.max(3, (zRadius * scale) | 0); // At least 3 pixels visible
-      minimapCtx.fillStyle = 'rgba(123, 237, 159, 0.6)';
-      minimapCtx.fillRect(z.x * scale - r, z.y * scale - r, r * 2, r * 2);
-    }
-    // Only draw stray pets if hideStraysOnMinimap is false
-    if (!hideStraysOnMinimap) {
-      minimapCtx.fillStyle = '#c9a86c';
-      // When many pets, draw every Nth to keep minimap responsive
-      const petCount = latestSnapshot.pets.length;
-      const step = petCount > 1000 ? 4 : petCount > 500 ? 2 : 1;
-      for (let pi = 0; pi < petCount; pi += step) {
-        const pet = latestSnapshot.pets[pi];
-        if (pet.insideShelterId !== null) continue;
-        if (pet.x === 0 && pet.y === 0) continue;
-        minimapCtx.fillRect(pet.x * scale - 2, pet.y * scale - 2, 4, 4);
-      }
-    }
-    for (const u of latestSnapshot.pickups ?? []) {
-      const px = u.x * scale;
-      const py = u.y * scale;
-      
-      if (u.type === PICKUP_TYPE_BREEDER) {
-        // Breeder camps: brown with pulsing glow effect
-        const glowIntensity = 0.5 + 0.5 * Math.sin(Date.now() / 200);
-        const glowRadius = 8 + glowIntensity * 4;
-        
-        // Draw glow layers
-        minimapCtx.save();
-        minimapCtx.shadowColor = '#ff4444';
-        minimapCtx.shadowBlur = glowRadius;
-        minimapCtx.fillStyle = '#8B4513'; // Brown
-        minimapCtx.beginPath();
-        minimapCtx.arc(px, py, 4, 0, Math.PI * 2);
-        minimapCtx.fill();
-        
-        // Draw border glow
-        minimapCtx.strokeStyle = `rgba(255, 68, 68, ${0.7 + glowIntensity * 0.3})`;
-        minimapCtx.lineWidth = 2;
-        minimapCtx.stroke();
-        minimapCtx.restore();
-      } else {
-        minimapCtx.fillStyle = u.type === PICKUP_TYPE_GROWTH ? '#7bed9f' : 
-                               u.type === PICKUP_TYPE_PORT ? '#c77dff' : 
-                               u.type === PICKUP_TYPE_SHELTER_PORT ? '#10b981' : '#70a3ff';
-        minimapCtx.fillRect(px - 2, py - 2, 4, 4);
-      }
-    }
-    // Draw shelters on minimap (buildings)
-    for (const shelter of latestSnapshot.shelters ?? []) {
-      const isOwner = shelter.ownerId === myPlayerId;
-      const sx = shelter.x * scale;
-      const sy = shelter.y * scale;
-      
-      // Calculate the coverage radius (actual shelter size)
-      const cappedSize = Math.min(shelter.size, 2000);
-      const shelterSize = (SHELTER_BASE_RADIUS + cappedSize * SHELTER_RADIUS_PER_SIZE) * scale;
-      const coverageRadius = Math.min(60, Math.max(4, shelterSize));
-      
-      // Draw small fixed-size building icon (doesn't grow)
-      const iconHalf = 4;
-      minimapCtx.fillStyle = isOwner ? '#e8d5b7' : '#d4c4a8';
-      minimapCtx.fillRect(sx - iconHalf, sy - iconHalf, iconHalf * 2, iconHalf * 2);
-      minimapCtx.strokeStyle = isOwner ? '#7bed9f' : '#8B4513';
-      minimapCtx.lineWidth = 1;
-      minimapCtx.strokeRect(sx - iconHalf, sy - iconHalf, iconHalf * 2, iconHalf * 2);
-      
-      // Draw home icon for player's own shelter
-      if (isOwner) {
-        // Draw a small house roof shape
-        minimapCtx.fillStyle = '#7bed9f';
-        minimapCtx.beginPath();
-        minimapCtx.moveTo(sx, sy - iconHalf - 4); // Top of roof
-        minimapCtx.lineTo(sx - 5, sy - iconHalf + 1); // Left corner
-        minimapCtx.lineTo(sx + 5, sy - iconHalf + 1); // Right corner
-        minimapCtx.closePath();
-        minimapCtx.fill();
-        // House body indicator
-        minimapCtx.fillRect(sx - 3, sy - iconHalf + 1, 6, 5);
-        
-        // Draw pulsing radar coverage if shelter has grown beyond base size
-        if (coverageRadius > 8) {
-          minimapCtx.save();
-          
-          // Pulsing radar effect - expanding ring
-          const pulseTime = Date.now() / 1500; // Slower pulse (1.5s cycle)
-          const pulseProgress = pulseTime % 1;
-          const pulseRadius = coverageRadius * pulseProgress;
-          const pulseAlpha = 0.6 * (1 - pulseProgress);
-          
-          minimapCtx.strokeStyle = `rgba(123, 237, 159, ${pulseAlpha})`;
-          minimapCtx.lineWidth = 2;
-          minimapCtx.beginPath();
-          minimapCtx.arc(sx, sy, pulseRadius, 0, Math.PI * 2);
-          minimapCtx.stroke();
-          
-          // Second pulse offset by half cycle for continuous effect
-          const pulse2Progress = (pulseTime + 0.5) % 1;
-          const pulse2Radius = coverageRadius * pulse2Progress;
-          const pulse2Alpha = 0.6 * (1 - pulse2Progress);
-          
-          minimapCtx.strokeStyle = `rgba(123, 237, 159, ${pulse2Alpha})`;
-          minimapCtx.beginPath();
-          minimapCtx.arc(sx, sy, pulse2Radius, 0, Math.PI * 2);
-          minimapCtx.stroke();
-          
-          // Static dashed outline showing max coverage
-          minimapCtx.strokeStyle = 'rgba(123, 237, 159, 0.4)';
-          minimapCtx.lineWidth = 1;
-          minimapCtx.setLineDash([3, 3]);
-          minimapCtx.beginPath();
-          minimapCtx.arc(sx, sy, coverageRadius, 0, Math.PI * 2);
-          minimapCtx.stroke();
-          minimapCtx.setLineDash([]);
-          
-          minimapCtx.restore();
-        }
-      }
-    }
-    // Draw breeder shelters (mills) on minimap - prominent so they're easily seen
-    for (const breederShelter of latestSnapshot.breederShelters ?? []) {
-      const bx = breederShelter.x * scale;
-      const by = breederShelter.y * scale;
-      const bHalf = Math.max(10, (40 + breederShelter.size * 0.5) * scale); // Min 10px so mill is always visible
-      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
-      minimapCtx.save();
-      minimapCtx.shadowColor = '#ff0000';
-      minimapCtx.shadowBlur = 8 + pulse * 8;
-      minimapCtx.fillStyle = '#cc2222';
-      minimapCtx.fillRect(bx - bHalf, by - bHalf, bHalf * 2, bHalf * 2);
-      minimapCtx.strokeStyle = `rgba(255, 50, 50, ${0.9 + pulse * 0.1})`;
-      minimapCtx.lineWidth = 2.5;
-      minimapCtx.strokeRect(bx - bHalf, by - bHalf, bHalf * 2, bHalf * 2);
-      minimapCtx.restore();
-    }
-    // Draw boss mode on minimap
-    if (latestSnapshot.bossMode?.active) {
-      const bm = latestSnapshot.bossMode;
-      // Draw PetMall center
-      const mallX = bm.mallX * scale;
-      const mallY = bm.mallY * scale;
-      const mallR = BOSS_PETMALL_RADIUS * scale * 0.6;
-      
-      minimapCtx.save();
-      minimapCtx.strokeStyle = '#ffd700';
-      minimapCtx.lineWidth = 2;
-      minimapCtx.setLineDash([4, 4]);
-      minimapCtx.beginPath();
-      minimapCtx.arc(mallX, mallY, mallR, 0, Math.PI * 2);
-      minimapCtx.stroke();
-      minimapCtx.setLineDash([]);
-      
-      // Draw boss mills
-      for (const mill of bm.mills) {
-        const mx = mill.x * scale;
-        const my = mill.y * scale;
-        const mr = Math.max(6, BOSS_MILL_RADIUS * scale * 0.5);
-        
-        if (mill.completed) {
-          minimapCtx.fillStyle = 'rgba(100, 255, 100, 0.6)';
-        } else if (mill.id === bm.playerAtMill) {
-          minimapCtx.fillStyle = 'rgba(0, 170, 255, 0.8)';
-        } else if (mill.id === bm.tycoonTargetMill) {
-          minimapCtx.fillStyle = 'rgba(255, 100, 100, 0.8)';
-        } else {
-          minimapCtx.fillStyle = 'rgba(139, 69, 19, 0.7)';
-        }
-        
-        minimapCtx.beginPath();
-        minimapCtx.arc(mx, my, mr, 0, Math.PI * 2);
-        minimapCtx.fill();
-        
-        if (!mill.completed) {
-          minimapCtx.strokeStyle = mill.id === bm.playerAtMill ? '#00aaff' : '#ffd700';
-          minimapCtx.lineWidth = 1.5;
-          minimapCtx.stroke();
-        }
-      }
-      
-      // Draw Breeder Tycoon
-      const tx = bm.tycoonX * scale;
-      const ty = bm.tycoonY * scale;
-      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 150);
-      minimapCtx.shadowColor = '#ff0000';
-      minimapCtx.shadowBlur = 5 + pulse * 5;
-      minimapCtx.fillStyle = '#ff2222';
-      minimapCtx.beginPath();
-      minimapCtx.arc(tx, ty, 5, 0, Math.PI * 2);
-      minimapCtx.fill();
-      minimapCtx.shadowBlur = 0;
-      
-      minimapCtx.restore();
-    }
-    // Draw adoption events on minimap (highly visible with bright pulsing effects)
-    for (const ev of latestSnapshot.adoptionEvents ?? []) {
-      const ex = ev.x * scale;
-      const ey = ev.y * scale;
-      const r = Math.min(14, Math.max(8, ev.radius * scale)); // Ensure minimum visible size
-      
-      minimapCtx.save();
-      
-      // Strong outer glow effect for maximum visibility
-      minimapCtx.shadowColor = '#00ffcc';
-      minimapCtx.shadowBlur = 12 + Math.sin(Date.now() * 0.006) * 6;
-      
-      // Draw bright filled background circle
-      minimapCtx.fillStyle = 'rgba(0, 255, 200, 0.5)';
-      minimapCtx.beginPath();
-      minimapCtx.arc(ex, ey, r + 2, 0, Math.PI * 2);
-      minimapCtx.fill();
-      
-      // Pulsing effect - creates expanding ring animations (faster and more prominent)
-      const pulseTime = Date.now() % 1500; // 1.5 second cycle (faster)
-      const pulseProgress = pulseTime / 1500;
-      const pulseRadius = r + pulseProgress * 12; // Expands further outward
-      const pulseAlpha = 1 - pulseProgress;
-      
-      // Draw expanding pulse ring (thicker, brighter)
-      minimapCtx.strokeStyle = `rgba(0, 255, 200, ${pulseAlpha})`;
-      minimapCtx.lineWidth = 4 - pulseProgress * 3;
-      minimapCtx.beginPath();
-      minimapCtx.arc(ex, ey, pulseRadius, 0, Math.PI * 2);
-      minimapCtx.stroke();
-      
-      // Draw second pulse ring (offset timing for continuous effect)
-      const pulse2Time = (Date.now() + 750) % 1500;
-      const pulse2Progress = pulse2Time / 1500;
-      const pulse2Radius = r + pulse2Progress * 12;
-      const pulse2Alpha = 1 - pulse2Progress;
-      minimapCtx.strokeStyle = `rgba(0, 255, 200, ${pulse2Alpha})`;
-      minimapCtx.lineWidth = 4 - pulse2Progress * 3;
-      minimapCtx.beginPath();
-      minimapCtx.arc(ex, ey, pulse2Radius, 0, Math.PI * 2);
-      minimapCtx.stroke();
-      
-      // Draw third pulse ring for extra visibility
-      const pulse3Time = (Date.now() + 500) % 1500;
-      const pulse3Progress = pulse3Time / 1500;
-      const pulse3Radius = r + pulse3Progress * 12;
-      const pulse3Alpha = (1 - pulse3Progress) * 0.7;
-      minimapCtx.strokeStyle = `rgba(255, 215, 0, ${pulse3Alpha})`; // Gold color for contrast
-      minimapCtx.lineWidth = 3 - pulse3Progress * 2;
-      minimapCtx.beginPath();
-      minimapCtx.arc(ex, ey, pulse3Radius, 0, Math.PI * 2);
-      minimapCtx.stroke();
-      
-      // Main event circle - solid bright border
-      minimapCtx.strokeStyle = '#00ffcc';
-      minimapCtx.lineWidth = 3;
-      minimapCtx.beginPath();
-      minimapCtx.arc(ex, ey, r, 0, Math.PI * 2);
-      minimapCtx.stroke();
-      
-      // Draw bright star/event icon in center (larger, more visible)
-      minimapCtx.shadowBlur = 8;
-      minimapCtx.fillStyle = '#ffffff';
-      minimapCtx.font = 'bold 12px sans-serif';
-      minimapCtx.textAlign = 'center';
-      minimapCtx.textBaseline = 'middle';
-      minimapCtx.fillText('★', ex, ey);
-      
-      minimapCtx.restore();
-    }
-    // Sort players by adoption count for leader visibility scaling
-    const sortedByAdoptions = [...latestSnapshot.players].sort((a, b) => b.totalAdoptions - a.totalAdoptions);
-    for (const pl of latestSnapshot.players) {
-      let mapColor = pl.id === myPlayerId ? '#7bed9f' : hashColor(pl.id);
-      if (pl.shelterColor) {
-        if (pl.shelterColor.startsWith('gradient:')) {
-          // Use first gradient color for minimap
-          mapColor = pl.shelterColor.split(':')[1] || mapColor;
-        } else {
-          mapColor = pl.shelterColor;
-        }
-      }
-      minimapCtx.fillStyle = mapColor;
-      // Vans are always fixed size on minimap (shelters are drawn separately)
-      const VAN_MINIMAP_SIZE = 50;
-      const r = VAN_MINIMAP_SIZE * scale;
-      // Leader visibility: scale up dots based on adoption rank
-      const adoptionRank = sortedByAdoptions.indexOf(pl);
-      const leaderScale = adoptionRank === 0 ? 1.5 : adoptionRank <= 2 ? 1.2 : 1.0;
-      const half = Math.max(2, r) * leaderScale;
-      minimapCtx.fillRect(pl.x * scale - half, pl.y * scale - half, half * 2, half * 2);
-      // Draw crown indicator for the leader
-      if (adoptionRank === 0 && latestSnapshot.players.length > 1) {
-        minimapCtx.fillStyle = '#ffd700';
-        minimapCtx.beginPath();
-        minimapCtx.arc(pl.x * scale, pl.y * scale - half - 3, 3, 0, Math.PI * 2);
-        minimapCtx.fill();
-      }
-    }
-  }
-  // Draw viewport indicator on minimap
-  const vpX = safeCam.x * scale;
-  const vpY = safeCam.y * scale;
-  const vpW = safeCam.w * scale;
-  const vpH = safeCam.h * scale;
-  minimapCtx.strokeStyle = 'rgba(255,255,255,0.6)';
-  minimapCtx.lineWidth = 1.5;
-  minimapCtx.strokeRect(vpX, vpY, vpW, vpH);
-  
-  minimapCtx.strokeStyle = 'rgba(255,255,255,0.2)';
-  minimapCtx.lineWidth = 1;
-  minimapCtx.strokeRect(0.5, 0.5, 119, 119);
-
-  // Draw shelter locator arrow when player has a shelter and it's off-screen
+  // Shelter locator arrow (HUD)
   const shelterLocatorMe = latestSnapshot?.players.find(p => p.id === myPlayerId);
-  const myShelterForLocator = shelterLocatorMe?.shelterId 
-    ? (latestSnapshot?.shelters?.find(s => s.id === shelterLocatorMe.shelterId) ?? null) 
+  const myShelterForLocator = shelterLocatorMe?.shelterId
+    ? (latestSnapshot?.shelters?.find(s => s.id === shelterLocatorMe.shelterId) ?? null)
     : null;
-  
   if (myShelterForLocator && shelterLocatorMe && !shelterLocatorMe.eliminated) {
-    const vanX = predictedPlayer?.x ?? shelterLocatorMe.x;
-    const vanY = predictedPlayer?.y ?? shelterLocatorMe.y;
-    const shelterX = myShelterForLocator.x;
-    const shelterY = myShelterForLocator.y;
-    
-    // Check if shelter is visible on screen
-    const screenLeft = safeCam.x;
-    const screenRight = safeCam.x + safeCam.w;
-    const screenTop = safeCam.y;
-    const screenBottom = safeCam.y + safeCam.h;
-    
-    const isOnScreen = shelterX >= screenLeft && shelterX <= screenRight && 
-                       shelterY >= screenTop && shelterY <= screenBottom;
-    
-    if (!isOnScreen) {
-      // Calculate angle from center of screen to shelter
-      const screenCenterX = safeCam.x + safeCam.w / 2;
-      const screenCenterY = safeCam.y + safeCam.h / 2;
-      const angle = Math.atan2(shelterY - screenCenterY, shelterX - screenCenterX);
-      
-      // Calculate distance to shelter from van
-      const distToShelter = Math.hypot(shelterX - vanX, shelterY - vanY);
-      
-      // Calculate position on screen edge for the indicator
-      const margin = 60; // Distance from edge
-      const halfW = canvas.width / 2 - margin;
-      const halfH = canvas.height / 2 - margin;
-      
-      // Find intersection with screen edge
-      let indicatorX = canvas.width / 2 + Math.cos(angle) * halfW;
-      let indicatorY = canvas.height / 2 + Math.sin(angle) * halfH;
-      
-      // Clamp to screen bounds
-      const aspectRatio = halfW / halfH;
-      if (Math.abs(Math.cos(angle)) > Math.abs(Math.sin(angle)) * aspectRatio) {
-        // Hits left or right edge
-        indicatorX = canvas.width / 2 + Math.sign(Math.cos(angle)) * halfW;
-        indicatorY = canvas.height / 2 + Math.tan(angle) * Math.sign(Math.cos(angle)) * halfW;
-      } else {
-        // Hits top or bottom edge
-        indicatorY = canvas.height / 2 + Math.sign(Math.sin(angle)) * halfH;
-        indicatorX = canvas.width / 2 + (1 / Math.tan(angle)) * Math.sign(Math.sin(angle)) * halfH;
-      }
-      
-      // Clamp final position
-      indicatorX = Math.max(margin, Math.min(canvas.width - margin, indicatorX));
-      indicatorY = Math.max(margin, Math.min(canvas.height - margin, indicatorY));
-      
-      // Draw shelter indicator
-      ctx.save();
-      
-      // Pulsing effect
-      const pulse = 0.7 + 0.3 * Math.sin(Date.now() / 300);
-      
-      // Draw arrow pointing toward shelter
-      ctx.translate(indicatorX, indicatorY);
-      ctx.rotate(angle);
-      
-      // Arrow body
-      ctx.fillStyle = `rgba(123, 237, 159, ${pulse})`;
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
-      ctx.lineWidth = 2;
-      
-      // Arrow shape (pointing right, will be rotated)
-      ctx.beginPath();
-      ctx.moveTo(20, 0);      // Arrow tip
-      ctx.lineTo(5, -10);     // Top back
-      ctx.lineTo(5, -5);      // Top notch
-      ctx.lineTo(-15, -5);    // Back top
-      ctx.lineTo(-15, 5);     // Back bottom
-      ctx.lineTo(5, 5);       // Bottom notch
-      ctx.lineTo(5, 10);      // Bottom back
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      
-      ctx.restore();
-      
-      // Draw shelter icon next to arrow
-      ctx.save();
-      const iconOffsetX = -Math.cos(angle) * 35;
-      const iconOffsetY = -Math.sin(angle) * 35;
-      const iconX = indicatorX + iconOffsetX;
-      const iconY = indicatorY + iconOffsetY;
-      
-      // Draw house icon
-      ctx.fillStyle = `rgba(232, 213, 183, ${pulse})`;
-      ctx.strokeStyle = 'rgba(123, 237, 159, 0.9)';
-      ctx.lineWidth = 2;
-      
-      // House body
-      ctx.fillRect(iconX - 12, iconY - 8, 24, 18);
-      ctx.strokeRect(iconX - 12, iconY - 8, 24, 18);
-      
-      // Roof
-      ctx.fillStyle = `rgba(123, 237, 159, ${pulse})`;
-      ctx.beginPath();
-      ctx.moveTo(iconX, iconY - 20);     // Peak
-      ctx.lineTo(iconX - 16, iconY - 8); // Left
-      ctx.lineTo(iconX + 16, iconY - 8); // Right
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      
-      // Door
-      ctx.fillStyle = 'rgba(139, 90, 43, 0.8)';
-      ctx.fillRect(iconX - 4, iconY, 8, 10);
-      
-      // Distance text
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold 12px Rubik, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      const distText = distToShelter >= 1000 
-        ? `${(distToShelter / 1000).toFixed(1)}k` 
-        : `${Math.round(distToShelter)}`;
-      ctx.fillText(distText, iconX, iconY + 14);
-      
-      ctx.restore();
-    }
+    renderShelterLocator(
+      true,
+      myShelterForLocator.x, myShelterForLocator.y,
+      predictedPlayer?.x ?? shelterLocatorMe.x,
+      predictedPlayer?.y ?? shelterLocatorMe.y,
+      safeCam, hudContainer, pixiScreenW, pixiScreenH,
+    );
+  } else {
+    renderShelterLocator(false, 0, 0, 0, 0, safeCam, hudContainer, pixiScreenW, pixiScreenH);
   }
 
-  // Draw virtual joystick on main canvas when active
-  if (joystickActive) {
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const originX = (joystickOriginX - rect.left) * scaleX;
-    const originY = (joystickOriginY - rect.top) * scaleY;
-    const currentX = (joystickCurrentX - rect.left) * scaleX;
-    const currentY = (joystickCurrentY - rect.top) * scaleY;
-    
-    // Clamp joystick knob to max radius
-    const dx = currentX - originX;
-    const dy = currentY - originY;
-    const dist = Math.hypot(dx, dy);
-    const clampedDist = Math.min(dist, JOYSTICK_MAX_RADIUS * scaleX);
-    const knobX = dist > 0 ? originX + (dx / dist) * clampedDist : originX;
-    const knobY = dist > 0 ? originY + (dy / dist) * clampedDist : originY;
-    
-    // Outer ring (base)
-    ctx.save();
-    ctx.globalAlpha = 0.3;
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.arc(originX, originY, JOYSTICK_MAX_RADIUS * scaleX, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.1)';
-    ctx.fill();
-    
-    // Inner knob
-    ctx.globalAlpha = 0.6;
-    ctx.fillStyle = '#7bed9f';
-    ctx.beginPath();
-    ctx.arc(knobX, knobY, 20 * scaleX, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.restore();
-  }
+  // Virtual joystick (HUD)
+  renderJoystick(
+    joystickActive,
+    joystickOriginX, joystickOriginY,
+    joystickCurrentX, joystickCurrentY,
+    JOYSTICK_MAX_RADIUS,
+    hudContainer, pixiScreenW, pixiScreenH,
+  );
+
+  // Minimap (Canvas 2D — separate small canvas)
+  pixiDrawMinimap(
+    minimapCtx, latestSnapshot, myPlayerId, currentSeason,
+    hideStraysOnMinimap, safeCam, playerDisplayX, playerDisplayY,
+  );
+
+  // ---- Render the PixiJS frame ----
+  renderFrame();
+
 
   // UI
-  const me = latestSnapshot?.players.find((p) => p.id === myPlayerId) ?? predictedPlayer;
-  const rawCapacity = me ? Math.floor(me.size) : 0;
+  const meUI = latestSnapshot?.players.find((p) => p.id === myPlayerId) ?? predictedPlayer;
+  const rawCapacity = meUI ? Math.floor(meUI.size) : 0;
   // Vans always capped at VAN_MAX_CAPACITY (shelter capacity shown on shelter building)
   const capacity = Math.min(rawCapacity, VAN_MAX_CAPACITY);
-  const inside = me?.petsInside.length ?? 0;
+  const inside = meUI?.petsInside.length ?? 0;
   // Use server-provided total (pets array may be capped for performance)
   const strayCount = latestSnapshot?.totalOutdoorStrays ?? 0;
-  scoreEl.textContent = me?.eliminated ? 'Observer Mode' : `Size: ${rawCapacity}`;
-  carriedEl.textContent = me?.eliminated ? 'WASD to pan | Drag to move' : `Pets: ${inside}/${capacity}`;
+  scoreEl.textContent = meUI?.eliminated ? 'Observer Mode' : `Size: ${rawCapacity}`;
+  carriedEl.textContent = meUI?.eliminated ? 'WASD to pan | Drag to move' : `Pets: ${inside}/${capacity}`;
   
   // Show/hide build shelter button - requires size >= 50 and tokens >= 250
-  const hasShelter = !!(me?.shelterId);
-  const isEliminated = !!(me?.eliminated);
-  const playerTokens = me?.money ?? 0;
-  const canBuildShelter = me && me.size >= 50 && !hasShelter && !isEliminated && matchPhase === 'playing';
+  const hasShelter = !!(meUI?.shelterId);
+  const isEliminated = !!(meUI?.eliminated);
+  const playerTokens = meUI?.money ?? 0;
+  const canBuildShelter = meUI && meUI.size >= 50 && !hasShelter && !isEliminated && matchPhase === 'playing';
   
   // Update tokens display
   gameTokensEl.textContent = formatNumber(playerTokens);
   
   // Menu button - show when in match and not eliminated (always available, even after building shelter)
-  const showMenuButton = me && !isEliminated && matchPhase === 'playing';
+  const showMenuButton = meUI && !isEliminated && matchPhase === 'playing';
   if (showMenuButton) {
     buildShelterBtnEl.classList.remove('hidden');
     buildShelterBtnEl.disabled = false;
@@ -6739,8 +3785,8 @@ function render(dt: number): void {
   groundBtnEl.classList.add('hidden');
   
   // Random port button - show when player has port charges
-  const portCount = me?.portCharges ?? 0;
-  if (me && portCount > 0 && !isEliminated && matchPhase === 'playing') {
+  const portCount = meUI?.portCharges ?? 0;
+  if (meUI && portCount > 0 && !isEliminated && matchPhase === 'playing') {
     portBtnEl.textContent = `Random [P] (${portCount})`;
     portBtnEl.classList.remove('hidden');
   } else {
@@ -6749,8 +3795,8 @@ function render(dt: number): void {
   
   // Shelter port button - show when player has shelter port charges
   // If no shelter yet, show but indicate it needs a shelter
-  const shelterPortCount = Math.max(me?.shelterPortCharges ?? 0, lastShelterPortCharges);
-  if (me && shelterPortCount > 0 && !isEliminated) {
+  const shelterPortCount = Math.max(meUI?.shelterPortCharges ?? 0, lastShelterPortCharges);
+  if (meUI && shelterPortCount > 0 && !isEliminated) {
     if (hasShelter) {
       shelterPortBtnEl.textContent = isMobileBrowser ? `[H] (${shelterPortCount})` : `Home [H] (${shelterPortCount})`;
       (shelterPortBtnEl as HTMLButtonElement).disabled = false;
@@ -6775,18 +3821,18 @@ function render(dt: number): void {
   
   // Transfer button - show when near allied shelter and carrying pets
   let nearbyAlliedShelter: ShelterState | null = null;
-  if (me && me.petsInside.length > 0 && !isEliminated && matchPhase === 'playing') {
+  if (meUI && meUI.petsInside.length > 0 && !isEliminated && matchPhase === 'playing') {
     // Check if near any allied shelter
     for (const shelter of latestSnapshot?.shelters ?? []) {
       if (shelter.ownerId === myPlayerId) continue; // Skip own shelter
       // Check if allied (by looking at allies list)
       const owner = latestSnapshot?.players.find(p => p.id === shelter.ownerId);
-      const isAllied = me.allies?.includes(shelter.ownerId) || false;
+      const isAllied = meUI.allies?.includes(shelter.ownerId) || false;
       if (!isAllied) continue;
       
       // Check distance
-      const dx = (predictedPlayer?.x ?? me.x) - shelter.x;
-      const dy = (predictedPlayer?.y ?? me.y) - shelter.y;
+      const dx = (predictedPlayer?.x ?? meUI.x) - shelter.x;
+      const dy = (predictedPlayer?.y ?? meUI.y) - shelter.y;
       const dist = Math.hypot(dx, dy);
       const cappedSize = Math.min(shelter.size, 1000); // Match server visual cap
       const shelterRadius = SHELTER_BASE_RADIUS + cappedSize * SHELTER_RADIUS_PER_SIZE;
@@ -6810,16 +3856,16 @@ function render(dt: number): void {
   
   // Show "Center Van" and "Center Shelter" buttons when camera is panned away
   const isPanned = Math.abs(cameraPanOffsetX) > 50 || Math.abs(cameraPanOffsetY) > 50;
-  const myShelter = me?.shelterId ? (latestSnapshot?.shelters?.find(s => s.id === me.shelterId) ?? null) : null;
+  const myShelter = meUI?.shelterId ? (latestSnapshot?.shelters?.find(s => s.id === meUI.shelterId) ?? null) : null;
   
-  if (me && !isEliminated && matchPhase === 'playing' && isPanned) {
+  if (meUI && !isEliminated && matchPhase === 'playing' && isPanned) {
     centerVanBtnEl.classList.remove('hidden');
   } else {
     centerVanBtnEl.classList.add('hidden');
   }
   
   // Show shelter button if player has a shelter and is panned (or not near shelter)
-  if (me && !isEliminated && matchPhase === 'playing' && myShelter) {
+  if (meUI && !isEliminated && matchPhase === 'playing' && myShelter) {
     const distToShelter = Math.hypot(
       (myShelter.x - (predictedPlayer?.x ?? 0)) - cameraPanOffsetX,
       (myShelter.y - (predictedPlayer?.y ?? 0)) - cameraPanOffsetY
@@ -6836,8 +3882,8 @@ function render(dt: number): void {
   
   const nowTick = latestSnapshot?.tick ?? 0;
   const tickRate = TICK_RATE;
-  const speedBoostRemain = me && (me.speedBoostUntil ?? 0) > nowTick ? ((me.speedBoostUntil! - nowTick) / tickRate).toFixed(1) : '';
-  if (tagCooldownEl) tagCooldownEl.textContent = me ? `Adoptions: ${me.totalAdoptions}  •  Strays: ${strayCount}${speedBoostRemain ? `  •  Speed: ${speedBoostRemain}s` : ''}` : '';
+  const speedBoostRemain = meUI && (meUI.speedBoostUntil ?? 0) > nowTick ? ((meUI.speedBoostUntil! - nowTick) / tickRate).toFixed(1) : '';
+  if (tagCooldownEl) tagCooldownEl.textContent = meUI ? `Adoptions: ${meUI.totalAdoptions}  •  Strays: ${strayCount}${speedBoostRemain ? `  •  Speed: ${speedBoostRemain}s` : ''}` : '';
   const matchEndAt = latestSnapshot?.matchEndAt ?? 0;
   const remainingTicks = Math.max(0, matchEndAt - nowTick);
   const remainingSec = remainingTicks / tickRate;
@@ -6852,8 +3898,8 @@ function render(dt: number): void {
   const leaderArea = Math.PI * leaderRadius * leaderRadius;
   const leaderPercent = mapArea > 0 ? Math.min(100, Math.floor((leaderArea / mapArea) * 100)) : 0;
   const leaderPlayer = latestSnapshot?.players.find(p => p.shelterId === leaderShelter?.id);
-  const points = me?.totalAdoptions ?? 0;
-  const myShelterForStatus = me?.shelterId ? (latestSnapshot?.shelters?.find(s => s.id === me.shelterId) ?? null) : null;
+  const points = meUI?.totalAdoptions ?? 0;
+  const myShelterForStatus = meUI?.shelterId ? (latestSnapshot?.shelters?.find(s => s.id === meUI.shelterId) ?? null) : null;
   const shelterLabel = myShelterForStatus ? `🏠 lvl${myShelterForStatus.tier}` : '🏠 --';
   timerEl.textContent = matchPhase === 'playing' ? `⭐ ${points}  ${shelterLabel}` : '';
   
@@ -6907,7 +3953,7 @@ function render(dt: number): void {
     }
   }
   
-  const iAmEliminated = !!(me?.eliminated);
+  const iAmEliminated = !!(meUI?.eliminated);
   const matchEndedEarly = !!(latestSnapshot?.matchEndedEarly);
   const matchIsFinished = remainingSec <= 0 || matchEndedEarly || iAmEliminated;
   if (matchIsFinished && latestSnapshot?.players.length) {
@@ -6965,7 +4011,7 @@ function render(dt: number): void {
     } else if (iAmEliminated) {
       title = 'You were consumed';
     } else if (selectedMode === 'teams' && latestSnapshot?.winningTeam) {
-      const myTeam = me?.team;
+      const myTeam = meUI?.team;
       const winTeam = latestSnapshot.winningTeam;
       const teamName = winTeam === 'red' ? 'Red' : 'Blue';
       if (myTeam === winTeam) {
@@ -7010,7 +4056,7 @@ function render(dt: number): void {
       : '';
     // Guest save prompt: show after match if guest earned items
     const didWin = latestSnapshot?.winnerId === myPlayerId || 
-                   (selectedMode === 'teams' && latestSnapshot?.winningTeam && me?.team === latestSnapshot.winningTeam);
+                   (selectedMode === 'teams' && latestSnapshot?.winningTeam && meUI?.team === latestSnapshot.winningTeam);
     const guestSavePrompt = (!isSignedIn && didWin)
       ? `<div style="margin:12px 0;padding:10px 14px;background:rgba(123,237,159,0.15);border:1px solid #7bed9f;border-radius:8px;text-align:center;">
            <div style="font:600 13px Rubik,sans-serif;color:#7bed9f;margin-bottom:6px;">Save your newly acquired items by creating an account!</div>
@@ -7023,11 +4069,6 @@ function render(dt: number): void {
   }
   } catch (err) {
     console.error('Render error:', err);
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#3d6b3d';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.restore();
   }
 }
 
@@ -8171,7 +5212,11 @@ function updateBossMillModal(): void {
   }
   
   // Update title
-  const emoji = BOSS_MILL_EMOJIS[mill.petType] ?? '🐾';
+  const _bossMillEmojis: Record<number, string> = {
+    [BOSS_MILL_HORSE]: '🐴', [BOSS_MILL_CAT]: '🐈',
+    [BOSS_MILL_DOG]: '🐕', [BOSS_MILL_BIRD]: '🐦', [BOSS_MILL_RABBIT]: '🐰',
+  };
+  const emoji = _bossMillEmojis[mill.petType] ?? '🐾';
   const name = BOSS_MILL_NAMES[mill.petType] ?? 'Mill';
   if (bossMillTitle) bossMillTitle.textContent = `${emoji} ${name}`;
   if (bossMillDesc) bossMillDesc.textContent = `Prepare a meal to rescue the ${name.toLowerCase().replace(' stable', 's').replace(' boutique', 's').replace(' depot', 's').replace(' barn', 's').replace(' hutch', 's')}!`;
