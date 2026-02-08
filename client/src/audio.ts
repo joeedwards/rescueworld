@@ -5,6 +5,7 @@
 const MUSIC_KEY = 'rescueworld_music';
 const SFX_KEY = 'rescueworld_sfx';
 const VAN_SOUND_TYPE_KEY = 'rescueworld_van_sound_type';
+const SHELTER_ADOPT_SFX_KEY = 'rescueworld_shelter_adopt_sfx';
 
 export type VanSoundType = 'off' | 'camaro' | 'beetle' | 'ev';
 
@@ -49,6 +50,14 @@ export function getSfxEnabled(): boolean {
 
 export function setSfxEnabled(on: boolean): void {
   setStored(SFX_KEY, on);
+}
+
+export function getShelterAdoptSfxEnabled(): boolean {
+  return getStored(SHELTER_ADOPT_SFX_KEY, true);
+}
+
+export function setShelterAdoptSfxEnabled(on: boolean): void {
+  setStored(SHELTER_ADOPT_SFX_KEY, on);
 }
 
 export function getVanSoundType(): VanSoundType {

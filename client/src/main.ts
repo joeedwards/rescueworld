@@ -120,6 +120,8 @@ import {
   setMusicEnabled,
   getSfxEnabled,
   setSfxEnabled,
+  getShelterAdoptSfxEnabled,
+  setShelterAdoptSfxEnabled,
   getVanSoundType,
   setVanSoundType,
   updateEngineState,
@@ -306,6 +308,7 @@ const settingsPanelEl = document.getElementById('settings-panel')!;
 const exitToLobbyBtnEl = document.getElementById('exit-to-lobby-btn')!;
 const musicToggleEl = document.getElementById('music-toggle') as HTMLInputElement;
 const sfxToggleEl = document.getElementById('sfx-toggle') as HTMLInputElement;
+const shelterAdoptSfxToggleEl = document.getElementById('shelter-adopt-sfx-toggle') as HTMLInputElement;
 const vanSoundSelectEl = document.getElementById('van-sound-select') as HTMLSelectElement;
 const hideStraysToggleEl = document.getElementById('hide-strays-toggle') as HTMLInputElement;
 const settingsCloseEl = document.getElementById('settings-close')!;
@@ -3171,7 +3174,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
               .filter((id) => !myShelter.petsInside.includes(id));
             if (shelterAdoptedIds.length > 0) {
               const types = shelterAdoptedIds.map((id) => lastPetTypesById.get(id) ?? PET_TYPE_CAT);
-              playAdoptionSounds(types);
+              if (getShelterAdoptSfxEnabled()) playAdoptionSounds(types);
               triggerAdoptionAnimation(myShelter.x, myShelter.y, myShelter.x, myShelter.y - 100, types);
             }
           }
@@ -5353,143 +5356,181 @@ const BOSS_MILL_EMOJIS: Record<number, string> = {
 };
 
 /** Draw the PetMall and all boss mills */
-function drawBossMode(bossMode: BossModeState): void {
+function drawBossMode(bossMode: BossModeState, vL: number, vR: number, vT: number, vB: number): void {
   const { mallX, mallY, mills, tycoonX, tycoonY, tycoonTargetMill, playerAtMill, millsCleared, rebuildingMill } = bossMode;
   
   ctx.save();
   
-  // Draw PetMall center area (plaza)
-  ctx.fillStyle = 'rgba(139, 69, 19, 0.3)';
-  ctx.beginPath();
-  ctx.arc(mallX, mallY, BOSS_PETMALL_RADIUS * 0.6, 0, Math.PI * 2);
-  ctx.fill();
+  // Draw PetMall center area (plaza) — only if visible
+  const mallMargin = BOSS_PETMALL_RADIUS;
+  if (!(mallX + mallMargin < vL || mallX - mallMargin > vR || mallY + mallMargin < vT || mallY - mallMargin > vB)) {
+    ctx.fillStyle = 'rgba(139, 69, 19, 0.3)';
+    ctx.beginPath();
+    ctx.arc(mallX, mallY, BOSS_PETMALL_RADIUS * 0.6, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Draw "PetMall" title above center
+    ctx.fillStyle = '#ffd700';
+    ctx.font = 'bold 24px Rubik, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+    ctx.shadowBlur = 6;
+    ctx.fillText('🏪 PETMALL', mallX, mallY - 40);
+    ctx.font = '16px Rubik, sans-serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(`Bring strays, get them out`, mallX, mallY);
+    ctx.shadowBlur = 0;
+  }
   
-  // Draw "PetMall" title above center
-  ctx.fillStyle = '#ffd700';
-  ctx.font = 'bold 24px Rubik, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.shadowColor = 'rgba(0,0,0,0.8)';
-  ctx.shadowBlur = 6;
-  ctx.fillText('🏪 PETMALL', mallX, mallY - 40);
-  ctx.font = '16px Rubik, sans-serif';
-  ctx.fillStyle = '#ffffff';
-  ctx.fillText(`Bring strays, get them out`, mallX, mallY);
-  ctx.shadowBlur = 0;
-  
-  // Draw each mill
+  // Draw each mill — viewport culled
+  const millMargin = 150;
   for (const mill of mills) {
+    if (mill.x + millMargin < vL || mill.x - millMargin > vR || mill.y + millMargin < vT || mill.y - millMargin > vB) continue;
     const isRebuilding = rebuildingMill !== undefined && rebuildingMill === mill.id;
     drawBossMill(mill, mill.id === playerAtMill, mill.id === tycoonTargetMill, isRebuilding);
   }
   
-  // Draw Breeder Tycoon
-  drawBreederTycoon(tycoonX, tycoonY);
+  // Draw Breeder Tycoon — viewport culled
+  const tycoonMargin = 80;
+  if (!(tycoonX + tycoonMargin < vL || tycoonX - tycoonMargin > vR || tycoonY + tycoonMargin < vT || tycoonY - tycoonMargin > vB)) {
+    drawBreederTycoon(tycoonX, tycoonY);
+  }
   
   ctx.restore();
 }
 
-/** Draw a single boss mill */
+// ---- Pre-rendered boss mill sprites keyed by "petType-state" ----
+type BossMillVisualState = 'normal' | 'completed' | 'rebuilding';
+const BOSS_MILL_SPRITE_W = BOSS_MILL_RADIUS * 2 + 40; // 240 — room for roof overhang + stroke
+const BOSS_MILL_SPRITE_H = BOSS_MILL_RADIUS * 2 + 80; // 280 — room for roof peak + name label
+const bossMillSprites = new Map<string, HTMLCanvasElement>();
+
+function prerenderBossMillSprites(): void {
+  const petTypes = [BOSS_MILL_HORSE, BOSS_MILL_CAT, BOSS_MILL_DOG, BOSS_MILL_BIRD, BOSS_MILL_RABBIT];
+  const states: BossMillVisualState[] = ['normal', 'completed', 'rebuilding'];
+
+  for (const petType of petTypes) {
+    const emoji = BOSS_MILL_EMOJIS[petType] ?? '🐾';
+    const name = BOSS_MILL_NAMES[petType] ?? 'Mill';
+
+    for (const state of states) {
+      const c = document.createElement('canvas');
+      c.width = BOSS_MILL_SPRITE_W;
+      c.height = BOSS_MILL_SPRITE_H;
+      const sctx = c.getContext('2d')!;
+
+      // Center of sprite
+      const cx = BOSS_MILL_SPRITE_W / 2;
+      const cy = BOSS_MILL_SPRITE_H / 2 + 10; // shift down to make room for name label above roof
+
+      const bw = BOSS_MILL_RADIUS * 1.4;
+      const bh = BOSS_MILL_RADIUS * 1.2;
+
+      // Base circle fill (neutral — dynamic glow overlays applied live)
+      sctx.fillStyle = 'rgba(139, 69, 19, 0.2)';
+      sctx.beginPath();
+      sctx.arc(cx, cy, BOSS_MILL_RADIUS, 0, Math.PI * 2);
+      sctx.fill();
+
+      // Building body
+      if (state === 'completed') {
+        sctx.fillStyle = '#3d8b40';
+        sctx.strokeStyle = '#2d6a30';
+      } else if (state === 'rebuilding') {
+        sctx.fillStyle = '#8b3500';
+        sctx.strokeStyle = '#5c2d0e';
+      } else {
+        sctx.fillStyle = '#8b4513';
+        sctx.strokeStyle = '#5c2d0e';
+      }
+      sctx.lineWidth = 3;
+      sctx.beginPath();
+      sctx.roundRect(cx - bw / 2, cy - bh / 2, bw, bh, 8);
+      sctx.fill();
+      sctx.stroke();
+
+      // Roof
+      sctx.beginPath();
+      sctx.moveTo(cx - bw / 2 - 10, cy - bh / 2);
+      sctx.lineTo(cx, cy - bh / 2 - 30);
+      sctx.lineTo(cx + bw / 2 + 10, cy - bh / 2);
+      sctx.closePath();
+      sctx.fillStyle = state === 'completed' ? '#2d6a30' : state === 'rebuilding' ? '#5c2000' : '#654321';
+      sctx.fill();
+      sctx.stroke();
+
+      // Pet emoji in center
+      sctx.font = '36px sans-serif';
+      sctx.textAlign = 'center';
+      sctx.textBaseline = 'middle';
+      sctx.fillText(emoji, cx, cy);
+
+      // Name label above roof
+      sctx.fillStyle = state === 'completed' ? '#90ee90' : '#ffd700';
+      sctx.font = 'bold 12px Rubik, sans-serif';
+      sctx.textBaseline = 'bottom';
+      sctx.fillText(name, cx, cy - bh / 2 - 35);
+
+      bossMillSprites.set(`${petType}-${state}`, c);
+    }
+  }
+}
+prerenderBossMillSprites();
+
+/** Draw a single boss mill using pre-rendered sprite + live glow overlays. */
 function drawBossMill(mill: BossMill, isPlayerHere: boolean, isTycoonTarget: boolean, isRebuilding: boolean): void {
-  const { x, y, petType, completed, id } = mill;
-  const emoji = BOSS_MILL_EMOJIS[petType] ?? '🐾';
-  const name = BOSS_MILL_NAMES[petType] ?? 'Mill';
-  
-  ctx.save();
-  
-  // Different style for completed mills
-  if (isRebuilding) {
-    // Tycoon is rebuilding - pulsing orange/red warning
-    const rebuildPulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
-    ctx.shadowColor = `rgba(255, 100, 0, ${0.6 + rebuildPulse * 0.4})`;
-    ctx.shadowBlur = 20 + rebuildPulse * 10;
-    ctx.fillStyle = `rgba(255, 100, 0, ${0.15 + rebuildPulse * 0.1})`;
-  } else if (completed) {
-    ctx.globalAlpha = 0.5;
-    ctx.fillStyle = 'rgba(100, 200, 100, 0.3)';
-  } else if (isPlayerHere) {
-    // Player is here - blue highlight
-    ctx.shadowColor = '#00aaff';
-    ctx.shadowBlur = 20;
-    ctx.fillStyle = 'rgba(0, 170, 255, 0.2)';
-  } else if (isTycoonTarget) {
-    // Tycoon is heading here - red warning
-    ctx.shadowColor = '#ff0000';
-    ctx.shadowBlur = 15 + Math.sin(Date.now() / 100) * 5;
-    ctx.fillStyle = 'rgba(255, 0, 0, 0.1)';
-  } else {
-    ctx.fillStyle = 'rgba(139, 69, 19, 0.2)';
-  }
-  
-  // Draw mill building base
-  ctx.beginPath();
-  ctx.arc(x, y, BOSS_MILL_RADIUS, 0, Math.PI * 2);
-  ctx.fill();
-  
-  ctx.shadowBlur = 0;
-  
-  // Draw building shape
-  const bw = BOSS_MILL_RADIUS * 1.4;
+  const { x, y, petType, completed } = mill;
   const bh = BOSS_MILL_RADIUS * 1.2;
-  
-  if (completed && !isRebuilding) {
-    ctx.fillStyle = '#3d8b40';
-    ctx.strokeStyle = '#2d6a30';
-  } else if (isRebuilding) {
-    ctx.fillStyle = '#8b3500';
-    ctx.strokeStyle = '#5c2d0e';
-  } else {
-    ctx.fillStyle = '#8b4513';
-    ctx.strokeStyle = '#5c2d0e';
+
+  ctx.save();
+
+  // ---- Live glow overlay (cheap single arc+fill, no shadowBlur) ----
+  if (isRebuilding) {
+    const rebuildPulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
+    ctx.fillStyle = `rgba(255, 100, 0, ${0.15 + rebuildPulse * 0.1})`;
+    ctx.beginPath();
+    ctx.arc(x, y, BOSS_MILL_RADIUS + 10, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (isPlayerHere) {
+    ctx.fillStyle = 'rgba(0, 170, 255, 0.15)';
+    ctx.beginPath();
+    ctx.arc(x, y, BOSS_MILL_RADIUS + 10, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (isTycoonTarget) {
+    ctx.fillStyle = 'rgba(255, 0, 0, 0.1)';
+    ctx.beginPath();
+    ctx.arc(x, y, BOSS_MILL_RADIUS + 10, 0, Math.PI * 2);
+    ctx.fill();
   }
-  
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.roundRect(x - bw / 2, y - bh / 2, bw, bh, 8);
-  ctx.fill();
-  ctx.stroke();
-  
-  // Roof
-  ctx.beginPath();
-  ctx.moveTo(x - bw / 2 - 10, y - bh / 2);
-  ctx.lineTo(x, y - bh / 2 - 30);
-  ctx.lineTo(x + bw / 2 + 10, y - bh / 2);
-  ctx.closePath();
-  ctx.fillStyle = (completed && !isRebuilding) ? '#2d6a30' : isRebuilding ? '#5c2000' : '#654321';
-  ctx.fill();
-  ctx.stroke();
-  
-  // Pet emoji in center
-  ctx.globalAlpha = 1;
-  ctx.font = '36px sans-serif';
+
+  // ---- Draw pre-rendered sprite ----
+  const state: BossMillVisualState = isRebuilding ? 'rebuilding' : completed ? 'completed' : 'normal';
+  const sprite = bossMillSprites.get(`${petType}-${state}`) ?? bossMillSprites.get(`${petType}-normal`);
+  if (sprite) {
+    if (completed && !isRebuilding) ctx.globalAlpha = 0.5;
+    // cy in sprite = BOSS_MILL_SPRITE_H/2 + 10 (shifted down for name label headroom)
+    ctx.drawImage(sprite, x - BOSS_MILL_SPRITE_W / 2, y - BOSS_MILL_SPRITE_H / 2 - 10);
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Live status text below ----
   ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(emoji, x, y);
-  
-  // Name label
-  ctx.fillStyle = (completed && !isRebuilding) ? '#90ee90' : '#ffd700';
-  ctx.font = 'bold 12px Rubik, sans-serif';
-  ctx.textBaseline = 'bottom';
-  ctx.fillText(name, x, y - bh / 2 - 35);
-  
-  // Status below
+  ctx.textBaseline = 'top';
   if (isRebuilding) {
     ctx.fillStyle = '#ff6600';
     ctx.font = 'bold 11px Rubik, sans-serif';
-    ctx.textBaseline = 'top';
     ctx.fillText('REBUILDING...', x, y + bh / 2 + 5);
   } else if (completed) {
     ctx.fillStyle = '#90ee90';
     ctx.font = '11px Rubik, sans-serif';
-    ctx.textBaseline = 'top';
     ctx.fillText('✓ RESCUED!', x, y + bh / 2 + 5);
   } else if (isPlayerHere) {
     ctx.fillStyle = '#00aaff';
     ctx.font = '11px Rubik, sans-serif';
-    ctx.textBaseline = 'top';
     ctx.fillText('PREPARING MEAL...', x, y + bh / 2 + 5);
   }
-  
+
   ctx.restore();
 }
 
@@ -5598,190 +5639,201 @@ function drawStray(x: number, y: number, petType: number = PET_TYPE_CAT): void {
 /** Breeder camp pet emojis by type index */
 const CAMP_PET_EMOJIS = ['🐱', '🐶', '🐰', '🐦'];
 
+// ---- Pre-rendered breeder camp sprites (offscreen canvases) keyed by level ----
+const CAMP_SPRITE_W = 130; // 110 camp + 10px padding each side for shadow
+const CAMP_SPRITE_H = 100; // 80 camp + 10px padding each side for shadow
+const breederCampSprites = new Map<number, HTMLCanvasElement>();
+
+/** Pre-render breeder camp sprites for levels 1-20 at startup.
+ *  Bakes shadow, emojis, cages, tent, and fence into the sprite so no per-frame cost. */
+function prerenderBreederCampSprites(): void {
+  for (let level = 1; level <= 20; level++) {
+    const c = document.createElement('canvas');
+    c.width = CAMP_SPRITE_W;
+    c.height = CAMP_SPRITE_H;
+    const sctx = c.getContext('2d')!;
+
+    // Seed from level so each level looks unique but stable
+    const seed0 = ((level * 101) | 0) >>> 0;
+    const rng = millRng(seed0);
+
+    const campW = 110;
+    const campH = 80;
+    // Center of sprite canvas
+    const cx = CAMP_SPRITE_W / 2;
+    const cy = CAMP_SPRITE_H / 2;
+
+    sctx.save();
+    sctx.translate(cx, cy);
+
+    // ---- Dark ground slab (shadow baked in) ----
+    sctx.shadowColor = 'rgba(100, 30, 0, 0.3)';
+    sctx.shadowBlur = 10;
+    sctx.fillStyle = '#3a2e20';
+    sctx.beginPath();
+    sctx.roundRect(-campW / 2, -campH / 2, campW, campH, 5);
+    sctx.fill();
+    sctx.strokeStyle = '#5a3a1a';
+    sctx.lineWidth = 2;
+    sctx.stroke();
+    sctx.shadowColor = 'transparent';
+    sctx.shadowBlur = 0;
+
+    // ---- Dirt floor stains ----
+    sctx.fillStyle = 'rgba(70, 40, 20, 0.25)';
+    for (let i = 0; i < 4; i++) {
+      const sx = -campW / 2 + 10 + rng() * (campW - 20);
+      const sy = -campH / 2 + 8 + rng() * (campH - 16);
+      sctx.beginPath();
+      sctx.ellipse(sx, sy, 4 + rng() * 5, 3 + rng() * 3, rng() * 3, 0, Math.PI * 2);
+      sctx.fill();
+    }
+
+    // ---- Determine cage layout ----
+    const breedTypeIdx = Math.floor(rng() * CAMP_PET_EMOJIS.length);
+    const breedEmoji = CAMP_PET_EMOJIS[breedTypeIdx];
+    const breedCount = 2 + Math.floor(rng() * 3);
+    const regularCages = Math.min(3, 1 + Math.floor(level / 4));
+    const totalCages = 1 + regularCages;
+    const cageW = 22;
+    const cageH = 18;
+    const cagePad = 4;
+    const cageBlockW = totalCages * (cageW + cagePad) - cagePad;
+    const cageStartX = -cageBlockW / 2;
+    const cageY = -campH / 2 + 10;
+
+    // Cage area floor
+    sctx.fillStyle = '#4a3828';
+    sctx.beginPath();
+    sctx.roundRect(cageStartX - 4, cageY - 4, cageBlockW + 8, cageH + 8, 2);
+    sctx.fill();
+    sctx.strokeStyle = '#5a4030';
+    sctx.lineWidth = 0.8;
+    sctx.stroke();
+
+    // ---- Breeding cage ----
+    const bkx = cageStartX;
+    const bky = cageY;
+    sctx.fillStyle = '#4a3020';
+    sctx.fillRect(bkx, bky, cageW, cageH);
+    sctx.strokeStyle = 'rgba(140, 70, 30, 0.8)';
+    sctx.lineWidth = 1.2;
+    sctx.strokeRect(bkx, bky, cageW, cageH);
+    sctx.strokeStyle = 'rgba(110, 60, 25, 0.5)';
+    sctx.lineWidth = 0.6;
+    for (let b = 1; b <= 3; b++) {
+      sctx.beginPath();
+      sctx.moveTo(bkx + b * cageW / 4, bky);
+      sctx.lineTo(bkx + b * cageW / 4, bky + cageH);
+      sctx.stroke();
+    }
+    // Same-type animals crammed in
+    sctx.font = '8px sans-serif';
+    sctx.textAlign = 'center';
+    sctx.textBaseline = 'middle';
+    if (breedCount === 2) {
+      sctx.globalAlpha = 0.7;
+      sctx.fillText(breedEmoji, bkx + cageW * 0.35, bky + cageH * 0.45);
+      sctx.globalAlpha = 0.6;
+      sctx.fillText(breedEmoji, bkx + cageW * 0.65, bky + cageH * 0.6);
+    } else if (breedCount === 3) {
+      sctx.globalAlpha = 0.7;
+      sctx.fillText(breedEmoji, bkx + cageW * 0.25, bky + cageH * 0.4);
+      sctx.globalAlpha = 0.6;
+      sctx.fillText(breedEmoji, bkx + cageW * 0.6, bky + cageH * 0.35);
+      sctx.globalAlpha = 0.55;
+      sctx.fillText(breedEmoji, bkx + cageW * 0.45, bky + cageH * 0.72);
+    } else {
+      sctx.font = '7px sans-serif';
+      sctx.globalAlpha = 0.7;
+      sctx.fillText(breedEmoji, bkx + cageW * 0.28, bky + cageH * 0.3);
+      sctx.globalAlpha = 0.65;
+      sctx.fillText(breedEmoji, bkx + cageW * 0.72, bky + cageH * 0.3);
+      sctx.globalAlpha = 0.6;
+      sctx.fillText(breedEmoji, bkx + cageW * 0.28, bky + cageH * 0.72);
+      sctx.globalAlpha = 0.55;
+      sctx.fillText(breedEmoji, bkx + cageW * 0.72, bky + cageH * 0.72);
+    }
+    sctx.globalAlpha = 1;
+
+    // ---- Regular cages ----
+    for (let i = 0; i < regularCages; i++) {
+      const kx = cageStartX + (i + 1) * (cageW + cagePad);
+      sctx.fillStyle = '#4a3828';
+      sctx.fillRect(kx, cageY, cageW, cageH);
+      sctx.strokeStyle = 'rgba(120, 70, 30, 0.7)';
+      sctx.lineWidth = 1;
+      sctx.strokeRect(kx, cageY, cageW, cageH);
+      sctx.strokeStyle = 'rgba(100, 60, 25, 0.4)';
+      sctx.lineWidth = 0.5;
+      for (let b = 1; b < 3; b++) {
+        sctx.beginPath();
+        sctx.moveTo(kx + b * cageW / 3, cageY);
+        sctx.lineTo(kx + b * cageW / 3, cageY + cageH);
+        sctx.stroke();
+      }
+      const petIdx = Math.floor(rng() * CAMP_PET_EMOJIS.length);
+      sctx.font = '9px sans-serif';
+      sctx.textAlign = 'center';
+      sctx.textBaseline = 'middle';
+      sctx.globalAlpha = 0.6;
+      sctx.fillText(CAMP_PET_EMOJIS[petIdx], kx + cageW / 2, cageY + cageH / 2);
+      sctx.globalAlpha = 1;
+    }
+
+    // ---- Tent structure ----
+    const tentCx = 0;
+    const tentY = 8;
+    sctx.beginPath();
+    sctx.moveTo(tentCx - 28, tentY + 18);
+    sctx.lineTo(tentCx, tentY - 14);
+    sctx.lineTo(tentCx + 28, tentY + 18);
+    sctx.closePath();
+    sctx.fillStyle = '#c4a47a';
+    sctx.fill();
+    sctx.strokeStyle = '#8a7050';
+    sctx.lineWidth = 1.5;
+    sctx.stroke();
+    sctx.beginPath();
+    sctx.moveTo(tentCx - 9, tentY + 18);
+    sctx.lineTo(tentCx, tentY + 6);
+    sctx.lineTo(tentCx + 9, tentY + 18);
+    sctx.fillStyle = '#3a2a1a';
+    sctx.fill();
+
+    // ---- Fence posts ----
+    sctx.fillStyle = '#6a4a28';
+    const postSpacing = 16;
+    for (let px = -campW / 2 + 6; px < campW / 2 - 4; px += postSpacing) {
+      sctx.fillRect(px, -campH / 2, 2, 3);
+      sctx.fillRect(px, campH / 2 - 3, 2, 3);
+    }
+    for (let py = -campH / 2 + 6; py < campH / 2 - 4; py += postSpacing) {
+      sctx.fillRect(-campW / 2, py, 3, 2);
+      sctx.fillRect(campW / 2 - 3, py, 3, 2);
+    }
+    // Fence wire
+    sctx.strokeStyle = 'rgba(100, 70, 40, 0.4)';
+    sctx.lineWidth = 0.6;
+    sctx.setLineDash([3, 2]);
+    sctx.strokeRect(-campW / 2 + 1, -campH / 2 + 1, campW - 2, campH - 2);
+    sctx.setLineDash([]);
+
+    sctx.restore();
+    breederCampSprites.set(level, c);
+  }
+}
+prerenderBreederCampSprites();
+
+/** Draw a breeder camp using pre-rendered sprite + live text overlays. */
 function drawBreederCamp(x: number, y: number, level: number = 1): void {
-  // Seeded RNG from position so each camp looks unique but stable
-  const seed0 = ((x * 7 + y * 31 + level * 101) | 0) >>> 0;
-  const rng = millRng(seed0);
-
-  const now = Date.now();
-  const flicker = 0.9 + 0.1 * Math.sin(now / 500 + seed0);
-
-  // Size: at least as large as the van (van half = 50 → 100px wide)
   const campW = 110;
   const campH = 80;
+  const clampedLevel = Math.max(1, Math.min(20, level));
+  const sprite = breederCampSprites.get(clampedLevel) ?? breederCampSprites.get(1)!;
+  ctx.drawImage(sprite, x - CAMP_SPRITE_W / 2, y - CAMP_SPRITE_H / 2);
 
-  ctx.save();
-  ctx.translate(x, y);
-
-  // ---- Dark ground slab ----
-  ctx.shadowColor = 'rgba(100, 30, 0, 0.3)';
-  ctx.shadowBlur = 10;
-  ctx.fillStyle = '#3a2e20';
-  ctx.beginPath();
-  ctx.roundRect(-campW / 2, -campH / 2, campW, campH, 5);
-  ctx.fill();
-  ctx.strokeStyle = '#5a3a1a';
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  ctx.shadowColor = 'transparent';
-  ctx.shadowBlur = 0;
-
-  // ---- Dirt floor stains ----
-  ctx.fillStyle = 'rgba(70, 40, 20, 0.25)';
-  for (let i = 0; i < 4; i++) {
-    const sx = -campW / 2 + 10 + rng() * (campW - 20);
-    const sy = -campH / 2 + 8 + rng() * (campH - 16);
-    ctx.beginPath();
-    ctx.ellipse(sx, sy, 4 + rng() * 5, 3 + rng() * 3, rng() * 3, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  ctx.globalAlpha = flicker;
-
-  // ---- Determine cage layout ----
-  // Choose the "breeding type" for the main overcrowded cage (same type)
-  const breedTypeIdx = Math.floor(rng() * CAMP_PET_EMOJIS.length);
-  const breedEmoji = CAMP_PET_EMOJIS[breedTypeIdx];
-  const breedCount = 2 + Math.floor(rng() * 3); // 2-4 of the same type
-
-  // Number of regular cages (1-3 based on level)
-  const regularCages = Math.min(3, 1 + Math.floor(level / 4));
-  const totalCages = 1 + regularCages; // 1 breeding cage + regular cages
-
-  // Cage dimensions
-  const cageW = 22;
-  const cageH = 18;
-  const cagePad = 4;
-  const cageBlockW = totalCages * (cageW + cagePad) - cagePad;
-  const cageStartX = -cageBlockW / 2;
-  const cageY = -campH / 2 + 10;
-
-  // Cage area floor
-  ctx.fillStyle = '#4a3828';
-  ctx.beginPath();
-  ctx.roundRect(cageStartX - 4, cageY - 4, cageBlockW + 8, cageH + 8, 2);
-  ctx.fill();
-  ctx.strokeStyle = '#5a4030';
-  ctx.lineWidth = 0.8;
-  ctx.stroke();
-
-  // ---- Draw the BREEDING cage (first cage, overcrowded with same type) ----
-  const bkx = cageStartX;
-  const bky = cageY;
-  ctx.fillStyle = '#4a3020';
-  ctx.fillRect(bkx, bky, cageW, cageH);
-  ctx.strokeStyle = 'rgba(140, 70, 30, 0.8)';
-  ctx.lineWidth = 1.2;
-  ctx.strokeRect(bkx, bky, cageW, cageH);
-  // Bars
-  ctx.strokeStyle = 'rgba(110, 60, 25, 0.5)';
-  ctx.lineWidth = 0.6;
-  for (let b = 1; b <= 3; b++) {
-    ctx.beginPath();
-    ctx.moveTo(bkx + b * cageW / 4, bky);
-    ctx.lineTo(bkx + b * cageW / 4, bky + cageH);
-    ctx.stroke();
-  }
-  // Same-type animals crammed in
-  ctx.font = '8px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  if (breedCount === 2) {
-    ctx.globalAlpha = flicker * 0.7;
-    ctx.fillText(breedEmoji, bkx + cageW * 0.35, bky + cageH * 0.45);
-    ctx.globalAlpha = flicker * 0.6;
-    ctx.fillText(breedEmoji, bkx + cageW * 0.65, bky + cageH * 0.6);
-  } else if (breedCount === 3) {
-    ctx.globalAlpha = flicker * 0.7;
-    ctx.fillText(breedEmoji, bkx + cageW * 0.25, bky + cageH * 0.4);
-    ctx.globalAlpha = flicker * 0.6;
-    ctx.fillText(breedEmoji, bkx + cageW * 0.6, bky + cageH * 0.35);
-    ctx.globalAlpha = flicker * 0.55;
-    ctx.fillText(breedEmoji, bkx + cageW * 0.45, bky + cageH * 0.72);
-  } else {
-    // 4 crammed
-    ctx.font = '7px sans-serif';
-    ctx.globalAlpha = flicker * 0.7;
-    ctx.fillText(breedEmoji, bkx + cageW * 0.28, bky + cageH * 0.3);
-    ctx.globalAlpha = flicker * 0.65;
-    ctx.fillText(breedEmoji, bkx + cageW * 0.72, bky + cageH * 0.3);
-    ctx.globalAlpha = flicker * 0.6;
-    ctx.fillText(breedEmoji, bkx + cageW * 0.28, bky + cageH * 0.72);
-    ctx.globalAlpha = flicker * 0.55;
-    ctx.fillText(breedEmoji, bkx + cageW * 0.72, bky + cageH * 0.72);
-  }
-  ctx.globalAlpha = flicker;
-
-  // ---- Regular cages (random single animals) ----
-  for (let i = 0; i < regularCages; i++) {
-    const kx = cageStartX + (i + 1) * (cageW + cagePad);
-    ctx.fillStyle = '#4a3828';
-    ctx.fillRect(kx, cageY, cageW, cageH);
-    ctx.strokeStyle = 'rgba(120, 70, 30, 0.7)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(kx, cageY, cageW, cageH);
-    // Bars
-    ctx.strokeStyle = 'rgba(100, 60, 25, 0.4)';
-    ctx.lineWidth = 0.5;
-    for (let b = 1; b < 3; b++) {
-      ctx.beginPath();
-      ctx.moveTo(kx + b * cageW / 3, cageY);
-      ctx.lineTo(kx + b * cageW / 3, cageY + cageH);
-      ctx.stroke();
-    }
-    // Single random animal
-    const petIdx = Math.floor(rng() * CAMP_PET_EMOJIS.length);
-    ctx.font = '9px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.globalAlpha = flicker * (0.5 + 0.2 * Math.sin(now / 1100 + i * 1.7));
-    ctx.fillText(CAMP_PET_EMOJIS[petIdx], kx + cageW / 2, cageY + cageH / 2);
-    ctx.globalAlpha = flicker;
-  }
-
-  // ---- Tent structure (below cages) ----
-  const tentCx = 0;
-  const tentY = 8;
-  ctx.beginPath();
-  ctx.moveTo(tentCx - 28, tentY + 18);
-  ctx.lineTo(tentCx, tentY - 14);
-  ctx.lineTo(tentCx + 28, tentY + 18);
-  ctx.closePath();
-  ctx.fillStyle = '#c4a47a';
-  ctx.fill();
-  ctx.strokeStyle = '#8a7050';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  // Tent flap / door
-  ctx.beginPath();
-  ctx.moveTo(tentCx - 9, tentY + 18);
-  ctx.lineTo(tentCx, tentY + 6);
-  ctx.lineTo(tentCx + 9, tentY + 18);
-  ctx.fillStyle = '#3a2a1a';
-  ctx.fill();
-
-  // ---- Fence posts around perimeter ----
-  ctx.fillStyle = '#6a4a28';
-  const postSpacing = 16;
-  for (let px = -campW / 2 + 6; px < campW / 2 - 4; px += postSpacing) {
-    ctx.fillRect(px, -campH / 2, 2, 3);
-    ctx.fillRect(px, campH / 2 - 3, 2, 3);
-  }
-  for (let py = -campH / 2 + 6; py < campH / 2 - 4; py += postSpacing) {
-    ctx.fillRect(-campW / 2, py, 3, 2);
-    ctx.fillRect(campW / 2 - 3, py, 3, 2);
-  }
-  // Fence wire
-  ctx.strokeStyle = 'rgba(100, 70, 40, 0.4)';
-  ctx.lineWidth = 0.6;
-  ctx.setLineDash([3, 2]);
-  ctx.strokeRect(-campW / 2 + 1, -campH / 2 + 1, campW - 2, campH - 2);
-  ctx.setLineDash([]);
-
-  ctx.globalAlpha = 1;
-  ctx.restore();
-
-  // ---- Level badge (top-right) ----
+  // ---- Level badge (top-right) — live overlay ----
   const badgeX = x + campW / 2 - 6;
   const badgeY = y - campH / 2 + 6;
   ctx.fillStyle = '#fff';
@@ -5797,7 +5849,7 @@ function drawBreederCamp(x: number, y: number, level: number = 1): void {
   ctx.textBaseline = 'middle';
   ctx.fillText(`${level}`, badgeX, badgeY);
 
-  // ---- RT cost label below ----
+  // ---- RT cost label below — live overlay ----
   const basePets = 3 + Math.min(2, Math.floor(level / 2));
   const petCount = Math.min(basePets + Math.floor(level / 2), 8);
   let ingredientCount = 1;
@@ -5882,6 +5934,12 @@ function render(dt: number): void {
     ctx.translate(-safeCam.x, -safeCam.y);
     drawMapBackground(safeCam);
 
+  // Viewport culling bounds — reused by all entity loops below
+  const viewL = safeCam.x;
+  const viewR = safeCam.x + safeCam.w;
+  const viewT = safeCam.y;
+  const viewB = safeCam.y + safeCam.h;
+
   if (latestSnapshot) {
     // Draw adoption zones - fallback to center zone if empty
     const zones = latestSnapshot.adoptionZones.length > 0 
@@ -5893,33 +5951,40 @@ function render(dt: number): void {
     for (const ev of latestSnapshot.adoptionEvents ?? []) {
       drawAdoptionEvent(ev, latestSnapshot.tick);
     }
+    // Draw pickups with viewport culling
     for (const u of latestSnapshot.pickups ?? []) {
+      const margin = u.type === PICKUP_TYPE_BREEDER ? 70 : 30;
+      if (u.x + margin < viewL || u.x - margin > viewR || u.y + margin < viewT || u.y - margin > viewB) continue;
       drawPickup(u);
     }
-    // Draw player-built shelters (stationary buildings)
+    // Draw player-built shelters (stationary buildings) with viewport culling
     for (const shelter of latestSnapshot.shelters ?? []) {
+      const shelterHalf = Math.min(200, Math.max(100, SHELTER_BASE_RADIUS + shelter.size * SHELTER_RADIUS_PER_SIZE)) + 50;
+      if (shelter.x + shelterHalf < viewL || shelter.x - shelterHalf > viewR || shelter.y + shelterHalf < viewT || shelter.y - shelterHalf > viewB) continue;
       const isOwner = shelter.ownerId === myPlayerId;
       const owner = latestSnapshot.players.find(p => p.id === shelter.ownerId);
       const ownerColor = owner?.shelterColor;
       drawShelter(shelter, isOwner, ownerColor);
     }
-    // Draw breeder shelters (enemy structures)
+    // Draw breeder shelters (enemy structures) with viewport culling
     for (const breederShelter of latestSnapshot.breederShelters ?? []) {
+      const bsMargin = 180;
+      if (breederShelter.x + bsMargin < viewL || breederShelter.x - bsMargin > viewR || breederShelter.y + bsMargin < viewT || breederShelter.y - bsMargin > viewB) continue;
       drawBreederShelter(breederShelter);
     }
   }
 
   // Draw boss mode PetMall and mills
   if (latestSnapshot?.bossMode?.active) {
-    drawBossMode(latestSnapshot.bossMode);
+    drawBossMode(latestSnapshot.bossMode, viewL, viewR, viewT, viewB);
   }
 
-  // Viewport culling: only draw strays visible on screen
+  // Stray viewport culling with extra margin for interpolation drift
   const strayMargin = 50;
-  const viewL = safeCam.x - strayMargin;
-  const viewR = safeCam.x + safeCam.w + strayMargin;
-  const viewT = safeCam.y - strayMargin;
-  const viewB = safeCam.y + safeCam.h + strayMargin;
+  const strayL = viewL - strayMargin;
+  const strayR = viewR + strayMargin;
+  const strayT = viewT - strayMargin;
+  const strayB = viewB + strayMargin;
 
   beginStrayBatch();
   for (const pet of latestSnapshot?.pets ?? []) {
@@ -5927,7 +5992,7 @@ function render(dt: number): void {
     // Skip uninitialized pets at (0,0) - ghost stray fix
     if (pet.x === 0 && pet.y === 0) continue;
     // Cull BEFORE interpolation using raw snapshot position (within ~4 units of true pos)
-    if (pet.x < viewL || pet.x > viewR || pet.y < viewT || pet.y > viewB) continue;
+    if (pet.x < strayL || pet.x > strayR || pet.y < strayT || pet.y > strayB) continue;
     const p = getInterpolatedPet(pet.id) ?? pet;
     if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
     drawStray(p.x, p.y, pet.petType ?? PET_TYPE_CAT);
@@ -7460,6 +7525,7 @@ actionVanSpeedBtnEl.addEventListener('click', () => {
 // --- Settings ---
 musicToggleEl.checked = getMusicEnabled();
 sfxToggleEl.checked = getSfxEnabled();
+shelterAdoptSfxToggleEl.checked = getShelterAdoptSfxEnabled();
 vanSoundSelectEl.value = getVanSoundType();
 musicToggleEl.addEventListener('change', () => {
   setMusicEnabled(musicToggleEl.checked);
@@ -7468,6 +7534,9 @@ musicToggleEl.addEventListener('change', () => {
 sfxToggleEl.addEventListener('change', () => {
   setSfxEnabled(sfxToggleEl.checked);
   if (!sfxToggleEl.checked) stopEngineLoop(); // Stop van engine when SFX disabled
+});
+shelterAdoptSfxToggleEl.addEventListener('change', () => {
+  setShelterAdoptSfxEnabled(shelterAdoptSfxToggleEl.checked);
 });
 vanSoundSelectEl.addEventListener('change', () => {
   setVanSoundType(vanSoundSelectEl.value as VanSoundType);
