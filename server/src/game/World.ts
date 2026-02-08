@@ -2089,34 +2089,8 @@ export class World {
       nx = clamp(nx, radius, MAP_WIDTH - radius);
       ny = clamp(ny, radius, MAP_HEIGHT - radius);
       
-      // Vans can pass through each other (no van-van collision)
-      // Vans only collide with stationary shelters (not other vans)
-      // Vans collide with non-allied shelters only; allies can enter to deliver pets
-      for (const shelter of this.shelters.values()) {
-        if (shelter.ownerId === p.id) continue; // Don't collide with own shelter
-        if (this.isAlly(p.id, shelter.ownerId, this.lastAllyPairs)) continue; // Allies can enter each other's shelters
-        const sr = Math.min(shelterVisualRadius(shelter.size), 400);
-        if (!aabbOverlap(nx, ny, radius, shelter.x, shelter.y, sr)) continue;
-        const penX = radius + sr - Math.abs(nx - shelter.x);
-        const penY = radius + sr - Math.abs(ny - shelter.y);
-        if (penX <= 0 || penY <= 0) continue;
-        // Push in the direction of least penetration, but respect map bounds
-        if (penX <= penY) {
-          const pushDir = nx > shelter.x ? 1 : -1;
-          const newNx = nx + pushDir * penX;
-          // Only apply if it keeps us in bounds
-          if (newNx >= radius && newNx <= MAP_WIDTH - radius) {
-            nx = newNx;
-          }
-        } else {
-          const pushDir = ny > shelter.y ? 1 : -1;
-          const newNy = ny + pushDir * penY;
-          // Only apply if it keeps us in bounds
-          if (newNy >= radius && newNy <= MAP_HEIGHT - radius) {
-            ny = newNy;
-          }
-        }
-      }
+      // Vans pass through all player shelters — no van-shelter collision
+      // Shelters interact via the combat system, not physical collision
       p.x = clamp(nx, radius, MAP_WIDTH - radius);
       p.y = clamp(ny, radius, MAP_HEIGHT - radius);
     }

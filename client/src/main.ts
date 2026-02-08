@@ -1209,10 +1209,10 @@ function formatNumber(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1000000) {
     const k = n / 1000;
-    return k >= 100 ? `${Math.round(k)}K` : k >= 10 ? `${k.toFixed(1).replace(/\.0$/, '')}K` : `${k.toFixed(2).replace(/\.?0+$/, '')}K`;
+    return k >= 100 ? `${Math.round(k)}k` : k >= 10 ? `${k.toFixed(1).replace(/\.0$/, '')}k` : `${k.toFixed(2).replace(/\.?0+$/, '')}k`;
   }
   const m = n / 1000000;
-  return m >= 100 ? `${Math.round(m)}M` : m >= 10 ? `${m.toFixed(1).replace(/\.0$/, '')}M` : `${m.toFixed(2).replace(/\.?0+$/, '')}M`;
+  return m >= 100 ? `${Math.round(m)}m` : m >= 10 ? `${m.toFixed(1).replace(/\.0$/, '')}m` : `${m.toFixed(2).replace(/\.?0+$/, '')}m`;
 }
 
 function getTokens(): number {
@@ -3184,7 +3184,9 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
             .filter((id) => !me.petsInside.includes(id));
           if (vanAdoptedIds.length > 0) {
             const types = vanAdoptedIds.map((id) => lastPetTypesById.get(id) ?? PET_TYPE_CAT);
-            playAdoptionSounds(types);
+            // Gate sound: if van is near own shelter, respect shelter adoption sound setting
+            const nearOwnShelter = myShelter && Math.hypot(me.x - myShelter.x, me.y - myShelter.y) <= 400;
+            if (!nearOwnShelter || getShelterAdoptSfxEnabled()) playAdoptionSounds(types);
             // Find nearest adoption event the van is inside
             let animTarget: { x: number; y: number } | null = null;
             for (const ev of latestSnapshot?.adoptionEvents ?? []) {
@@ -3431,6 +3433,7 @@ function tick(now: number): void {
     // In Teams mode: no fight/ally prompt — teammates are auto-allied, opponents auto-fight
     let overlappingId: string | null = null;
     let cpuOverlapping = false;
+    let anyHumanShelterOverlap = false; // Track if we're overlapping any human shelter (even already-chosen ones)
     if (latestSnapshot && selectedMode !== 'teams') {
       const me = latestSnapshot.players.find(p => p.id === myPlayerId);
       const myShelter = me?.shelterId ? latestSnapshot.shelters?.find(s => s.id === me.shelterId) : null;
@@ -3459,6 +3462,10 @@ function tick(now: number): void {
             cpuOverlapping = true;
             continue;
           }
+          // Skip players we're already allied with — no fight/ally prompt needed
+          if (me?.allies?.includes(pl.id)) continue;
+          
+          anyHumanShelterOverlap = true;
           if (!fightAllyChosenTargets.has(pl.id)) {
             overlappingId = pl.id;
             break;
@@ -3486,8 +3493,11 @@ function tick(now: number): void {
     } else {
       fightAllyOverlayEl.classList.add('hidden');
       fightAllyTargetId = null;
-      // Reset choices when not overlapping anyone - allows changing mind on next encounter
-      fightAllyChosenTargets.clear();
+      // Only clear choices when truly not overlapping any human shelters —
+      // prevents the overlay from flickering back after clicking a button
+      if (!anyHumanShelterOverlap) {
+        fightAllyChosenTargets.clear();
+      }
     }
     if (cpuOverlapping) {
       const wasHidden = cpuWarningEl.classList.contains('hidden');
@@ -4931,60 +4941,66 @@ function millSeed(id: string): number {
  */
 type MillCellType = 'cage1' | 'cage2' | 'cage3' | 'crate' | 'empty' | 'water';
 
-function drawBreederShelter(shelter: BreederShelterState): void {
-  const cx = shelter.x;
-  const cy = shelter.y;
-  const now = Date.now();
-  const pulse = 0.5 + 0.5 * Math.sin(now / 200);
-  const flickerDim = 0.85 + 0.15 * Math.sin(now / 400 + 1.3) * Math.sin(now / 170);
+// ---- Pre-rendered breeder shelter sprites (lazy, keyed by shelter ID) ----
+const breederShelterSprites = new Map<string, HTMLCanvasElement>();
+const breederShelterSpriteLevel = new Map<string, number>();
+// Padding around foundation for shadow bleed + label headroom
+const BS_PAD_X = 20;
+const BS_PAD_TOP = 30; // room for label + chains above foundation
+const BS_PAD_BOTTOM = 20; // room for fire glow + warning text below
 
-  // Scale with level: more cages, bigger building
+/** Render a breeder shelter to an offscreen canvas (called once per shelter, cached). */
+function prerenderBreederShelterSprite(shelter: BreederShelterState): HTMLCanvasElement {
   const lvl = shelter.level ?? 1;
   const s = Math.min(2.2, 0.8 + lvl * 0.08);
-
-  // Seeded RNG for this specific mill
-  const rng = millRng(millSeed(shelter.id));
-
-  ctx.save();
-  ctx.translate(cx, cy);
-
-  // ---- Ominous red glow beneath the complex ----
-  ctx.shadowColor = `rgba(180, 20, 0, ${0.35 + pulse * 0.25})`;
-  ctx.shadowBlur = 22 + pulse * 12;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
-
-  // ---- Foundation: cracked dark concrete ----
   const foundW = 120 * s;
   const foundH = 100 * s;
-  ctx.fillStyle = '#2a2018';
-  ctx.beginPath();
-  ctx.roundRect(-foundW / 2, -foundH / 2, foundW, foundH, 4);
-  ctx.fill();
 
-  // Foundation border - rusty/bloodstained
-  ctx.strokeStyle = `rgba(140, 40, 20, ${0.6 + pulse * 0.3})`;
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
+  const spriteW = Math.ceil(foundW + BS_PAD_X * 2);
+  const spriteH = Math.ceil(foundH + BS_PAD_TOP + BS_PAD_BOTTOM);
 
-  // Clear shadow for interior details
-  ctx.shadowColor = 'transparent';
-  ctx.shadowBlur = 0;
+  const c = document.createElement('canvas');
+  c.width = spriteW;
+  c.height = spriteH;
+  const sctx = c.getContext('2d')!;
+
+  // Center of foundation within sprite
+  const cx = spriteW / 2;
+  const cy = BS_PAD_TOP + foundH / 2;
+
+  const rng = millRng(millSeed(shelter.id));
+
+  sctx.save();
+  sctx.translate(cx, cy);
+
+  // ---- Ominous red glow beneath the complex (baked at mid-pulse value) ----
+  sctx.shadowColor = 'rgba(180, 20, 0, 0.5)';
+  sctx.shadowBlur = 28;
+  sctx.shadowOffsetX = 0;
+  sctx.shadowOffsetY = 0;
+
+  // ---- Foundation ----
+  sctx.fillStyle = '#2a2018';
+  sctx.beginPath();
+  sctx.roundRect(-foundW / 2, -foundH / 2, foundW, foundH, 4);
+  sctx.fill();
+  sctx.strokeStyle = 'rgba(140, 40, 20, 0.75)';
+  sctx.lineWidth = 2.5;
+  sctx.stroke();
+  sctx.shadowColor = 'transparent';
+  sctx.shadowBlur = 0;
 
   // ---- Dirty floor stains ----
-  ctx.fillStyle = 'rgba(80, 40, 20, 0.3)';
+  sctx.fillStyle = 'rgba(80, 40, 20, 0.3)';
   for (let i = 0; i < 7; i++) {
     const sx = -foundW / 2 + 12 + rng() * (foundW - 24);
     const sy = -foundH / 2 + 10 + rng() * (foundH - 20);
-    ctx.beginPath();
-    ctx.ellipse(sx, sy, 4 * s + rng() * 4 * s, 3 * s + rng() * 3 * s, rng() * 3, 0, Math.PI * 2);
-    ctx.fill();
+    sctx.beginPath();
+    sctx.ellipse(sx, sy, 4 * s + rng() * 4 * s, 3 * s + rng() * 3 * s, rng() * 3, 0, Math.PI * 2);
+    sctx.fill();
   }
 
-  // ---- Flickering dim light overlay ----
-  ctx.globalAlpha = flickerDim;
-
-  // ---- Generate the cell grid (seeded per mill) ----
+  // ---- Cell grid ----
   const cageW = 14 * s;
   const cageH = 12 * s;
   const cagePad = 2 * s;
@@ -4995,7 +5011,6 @@ function drawBreederShelter(shelter: BreederShelterState): void {
   const cageStartX = -cageBlockW / 2;
   const cageStartY = -foundH / 2 + 10 * s;
 
-  // Pre-generate cell types: ~60% single, ~15% double, ~5% triple, ~10% crate, ~5% empty, ~5% water
   const cells: MillCellType[] = [];
   const totalCells = cageCols * cageRows;
   for (let i = 0; i < totalCells; i++) {
@@ -5007,21 +5022,19 @@ function drawBreederShelter(shelter: BreederShelterState): void {
     else if (r < 0.94) cells.push('empty');
     else cells.push('water');
   }
-
-  // Pre-generate random pet emoji index for each cell (seeded)
   const cellPets: number[] = [];
   for (let i = 0; i < totalCells; i++) {
     cellPets.push(Math.floor(rng() * BREEDER_CAGE_PETS.length));
   }
 
-  // Cage room floor (filthy)
-  ctx.fillStyle = '#3d2e1e';
-  ctx.beginPath();
-  ctx.roundRect(cageStartX - 4 * s, cageStartY - 4 * s, cageBlockW + 8 * s, cageBlockH + 8 * s, 2);
-  ctx.fill();
-  ctx.strokeStyle = '#5a3a20';
-  ctx.lineWidth = 1;
-  ctx.stroke();
+  // Cage room floor
+  sctx.fillStyle = '#3d2e1e';
+  sctx.beginPath();
+  sctx.roundRect(cageStartX - 4 * s, cageStartY - 4 * s, cageBlockW + 8 * s, cageBlockH + 8 * s, 2);
+  sctx.fill();
+  sctx.strokeStyle = '#5a3a20';
+  sctx.lineWidth = 1;
+  sctx.stroke();
 
   // ---- Draw each cell ----
   for (let row = 0; row < cageRows; row++) {
@@ -5032,112 +5045,92 @@ function drawBreederShelter(shelter: BreederShelterState): void {
       const ky = cageStartY + row * (cageH + cagePad);
       const petIdx = cellPets[idx];
       const petEmoji = BREEDER_CAGE_PETS[petIdx];
-      // Secondary pet (different from first) for overcrowded
       const pet2Emoji = BREEDER_CAGE_PETS[(petIdx + 2) % BREEDER_CAGE_PETS.length];
       const pet3Emoji = BREEDER_CAGE_PETS[(petIdx + 4) % BREEDER_CAGE_PETS.length];
-      const animalDim = flickerDim * (0.5 + 0.25 * Math.sin(now / 1200 + row * 1.3 + col * 0.7));
       const emojiSize = 7 * s;
 
       if (cellType === 'empty') {
-        // Dirty empty floor patch
-        ctx.fillStyle = '#3a2a1a';
-        ctx.fillRect(kx, ky, cageW, cageH);
-        ctx.strokeStyle = 'rgba(80, 55, 30, 0.3)';
-        ctx.lineWidth = 0.5;
-        ctx.strokeRect(kx, ky, cageW, cageH);
-        // Debris
-        ctx.fillStyle = 'rgba(90, 60, 30, 0.4)';
-        ctx.fillRect(kx + 3 * s, ky + 4 * s, 3 * s, 2 * s);
+        sctx.fillStyle = '#3a2a1a';
+        sctx.fillRect(kx, ky, cageW, cageH);
+        sctx.strokeStyle = 'rgba(80, 55, 30, 0.3)';
+        sctx.lineWidth = 0.5;
+        sctx.strokeRect(kx, ky, cageW, cageH);
+        sctx.fillStyle = 'rgba(90, 60, 30, 0.4)';
+        sctx.fillRect(kx + 3 * s, ky + 4 * s, 3 * s, 2 * s);
       } else if (cellType === 'crate') {
-        // Sealed wooden crate
-        ctx.fillStyle = '#5a4228';
-        ctx.fillRect(kx, ky, cageW, cageH);
-        ctx.strokeStyle = '#7a5a38';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(kx, ky, cageW, cageH);
-        // Crate cross-slats
-        ctx.strokeStyle = 'rgba(120, 90, 50, 0.5)';
-        ctx.lineWidth = 0.8;
-        ctx.beginPath();
-        ctx.moveTo(kx, ky + cageH / 2);
-        ctx.lineTo(kx + cageW, ky + cageH / 2);
-        ctx.moveTo(kx + cageW / 2, ky);
-        ctx.lineTo(kx + cageW / 2, ky + cageH);
-        ctx.stroke();
-        // Crate label
-        ctx.fillStyle = 'rgba(200, 150, 80, 0.3)';
-        ctx.font = `${4 * s}px Rubik, sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('📦', kx + cageW / 2, ky + cageH / 2);
+        sctx.fillStyle = '#5a4228';
+        sctx.fillRect(kx, ky, cageW, cageH);
+        sctx.strokeStyle = '#7a5a38';
+        sctx.lineWidth = 1;
+        sctx.strokeRect(kx, ky, cageW, cageH);
+        sctx.strokeStyle = 'rgba(120, 90, 50, 0.5)';
+        sctx.lineWidth = 0.8;
+        sctx.beginPath();
+        sctx.moveTo(kx, ky + cageH / 2);
+        sctx.lineTo(kx + cageW, ky + cageH / 2);
+        sctx.moveTo(kx + cageW / 2, ky);
+        sctx.lineTo(kx + cageW / 2, ky + cageH);
+        sctx.stroke();
+        sctx.fillStyle = 'rgba(200, 150, 80, 0.3)';
+        sctx.font = `${4 * s}px Rubik, sans-serif`;
+        sctx.textAlign = 'center';
+        sctx.textBaseline = 'middle';
+        sctx.fillText('📦', kx + cageW / 2, ky + cageH / 2);
       } else if (cellType === 'water') {
-        // Filthy water / neglected supplies
-        ctx.fillStyle = '#3a2a1a';
-        ctx.fillRect(kx, ky, cageW, cageH);
-        ctx.strokeStyle = 'rgba(80, 55, 30, 0.4)';
-        ctx.lineWidth = 0.5;
-        ctx.strokeRect(kx, ky, cageW, cageH);
-        // Dirty water bowl
-        ctx.fillStyle = '#4a5a3a';
-        ctx.beginPath();
-        ctx.ellipse(kx + cageW / 2, ky + cageH * 0.4, 4 * s, 2.5 * s, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#6a7a5a';
-        ctx.lineWidth = 0.5;
-        ctx.stroke();
-        // Spilled water stain
-        ctx.fillStyle = 'rgba(70, 90, 60, 0.25)';
-        ctx.beginPath();
-        ctx.ellipse(kx + cageW * 0.6, ky + cageH * 0.7, 3 * s, 2 * s, 0.4, 0, Math.PI * 2);
-        ctx.fill();
+        sctx.fillStyle = '#3a2a1a';
+        sctx.fillRect(kx, ky, cageW, cageH);
+        sctx.strokeStyle = 'rgba(80, 55, 30, 0.4)';
+        sctx.lineWidth = 0.5;
+        sctx.strokeRect(kx, ky, cageW, cageH);
+        sctx.fillStyle = '#4a5a3a';
+        sctx.beginPath();
+        sctx.ellipse(kx + cageW / 2, ky + cageH * 0.4, 4 * s, 2.5 * s, 0, 0, Math.PI * 2);
+        sctx.fill();
+        sctx.strokeStyle = '#6a7a5a';
+        sctx.lineWidth = 0.5;
+        sctx.stroke();
+        sctx.fillStyle = 'rgba(70, 90, 60, 0.25)';
+        sctx.beginPath();
+        sctx.ellipse(kx + cageW * 0.6, ky + cageH * 0.7, 3 * s, 2 * s, 0.4, 0, Math.PI * 2);
+        sctx.fill();
       } else {
-        // ---- Cage with animals (cage1, cage2, cage3) ----
-        // Dirty cage floor
-        ctx.fillStyle = '#4a3828';
-        ctx.fillRect(kx, ky, cageW, cageH);
-
-        // Rusted bars outline
-        ctx.strokeStyle = `rgba(120, 70, 30, ${0.7 + pulse * 0.15})`;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(kx, ky, cageW, cageH);
-
-        // Vertical bars (cramped)
-        ctx.strokeStyle = 'rgba(100, 60, 25, 0.5)';
-        ctx.lineWidth = 0.6;
+        // Cage with animals
+        sctx.fillStyle = '#4a3828';
+        sctx.fillRect(kx, ky, cageW, cageH);
+        sctx.strokeStyle = 'rgba(120, 70, 30, 0.78)';
+        sctx.lineWidth = 1;
+        sctx.strokeRect(kx, ky, cageW, cageH);
+        sctx.strokeStyle = 'rgba(100, 60, 25, 0.5)';
+        sctx.lineWidth = 0.6;
         const barCount = cellType === 'cage3' ? 4 : 3;
         for (let b = 1; b < barCount; b++) {
-          ctx.beginPath();
-          ctx.moveTo(kx + b * cageW / barCount, ky);
-          ctx.lineTo(kx + b * cageW / barCount, ky + cageH);
-          ctx.stroke();
+          sctx.beginPath();
+          sctx.moveTo(kx + b * cageW / barCount, ky);
+          sctx.lineTo(kx + b * cageW / barCount, ky + cageH);
+          sctx.stroke();
         }
-
-        ctx.font = `${emojiSize}px sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-
+        sctx.font = `${emojiSize}px sans-serif`;
+        sctx.textAlign = 'center';
+        sctx.textBaseline = 'middle';
         if (cellType === 'cage1') {
-          // Single sad animal
-          ctx.globalAlpha = animalDim;
-          ctx.fillText(petEmoji, kx + cageW / 2, ky + cageH / 2);
+          sctx.globalAlpha = 0.6;
+          sctx.fillText(petEmoji, kx + cageW / 2, ky + cageH / 2);
         } else if (cellType === 'cage2') {
-          // 2 crammed in - offset left/right
-          ctx.globalAlpha = animalDim;
-          ctx.font = `${emojiSize * 0.8}px sans-serif`;
-          ctx.fillText(petEmoji, kx + cageW * 0.32, ky + cageH * 0.45);
-          ctx.globalAlpha = animalDim * 0.85;
-          ctx.fillText(pet2Emoji, kx + cageW * 0.68, ky + cageH * 0.6);
+          sctx.font = `${emojiSize * 0.8}px sans-serif`;
+          sctx.globalAlpha = 0.6;
+          sctx.fillText(petEmoji, kx + cageW * 0.32, ky + cageH * 0.45);
+          sctx.globalAlpha = 0.5;
+          sctx.fillText(pet2Emoji, kx + cageW * 0.68, ky + cageH * 0.6);
         } else {
-          // cage3: 3 crammed in - triangle arrangement
-          ctx.font = `${emojiSize * 0.7}px sans-serif`;
-          ctx.globalAlpha = animalDim;
-          ctx.fillText(petEmoji, kx + cageW * 0.28, ky + cageH * 0.35);
-          ctx.globalAlpha = animalDim * 0.8;
-          ctx.fillText(pet2Emoji, kx + cageW * 0.72, ky + cageH * 0.35);
-          ctx.globalAlpha = animalDim * 0.7;
-          ctx.fillText(pet3Emoji, kx + cageW * 0.5, ky + cageH * 0.72);
+          sctx.font = `${emojiSize * 0.7}px sans-serif`;
+          sctx.globalAlpha = 0.6;
+          sctx.fillText(petEmoji, kx + cageW * 0.28, ky + cageH * 0.35);
+          sctx.globalAlpha = 0.5;
+          sctx.fillText(pet2Emoji, kx + cageW * 0.72, ky + cageH * 0.35);
+          sctx.globalAlpha = 0.45;
+          sctx.fillText(pet3Emoji, kx + cageW * 0.5, ky + cageH * 0.72);
         }
-        ctx.globalAlpha = flickerDim;
+        sctx.globalAlpha = 1;
       }
     }
   }
@@ -5145,11 +5138,11 @@ function drawBreederShelter(shelter: BreederShelterState): void {
   // ---- Dark corridor below cages ----
   const corrY = cageStartY + cageBlockH + 6 * s;
   const corrH = 8 * s;
-  ctx.fillStyle = '#241a10';
-  ctx.fillRect(-foundW / 2 + 4 * s, corrY, foundW - 8 * s, corrH);
-  ctx.strokeStyle = '#3a2a18';
-  ctx.lineWidth = 0.8;
-  ctx.strokeRect(-foundW / 2 + 4 * s, corrY, foundW - 8 * s, corrH);
+  sctx.fillStyle = '#241a10';
+  sctx.fillRect(-foundW / 2 + 4 * s, corrY, foundW - 8 * s, corrH);
+  sctx.strokeStyle = '#3a2a18';
+  sctx.lineWidth = 0.8;
+  sctx.strokeRect(-foundW / 2 + 4 * s, corrY, foundW - 8 * s, corrH);
 
   // ---- Bottom rooms ----
   const bottomY = corrY + corrH + 3 * s;
@@ -5159,187 +5152,200 @@ function drawBreederShelter(shelter: BreederShelterState): void {
   const breedX = -foundW / 2 + 6 * s;
   const breedW = foundW * 0.35;
   if (bottomH > 8) {
-    ctx.fillStyle = '#3a1a1a';
-    ctx.beginPath();
-    ctx.roundRect(breedX, bottomY, breedW, bottomH, 2);
-    ctx.fill();
-    ctx.strokeStyle = '#5a2020';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.fillStyle = 'rgba(200, 80, 60, 0.5)';
-    ctx.font = `${6 * s}px Rubik, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('Breeding', breedX + breedW / 2, bottomY + bottomH / 2);
+    sctx.fillStyle = '#3a1a1a';
+    sctx.beginPath();
+    sctx.roundRect(breedX, bottomY, breedW, bottomH, 2);
+    sctx.fill();
+    sctx.strokeStyle = '#5a2020';
+    sctx.lineWidth = 1;
+    sctx.stroke();
+    sctx.fillStyle = 'rgba(200, 80, 60, 0.5)';
+    sctx.font = `${6 * s}px Rubik, sans-serif`;
+    sctx.textAlign = 'center';
+    sctx.textBaseline = 'middle';
+    sctx.fillText('Breeding', breedX + breedW / 2, bottomY + bottomH / 2);
   }
 
   // ---- Breeder Tyrant "office" (bottom-right) ----
   const officeX = foundW / 2 - 6 * s - foundW * 0.4;
   const officeW = foundW * 0.4;
   if (bottomH > 8) {
-    // Dark office room
-    ctx.fillStyle = '#2e1e14';
-    ctx.beginPath();
-    ctx.roundRect(officeX, bottomY, officeW, bottomH, 2);
-    ctx.fill();
-    ctx.strokeStyle = '#4a3020';
-    ctx.lineWidth = 1;
-    ctx.stroke();
+    sctx.fillStyle = '#2e1e14';
+    sctx.beginPath();
+    sctx.roundRect(officeX, bottomY, officeW, bottomH, 2);
+    sctx.fill();
+    sctx.strokeStyle = '#4a3020';
+    sctx.lineWidth = 1;
+    sctx.stroke();
 
-    // Desk (dark wood)
     const deskX = officeX + officeW * 0.3;
     const deskY = bottomY + bottomH * 0.25;
     const deskW = officeW * 0.45;
     const deskH = bottomH * 0.2;
-    ctx.fillStyle = '#4a3018';
-    ctx.fillRect(deskX, deskY, deskW, deskH);
-    ctx.strokeStyle = '#5a4028';
-    ctx.lineWidth = 0.7;
-    ctx.strokeRect(deskX, deskY, deskW, deskH);
+    sctx.fillStyle = '#4a3018';
+    sctx.fillRect(deskX, deskY, deskW, deskH);
+    sctx.strokeStyle = '#5a4028';
+    sctx.lineWidth = 0.7;
+    sctx.strokeRect(deskX, deskY, deskW, deskH);
 
-    // Money stacks on desk
-    ctx.font = `${5 * s}px sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('💰', deskX + deskW * 0.3, deskY + deskH / 2);
-    ctx.fillText('💵', deskX + deskW * 0.7, deskY + deskH / 2);
+    sctx.font = `${5 * s}px sans-serif`;
+    sctx.textAlign = 'center';
+    sctx.textBaseline = 'middle';
+    sctx.fillText('💰', deskX + deskW * 0.3, deskY + deskH / 2);
+    sctx.fillText('💵', deskX + deskW * 0.7, deskY + deskH / 2);
 
-    // ---- Breeder Tyrant (back turned to animals, facing desk) ----
+    // Tyrant (static pose — arm animation dropped)
     const tyrantX = officeX + officeW * 0.5;
     const tyrantY = bottomY + bottomH * 0.65;
-    const tyrantPhase = now / 800;
 
-    // Chair
-    ctx.fillStyle = '#3a2010';
-    ctx.beginPath();
-    ctx.arc(tyrantX, tyrantY + 2 * s, 4 * s, 0, Math.PI * 2);
-    ctx.fill();
+    sctx.fillStyle = '#3a2010';
+    sctx.beginPath();
+    sctx.arc(tyrantX, tyrantY + 2 * s, 4 * s, 0, Math.PI * 2);
+    sctx.fill();
 
-    // Body (dark suit, facing UP toward desk = back to animals above)
-    ctx.fillStyle = '#1a0808';
-    ctx.beginPath();
-    ctx.ellipse(tyrantX, tyrantY, 4 * s, 5.5 * s, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#3a1010';
-    ctx.lineWidth = 0.6;
-    ctx.stroke();
+    sctx.fillStyle = '#1a0808';
+    sctx.beginPath();
+    sctx.ellipse(tyrantX, tyrantY, 4 * s, 5.5 * s, 0, 0, Math.PI * 2);
+    sctx.fill();
+    sctx.strokeStyle = '#3a1010';
+    sctx.lineWidth = 0.6;
+    sctx.stroke();
 
-    // Head (facing desk/up)
-    ctx.fillStyle = '#d4a878';
-    ctx.beginPath();
-    ctx.arc(tyrantX, tyrantY - 5.5 * s, 3 * s, 0, Math.PI * 2);
-    ctx.fill();
-    // Dark hat
-    ctx.fillStyle = '#1a0505';
-    ctx.beginPath();
-    ctx.arc(tyrantX, tyrantY - 6 * s, 3.2 * s, Math.PI, Math.PI * 2);
-    ctx.fill();
+    sctx.fillStyle = '#d4a878';
+    sctx.beginPath();
+    sctx.arc(tyrantX, tyrantY - 5.5 * s, 3 * s, 0, Math.PI * 2);
+    sctx.fill();
+    sctx.fillStyle = '#1a0505';
+    sctx.beginPath();
+    sctx.arc(tyrantX, tyrantY - 6 * s, 3.2 * s, Math.PI, Math.PI * 2);
+    sctx.fill();
 
-    // Arms reaching toward money (animated)
-    const armReach = Math.sin(tyrantPhase) * 1.5;
-    ctx.strokeStyle = '#1a0808';
-    ctx.lineWidth = 1.5 * s;
-    // Left arm to money
-    ctx.beginPath();
-    ctx.moveTo(tyrantX - 3.5 * s, tyrantY - 2 * s);
-    ctx.lineTo(deskX + deskW * 0.3 + armReach, deskY + deskH);
-    ctx.stroke();
-    // Right arm to money
-    ctx.beginPath();
-    ctx.moveTo(tyrantX + 3.5 * s, tyrantY - 2 * s);
-    ctx.lineTo(deskX + deskW * 0.7 - armReach, deskY + deskH);
-    ctx.stroke();
+    // Static arms reaching toward desk
+    sctx.strokeStyle = '#1a0808';
+    sctx.lineWidth = 1.5 * s;
+    sctx.beginPath();
+    sctx.moveTo(tyrantX - 3.5 * s, tyrantY - 2 * s);
+    sctx.lineTo(deskX + deskW * 0.3, deskY + deskH);
+    sctx.stroke();
+    sctx.beginPath();
+    sctx.moveTo(tyrantX + 3.5 * s, tyrantY - 2 * s);
+    sctx.lineTo(deskX + deskW * 0.7, deskY + deskH);
+    sctx.stroke();
 
-    // Money counting animation (floating $ near hands)
-    const moneyBob = Math.sin(tyrantPhase * 2) * 2;
-    ctx.fillStyle = '#4a8a2a';
-    ctx.font = `bold ${4 * s}px Rubik, sans-serif`;
-    ctx.globalAlpha = flickerDim * 0.7;
-    ctx.fillText('$', deskX + deskW * 0.15 + armReach, deskY - 2 + moneyBob);
-    ctx.fillText('$', deskX + deskW * 0.85 - armReach, deskY - 1 - moneyBob);
-    ctx.globalAlpha = flickerDim;
+    // Static $ signs
+    sctx.fillStyle = '#4a8a2a';
+    sctx.font = `bold ${4 * s}px Rubik, sans-serif`;
+    sctx.globalAlpha = 0.6;
+    sctx.fillText('$', deskX + deskW * 0.15, deskY - 2);
+    sctx.fillText('$', deskX + deskW * 0.85, deskY - 1);
+    sctx.globalAlpha = 1;
   }
 
-  ctx.globalAlpha = 1;
-
-  // ---- Boarded-up windows (along sides) ----
-  ctx.strokeStyle = '#5a3a1a';
-  ctx.lineWidth = 1.5 * s;
+  // ---- Boarded-up windows ----
+  sctx.strokeStyle = '#5a3a1a';
+  sctx.lineWidth = 1.5 * s;
   const winCount = Math.min(4, 1 + Math.floor(lvl / 3));
   for (let i = 0; i < winCount; i++) {
     const wy = -foundH / 2 + 15 * s + i * 18 * s;
     if (wy + 8 * s > foundH / 2 - 5 * s) break;
-    // Left side
     const wx = -foundW / 2;
-    ctx.fillStyle = '#1a1008';
-    ctx.fillRect(wx, wy, 5 * s, 8 * s);
-    ctx.beginPath();
-    ctx.moveTo(wx, wy); ctx.lineTo(wx + 5 * s, wy + 8 * s);
-    ctx.moveTo(wx + 5 * s, wy); ctx.lineTo(wx, wy + 8 * s);
-    ctx.stroke();
-    // Right side
+    sctx.fillStyle = '#1a1008';
+    sctx.fillRect(wx, wy, 5 * s, 8 * s);
+    sctx.beginPath();
+    sctx.moveTo(wx, wy); sctx.lineTo(wx + 5 * s, wy + 8 * s);
+    sctx.moveTo(wx + 5 * s, wy); sctx.lineTo(wx, wy + 8 * s);
+    sctx.stroke();
     const rwx = foundW / 2 - 5 * s;
-    ctx.fillStyle = '#1a1008';
-    ctx.fillRect(rwx, wy, 5 * s, 8 * s);
-    ctx.beginPath();
-    ctx.moveTo(rwx, wy); ctx.lineTo(rwx + 5 * s, wy + 8 * s);
-    ctx.moveTo(rwx + 5 * s, wy); ctx.lineTo(rwx, wy + 8 * s);
-    ctx.stroke();
+    sctx.fillStyle = '#1a1008';
+    sctx.fillRect(rwx, wy, 5 * s, 8 * s);
+    sctx.beginPath();
+    sctx.moveTo(rwx, wy); sctx.lineTo(rwx + 5 * s, wy + 8 * s);
+    sctx.moveTo(rwx + 5 * s, wy); sctx.lineTo(rwx, wy + 8 * s);
+    sctx.stroke();
   }
 
-  // ---- Pulsing red "fire" glow at entrance (bottom center) ----
+  // ---- Fire glow at entrance (baked at mid-pulse) ----
   const fireX = 0;
   const fireY = foundH / 2 - 3 * s;
-  const fireGrad = ctx.createRadialGradient(fireX, fireY, 0, fireX, fireY, 14 * s);
-  fireGrad.addColorStop(0, `rgba(255, 60, 0, ${0.4 + pulse * 0.3})`);
-  fireGrad.addColorStop(0.5, `rgba(200, 30, 0, ${0.15 + pulse * 0.1})`);
+  const fireGrad = sctx.createRadialGradient(fireX, fireY, 0, fireX, fireY, 14 * s);
+  fireGrad.addColorStop(0, 'rgba(255, 60, 0, 0.55)');
+  fireGrad.addColorStop(0.5, 'rgba(200, 30, 0, 0.2)');
   fireGrad.addColorStop(1, 'rgba(100, 10, 0, 0)');
-  ctx.fillStyle = fireGrad;
-  ctx.beginPath();
-  ctx.arc(fireX, fireY, 14 * s, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.font = `${12 * s}px sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('🔥', fireX, fireY - 2 * s);
+  sctx.fillStyle = fireGrad;
+  sctx.beginPath();
+  sctx.arc(fireX, fireY, 14 * s, 0, Math.PI * 2);
+  sctx.fill();
+  sctx.font = `${12 * s}px sans-serif`;
+  sctx.textAlign = 'center';
+  sctx.textBaseline = 'middle';
+  sctx.fillText('🔥', fireX, fireY - 2 * s);
 
   // ---- Chains / barbed wire along top ----
-  ctx.strokeStyle = 'rgba(100, 60, 30, 0.6)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([2 * s, 3 * s]);
-  ctx.beginPath();
-  ctx.moveTo(-foundW / 2, -foundH / 2 - 3 * s);
-  ctx.lineTo(foundW / 2, -foundH / 2 - 3 * s);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.fillStyle = '#8a5a2a';
+  sctx.strokeStyle = 'rgba(100, 60, 30, 0.6)';
+  sctx.lineWidth = 1;
+  sctx.setLineDash([2 * s, 3 * s]);
+  sctx.beginPath();
+  sctx.moveTo(-foundW / 2, -foundH / 2 - 3 * s);
+  sctx.lineTo(foundW / 2, -foundH / 2 - 3 * s);
+  sctx.stroke();
+  sctx.setLineDash([]);
+  sctx.fillStyle = '#8a5a2a';
   for (let i = 0; i < 6; i++) {
     const bx = -foundW / 2 + 10 * s + i * (foundW - 20 * s) / 5;
-    ctx.beginPath();
-    ctx.moveTo(bx, -foundH / 2 - 3 * s);
-    ctx.lineTo(bx - 2, -foundH / 2 - 7 * s);
-    ctx.lineTo(bx + 2, -foundH / 2 - 7 * s);
-    ctx.closePath();
-    ctx.fill();
+    sctx.beginPath();
+    sctx.moveTo(bx, -foundH / 2 - 3 * s);
+    sctx.lineTo(bx - 2, -foundH / 2 - 7 * s);
+    sctx.lineTo(bx + 2, -foundH / 2 - 7 * s);
+    sctx.closePath();
+    sctx.fill();
   }
 
-  // ---- Label above (red, menacing) ----
-  ctx.fillStyle = '#ff3333';
-  ctx.font = 'bold 12px Rubik, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'bottom';
-  ctx.shadowColor = 'rgba(200, 0, 0, 0.7)';
-  ctx.shadowBlur = 6;
-  ctx.fillText(`Breeder Mill Lv${shelter.level}`, 0, -foundH / 2 - 10 * s);
-  ctx.shadowBlur = 0;
+  // ---- Label above (baked with shadow) ----
+  sctx.fillStyle = '#ff3333';
+  sctx.font = 'bold 12px Rubik, sans-serif';
+  sctx.textAlign = 'center';
+  sctx.textBaseline = 'bottom';
+  sctx.shadowColor = 'rgba(200, 0, 0, 0.7)';
+  sctx.shadowBlur = 6;
+  sctx.fillText(`Breeder Mill Lv${shelter.level}`, 0, -foundH / 2 - 10 * s);
+  sctx.shadowBlur = 0;
 
-  // ---- Warning text below ----
+  sctx.restore();
+  return c;
+}
+
+/** Get or create a cached breeder shelter sprite. Invalidates on level change. */
+function getBreederShelterSprite(shelter: BreederShelterState): HTMLCanvasElement {
+  const cached = breederShelterSprites.get(shelter.id);
+  const cachedLevel = breederShelterSpriteLevel.get(shelter.id);
+  if (cached && cachedLevel === shelter.level) return cached;
+  const sprite = prerenderBreederShelterSprite(shelter);
+  breederShelterSprites.set(shelter.id, sprite);
+  breederShelterSpriteLevel.set(shelter.id, shelter.level);
+  return sprite;
+}
+
+/** Draw a breeder shelter using pre-rendered sprite + live text overlays. */
+function drawBreederShelter(shelter: BreederShelterState): void {
+  const lvl = shelter.level ?? 1;
+  const s = Math.min(2.2, 0.8 + lvl * 0.08);
+  const foundW = 120 * s;
+  const foundH = 100 * s;
+
+  const sprite = getBreederShelterSprite(shelter);
+
+  // Sprite center is at (spriteW/2, BS_PAD_TOP + foundH/2) within the canvas
+  // To align world pos (shelter.x, shelter.y) with the foundation center:
+  const drawX = shelter.x - sprite.width / 2;
+  const drawY = shelter.y - BS_PAD_TOP - foundH / 2;
+  ctx.drawImage(sprite, drawX, drawY);
+
+  // ---- Live text: warning below ----
   ctx.fillStyle = '#ff8800';
   ctx.font = '10px Rubik, sans-serif';
+  ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillText('Spawning wild strays!', 0, foundH / 2 + 5 * s);
-
-  ctx.restore();
+  ctx.fillText('Spawning wild strays!', shelter.x, shelter.y + foundH / 2 + 5 * s);
 }
 
 // ============================================
@@ -8532,12 +8538,17 @@ function setupInstantRescueButton(): void {
   const btn = document.getElementById('instant-rescue-btn') as HTMLButtonElement | null;
   if (!btn) return;
 
-  // Only show for mills and tier 3+ shelters
+  // Hide instant rescue for mills/camps — must play the minigame manually
+  if (breederGame.isMill) {
+    btn.classList.add('hidden');
+    return;
+  }
+
+  // Only show for tier 3+ shelters
   const me = latestSnapshot?.players.find(p => p.id === myPlayerId);
   const myShelter = latestSnapshot?.shelters?.find(s => s.ownerId === myPlayerId);
   const shelterTier = myShelter?.tier ?? 0;
   
-  // Show instant rescue for mills and camps at any level, requires tier 3+ shelter
   if (shelterTier < 3) {
     btn.classList.add('hidden');
     return;
@@ -9258,7 +9269,7 @@ function renderLobbyLeaderboard(entries: { rank: number; userId?: string; displa
       <span class="lobby-leaderboard-rank ${rankClass}">#${entry.rank}</span>
       ${colorSpan}
       <span class="lobby-leaderboard-name">${escapeHtml(entry.displayName)}</span>
-      <span class="lobby-leaderboard-score">${score}</span>
+      <span class="lobby-leaderboard-score">${formatNumber(score)}</span>
     </div>`;
   }).join('');
 }
@@ -9488,7 +9499,7 @@ function renderMatchHistory(matches: MatchHistoryEntry[]): void {
       <div class="match-history-entry">
         <span class="match-history-result ${resultClass}">${resultLabel}</span>
         <span class="match-history-mode">${escapeHtml(m.mode)}</span>
-        <span class="match-history-rt">${m.rt_earned} RT</span>
+        <span class="match-history-rt">${formatNumber(m.rt_earned)} RT</span>
         <span class="match-history-adopt">${m.adoptions} adoptions</span>
         <span class="match-history-dur">${formatDuration(m.duration_seconds)}</span>
         <span class="match-history-date">${formatMatchHistoryDate(m.played_at)}</span>
@@ -9522,7 +9533,7 @@ function renderLeaderboard(entries: LeaderboardEntry[], myRank: number): void {
         <div class="leaderboard-name">${escapeHtml(entry.displayName)}</div>
         <div class="leaderboard-stats">
           <span class="wins">${entry.wins} wins</span>${typeof entry.gamesPlayed === 'number' ? ` · ${entry.gamesPlayed} games` : ''}${typeof entry.losses === 'number' ? ` · ${entry.losses} losses` : ''}<br>
-          ${entry.rtEarned} RT
+          ${formatNumber(entry.rtEarned)} RT
         </div>
       </div>
     `;

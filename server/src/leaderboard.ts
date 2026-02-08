@@ -296,6 +296,7 @@ export function recordMatchWin(userId: string, rtEarned: number): void {
   }
   
   log(`Recorded win for user ${userId}: +${rtEarned} RT`);
+  broadcastLeaderboardUpdate();
 }
 
 /**
@@ -432,7 +433,7 @@ export function getLeaderboard(
   if (type === 'games') {
     rows = conn.prepare(`
       SELECT ps.user_id, u.display_name, u.shelter_color, ps.total_wins as wins, ps.total_rt_earned as rt_earned,
-             COALESCE(ps.adoption_score_alltime, ps.total_rt_earned) as adoption_score,
+             COALESCE(NULLIF(ps.adoption_score_alltime, 0), ps.total_rt_earned) as adoption_score,
              COALESCE(ps.total_games_played, 0) as games_played, COALESCE(ps.total_losses, 0) as losses
       FROM player_stats ps
       JOIN users u ON ps.user_id = u.id
@@ -442,12 +443,12 @@ export function getLeaderboard(
   } else if (type === 'daily') {
     rows = conn.prepare(`
       SELECT ps.user_id, u.display_name, u.shelter_color, ps.daily_wins as wins, ps.daily_rt_earned as rt_earned,
-             COALESCE(ps.adoption_score_daily, ps.daily_rt_earned) as adoption_score,
+             COALESCE(NULLIF(ps.adoption_score_daily, 0), ps.daily_rt_earned) as adoption_score,
              COALESCE(ps.total_games_played, 0) as games_played, COALESCE(ps.total_losses, 0) as losses
       FROM player_stats ps
       JOIN users u ON ps.user_id = u.id
       WHERE ps.last_played_date = ?
-      ORDER BY COALESCE(ps.adoption_score_daily, ps.daily_rt_earned) DESC, ps.daily_wins DESC
+      ORDER BY COALESCE(NULLIF(ps.adoption_score_daily, 0), ps.daily_rt_earned) DESC, ps.daily_wins DESC
       LIMIT ?
     `).all(today, limit) as Row[];
   } else if (type === 'weekly') {
@@ -474,7 +475,7 @@ export function getLeaderboard(
     `).all(thisSeason, limit) as Row[];
   } else {
     // All-time: support sort = wins | losses | games | score (Formula B: score uses reputation-weighted)
-    const baseScore = 'COALESCE(ps.adoption_score_alltime, ps.total_rt_earned)';
+    const baseScore = 'COALESCE(NULLIF(ps.adoption_score_alltime, 0), ps.total_rt_earned)';
     const rep = 'COALESCE(ps.reputation, 50)';
     const weightedScore = `(${baseScore} * (1 + ${rep} / 100.0))`;
     const orderBy = sort === 'wins'
@@ -486,7 +487,7 @@ export function getLeaderboard(
           : `ORDER BY ${weightedScore} DESC, ps.total_wins DESC`;
     rows = conn.prepare(`
       SELECT ps.user_id, u.display_name, u.shelter_color, ps.total_wins as wins, ps.total_rt_earned as rt_earned,
-             COALESCE(ps.adoption_score_alltime, ps.total_rt_earned) as adoption_score,
+             COALESCE(NULLIF(ps.adoption_score_alltime, 0), ps.total_rt_earned) as adoption_score,
              COALESCE(ps.total_games_played, 0) as games_played, COALESCE(ps.total_losses, 0) as losses
       FROM player_stats ps
       JOIN users u ON ps.user_id = u.id

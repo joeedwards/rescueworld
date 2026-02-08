@@ -2071,7 +2071,11 @@ setInterval(() => {
             let isWinner: boolean;
             if (match.mode === 'teams') {
               isWinner = !isStrayLoss && isOnWinningTeam;
+            } else if (match.mode === 'ffa') {
+              // FFA: all players win if boss mode was cleared (cooperative victory)
+              isWinner = !isStrayLoss && snapshot.winnerId != null;
             } else {
+              // Solo: only the player themselves can be the winner
               isWinner = !isStrayLoss && snapshot.winnerId === pid;
             }
             
