@@ -563,6 +563,24 @@ export function deleteSavedFfaMatch(matchId: string): void {
   db().prepare('DELETE FROM saved_ffa_matches WHERE match_id = ?').run(matchId);
 }
 
+/** Purge all bot matches from the DB (empty player_user_ids = bot-only match).
+ *  Returns the number of rows deleted and the match IDs that were purged. */
+export function purgeSavedBotMatches(): { deleted: number; matchIds: string[] } {
+  const conn = db();
+  // Find bot matches: player_user_ids is '[]' (empty JSON array)
+  const rows = conn.prepare(
+    "SELECT match_id, mode FROM saved_ffa_matches WHERE player_user_ids = '[]'"
+  ).all() as Array<{ match_id: string; mode: string }>;
+  const matchIds = rows.map(r => r.match_id);
+  if (matchIds.length > 0) {
+    const result = conn.prepare(
+      "DELETE FROM saved_ffa_matches WHERE player_user_ids = '[]'"
+    ).run();
+    return { deleted: result.changes, matchIds };
+  }
+  return { deleted: 0, matchIds: [] };
+}
+
 // --- Match history ---
 
 export type MatchHistoryResult = 'win' | 'loss' | 'stray_loss' | 'quit';

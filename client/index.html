@@ -116,10 +116,24 @@
     .team-score-blue { color: #3498db; }
     .lobby-ready-btn.hidden { display: none; }
     .lobby-gift-btn { position: absolute; top: 10px; right: 10px; font-size: 24px; background: transparent; border: none; cursor: pointer; padding: 4px; border-radius: 6px; transition: transform 0.15s; }
-    .observer-overlay { position: fixed; top: 24px; left: 50%; transform: translateX(-50%); z-index: 69; background: rgba(35,42,60,0.92); border: 2px solid #ffa502; border-radius: 12px; padding: 14px 24px; text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+    .observer-overlay { position: fixed; top: 60px; left: 50%; transform: translateX(-50%); z-index: 69; background: rgba(35,42,60,0.7); border: 2px solid #ffa502; border-radius: 12px; padding: 10px 18px; text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
     .observer-overlay.hidden { display: none; }
     .observer-banner { font: 700 16px Rubik, sans-serif; color: #ffa502; margin: 0 0 4px 0; }
     .observer-info { font: 400 12px Rubik, sans-serif; color: rgba(255,255,255,0.8); margin: 0 0 4px 0; }
+    .observer-minimize-btn { position: absolute; top: 4px; right: 6px; background: none; border: none; color: rgba(255,255,255,0.6); font-size: 16px; cursor: pointer; padding: 2px 6px; line-height: 1; }
+    .observer-minimize-btn:hover { color: #fff; }
+    .observer-mini-btn {
+      position: absolute; top: 56px; left: 54px; width: 36px; height: 36px;
+      background: rgba(35,42,60,0.85); border: 2px solid #ffa502; border-radius: 8px;
+      font-size: 18px; cursor: pointer; z-index: 50; display: flex; align-items: center;
+      justify-content: center; box-shadow: 0 4px 12px rgba(0,0,0,0.3); padding: 0;
+    }
+    .observer-mini-btn.hidden { display: none; }
+    @media (max-width: 768px) {
+      .observer-overlay { padding: 8px 12px; max-width: 85vw; }
+      .observer-banner { font-size: 14px; }
+      .observer-info { font-size: 10px; }
+    }
     .lobby-gift-btn:hover { transform: scale(1.2); }
     .lobby-gift-btn.hidden { display: none; }
     .lobby-gift-btn.has-gift { animation: pulse-gift 1.5s infinite; }
@@ -683,18 +697,36 @@
     .landing-profile-name { font: 600 16px/1 Rubik, sans-serif; color: #fff; margin-bottom: 8px; }
     .landing-profile-avatar { width: 56px; height: 56px; border-radius: 50%; background: rgba(123,237,159,0.2); border: 2px solid #7bed9f; margin-bottom: 12px; display: flex; align-items: center; justify-content: center; font: 700 24px Rubik, sans-serif; color: #7bed9f; }
     .landing-center .title { font: 700 28px/1 Rubik, sans-serif; color: #7bed9f; margin-bottom: 16px; letter-spacing: 0.05em; }
-    .landing-center .nick-row { margin-bottom: 16px; }
-    .landing-center .nick-row label { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.8); display: block; margin-bottom: 4px; }
-    .landing-center .nick-row .nick-input-wrap { display: flex; gap: 6px; align-items: center; }
-    .landing-center .nick-row input { padding: 8px 12px; border-radius: 8px; border: 2px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.3); color: #fff; font: 600 14px Rubik, sans-serif; width: 160px; transition: border-color 0.2s; touch-action: auto; -webkit-user-select: text; user-select: text; }
-    .landing-center .nick-row input:focus { border-color: #7bed9f; outline: none; }
-    .landing-center .nick-row .nick-save-btn { padding: 8px 12px; background: #7bed9f; color: #1a1a2e; border: none; border-radius: 8px; font: 600 12px Rubik, sans-serif; cursor: pointer; transition: background 0.2s; }
-    .landing-center .nick-row .nick-save-btn:hover { background: #9bffbf; }
-    .landing-center .nick-row .nick-save-btn.saved { background: #5cb85c; }
-    .landing-center .nick-row .nick-hint { font: 400 10px Rubik, sans-serif; color: rgba(255,255,255,0.5); margin-top: 4px; }
-    .landing-center .landing-music-row { margin-bottom: 12px; }
-    .landing-center .landing-music-row label { font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
-    .landing-center .landing-music-row input[type="checkbox"] { margin: 0; }
+    .nick-row { margin-bottom: 12px; }
+    .nick-row label { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.8); display: block; margin-bottom: 4px; }
+    .nick-row .nick-input-wrap { display: flex; gap: 6px; align-items: center; }
+    .nick-row input { padding: 8px 12px; border-radius: 8px; border: 2px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.3); color: #fff; font: 600 14px Rubik, sans-serif; width: 100%; min-width: 0; transition: border-color 0.2s; touch-action: auto; -webkit-user-select: text; user-select: text; }
+    .nick-row input:focus { border-color: #7bed9f; outline: none; }
+    .nick-row .nick-save-btn { padding: 8px 12px; background: #7bed9f; color: #1a1a2e; border: none; border-radius: 8px; font: 600 12px Rubik, sans-serif; cursor: pointer; transition: background 0.2s; white-space: nowrap; }
+    .nick-row .nick-save-btn:hover { background: #9bffbf; }
+    .nick-row .nick-save-btn.saved { background: #5cb85c; }
+    .nick-row .nick-hint { font: 400 10px Rubik, sans-serif; color: rgba(255,255,255,0.5); margin-top: 4px; }
+    .landing-music-row { margin-bottom: 12px; display: flex; align-items: center; gap: 10px; }
+    .landing-music-row label { font: 600 13px Rubik, sans-serif; color: rgba(255,255,255,0.9); white-space: nowrap; }
+    .music-slider { -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border-radius: 3px; background: rgba(255,255,255,0.2); outline: none; cursor: pointer; }
+    .music-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #7bed9f; cursor: pointer; border: none; }
+    .music-slider::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: #7bed9f; cursor: pointer; border: none; }
+    .live-matches-section { margin-top: 16px; text-align: center; }
+    .live-matches-section h3 { font: 700 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 10px; }
+    .live-matches-list { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; scrollbar-width: thin; scrollbar-color: rgba(123,237,159,0.4) transparent; }
+    .live-matches-list::-webkit-scrollbar { width: 6px; }
+    .live-matches-list::-webkit-scrollbar-track { background: transparent; }
+    .live-matches-list::-webkit-scrollbar-thumb { background: rgba(123,237,159,0.4); border-radius: 3px; }
+    .live-matches-empty { font: 400 12px Rubik, sans-serif; color: rgba(255,255,255,0.5); padding: 12px; }
+    .live-match-item { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; transition: border-color 0.2s; }
+    .live-match-item:hover { border-color: rgba(123,237,159,0.4); }
+    .live-match-info { display: flex; align-items: center; gap: 8px; }
+    .live-match-mode { font: 700 11px Rubik, sans-serif; color: #7bed9f; text-transform: uppercase; background: rgba(123,237,159,0.15); padding: 2px 8px; border-radius: 4px; }
+    .live-match-players { font: 400 11px Rubik, sans-serif; color: rgba(255,255,255,0.7); }
+    .live-match-time { font: 400 11px Rubik, sans-serif; color: rgba(255,255,255,0.5); }
+    .live-match-bot-badge { font: 600 9px Rubik, sans-serif; color: #ff9f43; background: rgba(255,159,67,0.15); padding: 1px 6px; border-radius: 3px; }
+    .live-match-watch { padding: 4px 14px; font: 600 11px Rubik, sans-serif; background: rgba(123,237,159,0.2); color: #7bed9f; border: 1px solid rgba(123,237,159,0.4); border-radius: 6px; cursor: pointer; transition: background 0.2s; }
+    .live-match-watch:hover { background: rgba(123,237,159,0.4); }
     .landing-center .play-btn { padding: 14px 48px; font: 700 18px Rubik, sans-serif; background: #7bed9f; color: #1a1a2e; border: none; border-radius: 10px; cursor: pointer; margin: 16px 0; box-shadow: 0 4px 16px rgba(123,237,159,0.4); }
     .landing-center .play-btn:hover { background: #9bffbf; }
     .landing-center .resume-btn { background: transparent; color: #7bed9f; border: 2px solid #7bed9f; margin-bottom: 4px; }
@@ -873,6 +905,18 @@
         <div id="landing-profile-name" class="landing-profile-name">Guest</div>
         <p class="landing-guest-hint" style="font-size:11px;color:rgba(255,255,255,0.7);margin-bottom:12px">Play to earn Rescue Tokens. Boosts apply this match. Sign in to save progress.</p>
         <div id="landing-profile-actions"></div>
+        <div class="nick-row">
+          <label for="landing-nick">Your Nickname (change anytime!)</label>
+          <div class="nick-input-wrap">
+            <input type="text" id="landing-nick" placeholder="Enter nickname..." maxlength="20" autocomplete="off" />
+            <button type="button" id="nick-save-btn" class="nick-save-btn">Save</button>
+          </div>
+          <div id="nick-hint" class="nick-hint"></div>
+        </div>
+        <div class="landing-music-row">
+          <label for="landing-music-slider">Music</label>
+          <input type="range" id="landing-music-slider" min="0" max="100" value="100" class="music-slider" />
+        </div>
         <button type="button" id="friends-panel-btn" class="friends-panel-btn hidden" title="Friends & Foes">Friends</button>
         <div class="landing-shop">
           <!-- Karma Points (shared across games) -->
@@ -949,18 +993,6 @@
         </div>
       </aside>
       <section class="landing-center">
-        <h1 class="title">Adoptar.io</h1>
-        <div class="nick-row">
-          <label for="landing-nick">Your Nickname (change anytime!)</label>
-          <div class="nick-input-wrap">
-            <input type="text" id="landing-nick" placeholder="Enter nickname..." maxlength="20" autocomplete="off" />
-            <button type="button" id="nick-save-btn" class="nick-save-btn">Save</button>
-          </div>
-          <div id="nick-hint" class="nick-hint"></div>
-        </div>
-        <div class="landing-music-row">
-          <label><input type="checkbox" id="landing-music-toggle" checked /> Music</label>
-        </div>
         <div id="active-matches-container" class="hidden">
           <div id="active-matches-list"></div>
         </div>
@@ -988,6 +1020,12 @@
               <input type="checkbox" id="bots-enabled" checked />
               Play with bots
             </label>
+          </div>
+        </div>
+        <div class="live-matches-section">
+          <h3>Live Matches</h3>
+          <div id="live-matches-list" class="live-matches-list">
+            <div class="live-matches-empty">No live matches</div>
           </div>
         </div>
         <div class="howto-section" style="margin-top:20px; text-align:left; max-width:360px;">
@@ -1273,10 +1311,13 @@
       <button type="button" id="lobby-back-btn" class="fight-ally-btn fight-btn" style="margin-top:12px">Back to lobby</button>
     </div>
     <div id="observer-overlay" class="observer-overlay hidden">
+      <button type="button" id="observer-minimize-btn" class="observer-minimize-btn" title="Minimize">&minus;</button>
       <p class="observer-banner">Observing</p>
-      <p class="observer-info">Match is full. Use arrow keys to cycle players.</p>
+      <p class="observer-info">Use arrow keys or swipe to cycle players. Tap a van to follow it.</p>
+      <p class="observer-info" style="font-size:11px; opacity:0.7; margin-top:2px;">&larr; &rarr; / Swipe: cycle vans &nbsp;|&nbsp; Tap van: follow &nbsp;|&nbsp; Minimap: free look</p>
       <button type="button" id="observer-back-btn" class="fight-ally-btn fight-btn" style="margin-top:8px">Back to lobby</button>
     </div>
+    <button type="button" id="observer-mini-btn" class="observer-mini-btn hidden" title="Show observer panel">&#128065;</button>
     <div id="fight-ally-overlay" class="fight-ally-overlay hidden">
       <p class="fight-ally-title">Shelters touching</p>
       <p id="fight-ally-name" class="fight-ally-name"></p>

@@ -12,7 +12,7 @@ import { decodeInput, encodeSnapshot, MSG_INPUT } from 'shared';
 import { registerServer, appendReplay, getNextGuestName } from './registry.js';
 import { withdrawForMatch, withdrawForMatchSelective, depositAfterMatch, getInventory, type Inventory, type ItemSelection } from './inventory.js';
 import { recordMatchWin, recordMatchLoss, updateReputationOnQuit, ensureGuestUser } from './leaderboard.js';
-import { saveSavedMatch, getSavedMatch, deleteSavedMatch, insertMatchHistory, incrementGameCount, saveFfaMatch, getAllSavedFfaMatches, deleteSavedFfaMatch, getFriendsOf } from './referrals.js';
+import { saveSavedMatch, getSavedMatch, deleteSavedMatch, insertMatchHistory, incrementGameCount, saveFfaMatch, getAllSavedFfaMatches, deleteSavedFfaMatch, purgeSavedBotMatches, getFriendsOf } from './referrals.js';
 import { awardKarmaPoints } from './karmaService.js';
 
 /** Timestamped log function for server output */
@@ -93,6 +93,8 @@ interface Match {
   observers: Map<string, WebSocket>;
   /** Team assignments for Teams mode: playerId -> 'red' | 'blue' */
   playerTeams?: Map<string, 'red' | 'blue'>;
+  /** True for always-running bot-only matches (spectatable, never pause) */
+  isBotMatch?: boolean;
 }
 
 const wss = new WebSocketServer({ port: GAME_WS_PORT });
@@ -103,9 +105,21 @@ const matches = new Map<string, Match>();
 /** Restore saved FFA/Teams matches from database on server startup */
 function restoreSavedFfaMatches(): void {
   try {
+    // ── STEP 1: Purge all bot matches from DB before restoring anything ──
+    log('=== STARTUP: Purging saved bot matches from DB ===');
+    const purgeResult = purgeSavedBotMatches();
+    if (purgeResult.deleted > 0) {
+      log(`PURGED ${purgeResult.deleted} bot match(es) from DB: ${purgeResult.matchIds.join(', ')}`);
+    } else {
+      log('No bot matches found in DB to purge');
+    }
+
+    // ── STEP 2: Restore human player matches ──
     const savedMatches = getAllSavedFfaMatches();
+    log(`Found ${savedMatches.length} saved match(es) to restore`);
     for (const saved of savedMatches) {
       try {
+        log(`Restoring match ${saved.match_id} (mode=${saved.mode}, player_user_ids=${saved.player_user_ids})`);
         const world = World.deserialize(saved.world_state);
         // Skip matches that have already ended
         if (world.isMatchOver() || world.isStrayLoss()) {
@@ -120,6 +134,17 @@ function restoreSavedFfaMatches(): void {
         
         const playerUserIds: Array<{ playerId: string; userId: string }> = JSON.parse(saved.player_user_ids);
         
+        // Detect bot matches: no human playerUserIds means it was a bot-only match
+        const isBotMatch = playerUserIds.length === 0;
+        
+        // Don't restore bot matches — delete them from DB and let ensureBotMatches()
+        // create fresh ones. This avoids accumulating zombie bot matches across restarts.
+        if (isBotMatch) {
+          deleteSavedFfaMatch(saved.match_id);
+          log(`Deleted stale bot match ${saved.match_id} from DB (will create fresh)`);
+          continue;
+        }
+        
         const match: Match = {
           id: saved.match_id,
           world,
@@ -130,13 +155,15 @@ function restoreSavedFfaMatches(): void {
           cpuIds: new Set(),
           readySet: new Set(),
           soloUserId: undefined,
-          frozen: true,
+          frozen: true, // Keep frozen until a human player rejoins
           playerUserIds: new Map(),
           fightAllyChoices: new Map(),
           allyRequests: new Map(),
           lastReplayTick: 0,
           playerStartingInventory: new Map(),
           observers: new Map(),
+          botsEnabled: true,
+          playerTeams: saved.mode === 'teams' ? new Map() : undefined,
         };
         
         // Restore player-userId mappings and set all players as disconnected
@@ -149,11 +176,15 @@ function restoreSavedFfaMatches(): void {
           world.setPlayerDisconnected(playerId, true);
         }
         
-        // Identify CPU players
+        // Identify CPU players and restore team assignments
         const snapshot = world.getSnapshot();
         for (const p of snapshot.players) {
           if (p.id.startsWith('cpu-')) {
             match.cpuIds.add(p.id);
+            // Restore team assignment from snapshot if available
+            if (match.playerTeams && p.team) {
+              match.playerTeams.set(p.id, p.team);
+            }
           }
         }
         
@@ -329,6 +360,44 @@ export function getRealtimeStats(): {
   return { onlinePlayers, ffaWaiting, playingSolo, playingFfa, playingTeams };
 }
 
+/** Get all live (non-solo, playing) matches for spectator listing */
+export function getLiveMatches(): Array<{
+  matchId: string;
+  mode: string;
+  playerCount: number;
+  botCount: number;
+  spectatorCount: number;
+  durationMs: number;
+  isBotMatch: boolean;
+}> {
+  const result: Array<{
+    matchId: string;
+    mode: string;
+    playerCount: number;
+    botCount: number;
+    spectatorCount: number;
+    durationMs: number;
+    isBotMatch: boolean;
+  }> = [];
+  for (const match of matches.values()) {
+    if (match.mode === 'solo') continue;
+    if (match.phase !== 'playing') continue;
+    if (match.frozen) continue; // Skip frozen/paused matches (no active players)
+    if (match.world.isMatchOver() || match.world.isStrayLoss()) continue;
+    const humanCount = [...match.players.keys()].filter(id => !id.startsWith('cpu-')).length;
+    result.push({
+      matchId: match.id,
+      mode: match.mode,
+      playerCount: humanCount,
+      botCount: match.cpuIds.size,
+      spectatorCount: match.observers.size,
+      durationMs: match.world.getMatchDurationMs(),
+      isBotMatch: !!match.isBotMatch,
+    });
+  }
+  return result;
+}
+
 /** Graceful shutdown: save solo matches, deposit FFA/Teams RT, notify players, close connections */
 export async function gracefulShutdown(): Promise<void> {
   log('Graceful shutdown initiated...');
@@ -388,9 +457,16 @@ export async function gracefulShutdown(): Promise<void> {
     }
   }
 
-  // 5. Close all WebSocket connections
+  // 5. Close all WebSocket connections (players and spectators)
   for (const match of matches.values()) {
     for (const ws of match.players.values()) {
+      try {
+        ws.close(1001, 'Server shutting down');
+      } catch {
+        // ignore
+      }
+    }
+    for (const ws of match.observers.values()) {
       try {
         ws.close(1001, 'Server shutting down');
       } catch {
@@ -466,6 +542,8 @@ function destroyMatch(matchId: string): void {
   matches.delete(matchId);
   if (ffaLobbyMatchId === matchId) ffaLobbyMatchId = null;
   if (teamsLobbyMatchId === matchId) teamsLobbyMatchId = null;
+  if (ffaBotMatchId === matchId) ffaBotMatchId = null;
+  if (teamsBotMatchId === matchId) teamsBotMatchId = null;
   log(`match destroyed id=${matchId}`);
 }
 
@@ -543,6 +621,183 @@ function ensureCpusForMatch(match: Match): void {
     }
   }
 }
+
+// ============================================================================
+// ALWAYS-RUNNING BOT MATCHES
+// ============================================================================
+
+let ffaBotMatchId: string | null = null;
+let teamsBotMatchId: string | null = null;
+let lastBotMatchCreateTime = 0; // Cooldown: ms timestamp of last bot match creation
+const BOT_MATCH_CREATE_COOLDOWN_MS = 10000; // 10s cooldown between creating bot matches
+
+/** Create a bot-only match (no lobby phase, starts immediately). */
+function createBotMatch(mode: 'ffa' | 'teams'): Match {
+  const world = new World();
+  world.setMatchMode(mode);
+  const match: Match = {
+    id: generateMatchId(),
+    world,
+    phase: 'playing', // Skip lobby/countdown
+    mode,
+    countdownEndAt: 0,
+    players: new Map(),
+    cpuIds: new Set(),
+    readySet: new Set(),
+    fightAllyChoices: new Map(),
+    allyRequests: new Map(),
+    lastReplayTick: 0,
+    playerUserIds: new Map(),
+    playerStartingInventory: new Map(),
+    observers: new Map(),
+    playerTeams: mode === 'teams' ? new Map() : undefined,
+    botsEnabled: true,
+    isBotMatch: true,
+  };
+
+  if (mode === 'ffa') {
+    // FFA bot match: 2-6 random vans
+    const botCount = 2 + Math.floor(Math.random() * 5); // 2..6
+    for (let i = 1; i <= botCount; i++) {
+      const cid = `cpu-${i}`;
+      match.world.addPlayer(cid, pickBotName(match));
+      match.cpuIds.add(cid);
+    }
+  } else {
+    // Teams bot match: 4-8 random vans, split evenly between red/blue
+    const botCount = 4 + Math.floor(Math.random() * 5); // 4..8
+    const perTeam = Math.ceil(botCount / 2);
+    for (let i = 1; i <= perTeam; i++) {
+      addBotToTeam(match, 'red');
+    }
+    for (let i = 1; i <= botCount - perTeam; i++) {
+      // Need unique IDs so offset the index
+      const cid = `cpu-${match.cpuIds.size + 1}`;
+      if (!match.cpuIds.has(cid)) {
+        match.world.addPlayer(cid, pickBotName(match));
+        match.cpuIds.add(cid);
+        if (match.playerTeams) {
+          match.playerTeams.set(cid, 'blue');
+          match.world.setPlayerTeam(cid, 'blue');
+        }
+      }
+    }
+    // Form team alliances
+    match.world.formTeamAlliances();
+  }
+
+  // Start the match immediately
+  match.world.startMatch();
+  matches.set(match.id, match);
+  lastBotMatchCreateTime = Date.now();
+  log(`Bot match created id=${match.id} mode=${mode} bots=${match.cpuIds.size}`);
+  return match;
+}
+
+/** Count non-solo, non-bot matches with at least 1 human player in playing phase. */
+function countLivePlayerMatches(): { count: number; modes: ('ffa' | 'teams')[] } {
+  let count = 0;
+  const modes: ('ffa' | 'teams')[] = [];
+  for (const match of matches.values()) {
+    if (match.mode === 'solo') continue;
+    if (match.isBotMatch) continue;
+    if (match.phase !== 'playing') continue;
+    // Count human players (connected, not just in playerUserIds)
+    const humanCount = [...match.players.keys()].filter(id => !id.startsWith('cpu-')).length;
+    if (humanCount > 0) {
+      count++;
+      modes.push(match.mode as 'ffa' | 'teams');
+    }
+  }
+  return { count, modes };
+}
+
+/** Clean up any untracked (zombie) bot matches. Only keep the ones tracked by ffaBotMatchId/teamsBotMatchId. */
+function cleanupZombieBotMatches(): void {
+  const toDestroy: string[] = [];
+  for (const [matchId, match] of matches) {
+    if (!match.isBotMatch) continue;
+    if (matchId === ffaBotMatchId || matchId === teamsBotMatchId) continue;
+    toDestroy.push(matchId);
+  }
+  for (const matchId of toDestroy) {
+    log(`Cleaning up zombie bot match ${matchId} (mode=${matches.get(matchId)?.mode})`);
+    destroyMatch(matchId);
+  }
+}
+
+/** Ensure always-running bot matches exist according to rules. */
+function ensureBotMatches(): void {
+  // First, clean up any zombie bot matches not tracked by our IDs
+  const zombieBefore = [...matches.values()].filter(m => m.isBotMatch).length;
+  cleanupZombieBotMatches();
+  const zombieAfter = [...matches.values()].filter(m => m.isBotMatch).length;
+  if (zombieBefore !== zombieAfter) {
+    log(`cleanupZombieBotMatches: removed ${zombieBefore - zombieAfter} zombie(s). Tracked: ffa=${ffaBotMatchId}, teams=${teamsBotMatchId}`);
+  }
+
+  const { count: livePlayerMatchCount } = countLivePlayerMatches();
+
+  // Clean up ended bot matches
+  if (ffaBotMatchId) {
+    const m = matches.get(ffaBotMatchId);
+    if (!m || m.world.isMatchOver() || m.world.isStrayLoss()) {
+      if (m) destroyMatch(ffaBotMatchId);
+      ffaBotMatchId = null;
+    }
+  }
+  if (teamsBotMatchId) {
+    const m = matches.get(teamsBotMatchId);
+    if (!m || m.world.isMatchOver() || m.world.isStrayLoss()) {
+      if (m) destroyMatch(teamsBotMatchId);
+      teamsBotMatchId = null;
+    }
+  }
+
+  if (livePlayerMatchCount >= 2) {
+    // Too many player matches; no need for bot matches (let existing ones finish)
+    return;
+  }
+
+  // Cooldown: don't create a new bot match too soon after the last one
+  const now = Date.now();
+  if (now - lastBotMatchCreateTime < BOT_MATCH_CREATE_COOLDOWN_MS) {
+    return;
+  }
+
+  // Create at most ONE bot match per cycle (stagger creation)
+  if (!ffaBotMatchId) {
+    const m = createBotMatch('ffa');
+    ffaBotMatchId = m.id;
+    return; // Only create one per cycle — Teams will be created on next cycle
+  }
+  if (!teamsBotMatchId) {
+    const m = createBotMatch('teams');
+    teamsBotMatchId = m.id;
+    return;
+  }
+}
+
+// Run ensureBotMatches every 5 seconds
+setInterval(() => {
+  try {
+    ensureBotMatches();
+  } catch (e) {
+    log(`ensureBotMatches error: ${e}`);
+  }
+}, 5000);
+
+// Run once on startup (after a short delay to let restoreSavedFfaMatches finish)
+setTimeout(() => {
+  try {
+    log('=== STARTUP: Running initial ensureBotMatches ===');
+    log(`  In-memory matches: ${matches.size} total, bot: ${[...matches.values()].filter(m => m.isBotMatch).length}, tracked ffa=${ffaBotMatchId}, teams=${teamsBotMatchId}`);
+    ensureBotMatches();
+    log(`  After ensureBotMatches: matches=${matches.size}, ffa=${ffaBotMatchId}, teams=${teamsBotMatchId}`);
+  } catch (e) {
+    log(`Initial ensureBotMatches error: ${e}`);
+  }
+}, 2000);
 
 function getMatchState(match: Match): { 
   type: string; 
@@ -911,6 +1166,33 @@ wss.on('connection', async (ws) => {
             const tick = match ? match.world.getSnapshot().tick : 0;
             ws.send(JSON.stringify({ type: 'pong', ts: msg.ts, serverTick: tick }));
           }
+          return;
+        }
+        
+        // Spectate: join an ongoing match as observer (no player entity)
+        if (msg.type === 'spectate' && typeof msg.matchId === 'string') {
+          clearTimeout(timeout);
+          const spectateMatchId = msg.matchId as string;
+          const match = matches.get(spectateMatchId);
+          if (!match || match.phase !== 'playing' || match.mode === 'solo') {
+            ws.send(JSON.stringify({ type: 'error', message: 'Match not found or not available for spectating.' }));
+            ws.close();
+            return;
+          }
+          if (match.world.isMatchOver() || match.world.isStrayLoss()) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Match has already ended.' }));
+            ws.close();
+            return;
+          }
+          // Add as observer (unlimited spectators)
+          const obsId = `obs-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          match.observers.set(obsId, ws);
+          currentMatchId = match.id;
+          ws.send(JSON.stringify({ type: 'observing', matchId: match.id, mode: match.mode }));
+          log(`Spectator ${obsId} joined match ${match.id} (${match.mode})`);
+          
+          // Send player map so spectator can see display names
+          broadcastPlayerMap(match);
           return;
         }
         
@@ -1701,6 +1983,7 @@ wss.on('connection', async (ws) => {
 
         // Easter egg: Force enter boss mode (Ctrl+Shift+B)
         if (msg.type === 'easterEggBossMode') {
+          if (!match.players.has(effectivePlayerId)) return; // Spectators can't trigger easter eggs
           if (!EASTER_EGGS_ENABLED) {
             ws.send(JSON.stringify({ type: 'easterEggBossModeResult', success: false, reason: 'easter eggs disabled' }));
             return;
@@ -1713,6 +1996,7 @@ wss.on('connection', async (ws) => {
         }
         // Legacy support for old message name
         if (msg.type === 'debugBossMode') {
+          if (!match.players.has(effectivePlayerId)) return; // Spectators can't trigger easter eggs
           if (!EASTER_EGGS_ENABLED) {
             ws.send(JSON.stringify({ type: 'debugBossModeResult', success: false, reason: 'easter eggs disabled' }));
             return;
@@ -1810,8 +2094,11 @@ setInterval(() => {
         }
       } else if (match.phase === 'playing') {
         // FFA/Teams: check if all human players are disconnected - pause if so
-        // Only pause if there are NO bots; bots keep the match running on their own
+        // Bot matches never pause. Matches with bots also keep running.
         if (match.mode === 'ffa' || match.mode === 'teams') {
+          if (match.isBotMatch) {
+            // Bot matches never freeze — skip all pause/resume logic
+          } else {
           const humanPlayerIds = [...match.playerUserIds.keys()].filter(id => !id.startsWith('cpu-'));
           const allDisconnected = humanPlayerIds.length > 0 && humanPlayerIds.every(id => !match.players.has(id));
           const hasBots = match.cpuIds.size > 0;
@@ -1843,6 +2130,7 @@ setInterval(() => {
             }
             continue;
           }
+          } // end else (non-bot-match freeze logic)
         }
         
         // Solo frozen match: do not tick until resumed
@@ -2040,8 +2328,8 @@ setInterval(() => {
           }
         }
         
-        // Promote first observer if a player slot opened up
-        if (match.observers.size > 0 && getMatchTotalPlayers(match) < MAX_FFA_PLAYERS) {
+        // Promote first observer if a player slot opened up (not for bot matches)
+        if (!match.isBotMatch && match.observers.size > 0 && getMatchTotalPlayers(match) < MAX_FFA_PLAYERS) {
           const [obsId, obsWs] = match.observers.entries().next().value as [string, WebSocket];
           if (obsWs.readyState === 1) {
             match.observers.delete(obsId);

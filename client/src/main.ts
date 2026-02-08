@@ -118,6 +118,8 @@ import {
   playAdoptionSounds,
   getMusicEnabled,
   setMusicEnabled,
+  getMusicVolume,
+  setMusicVolume,
   getSfxEnabled,
   setSfxEnabled,
   getShelterAdoptSfxEnabled,
@@ -323,7 +325,7 @@ const landingPlayBtn = document.getElementById('landing-play')!;
 const landingNickInput = document.getElementById('landing-nick') as HTMLInputElement;
 const nickSaveBtn = document.getElementById('nick-save-btn') as HTMLButtonElement;
 const nickHintEl = document.getElementById('nick-hint') as HTMLElement;
-const landingMusicToggleEl = document.getElementById('landing-music-toggle') as HTMLInputElement | null;
+const landingMusicSliderEl = document.getElementById('landing-music-slider') as HTMLInputElement | null;
 const landingProfileName = document.getElementById('landing-profile-name')!;
 const landingProfileAvatar = document.getElementById('landing-profile-avatar')!;
 const landingProfileActions = document.getElementById('landing-profile-actions')!;
@@ -381,6 +383,9 @@ const teamScoreRedEl = document.getElementById('team-score-red')!;
 const teamScoreBlueEl = document.getElementById('team-score-blue')!;
 const observerOverlayEl = document.getElementById('observer-overlay')!;
 const observerBackBtnEl = document.getElementById('observer-back-btn')!;
+const observerMinimizeBtnEl = document.getElementById('observer-minimize-btn')!;
+const observerMiniBtnEl = document.getElementById('observer-mini-btn')!;
+let observerOverlayMinimized = false;
 
 // Breeder Mini-Game Elements
 const breederMinigameEl = document.getElementById('breeder-minigame')!;
@@ -1090,6 +1095,7 @@ function startMatchClockUpdates(): void {
   if (matchClockInterval) return;
   matchClockInterval = window.setInterval(() => {
     updateMatchListDisplay();
+    updateLiveMatchesDisplay();
   }, 1000);
 }
 
@@ -1114,6 +1120,111 @@ function stopMatchPolling(): void {
   if (matchPollInterval) {
     clearInterval(matchPollInterval);
     matchPollInterval = null;
+  }
+}
+
+// ============================================================================
+// LIVE MATCHES (Spectator mode - fetch & display)
+// ============================================================================
+
+interface LiveMatch {
+  matchId: string;
+  mode: string;
+  playerCount: number;
+  botCount: number;
+  spectatorCount: number;
+  durationMs: number;
+  isBotMatch: boolean;
+  fetchedAt: number;
+}
+
+let liveMatches: LiveMatch[] = [];
+let liveMatchPollInterval: number | null = null;
+
+async function fetchLiveMatches(): Promise<void> {
+  try {
+    const res = await fetch('/api/live-matches');
+    const data = await res.json();
+    if (data.matches && Array.isArray(data.matches)) {
+      const now = Date.now();
+      liveMatches = data.matches.map((m: Omit<LiveMatch, 'fetchedAt'>) => ({
+        ...m,
+        fetchedAt: now,
+      }));
+    } else {
+      liveMatches = [];
+    }
+  } catch {
+    // ignore fetch errors
+  }
+  updateLiveMatchesDisplay();
+}
+
+function updateLiveMatchesDisplay(): void {
+  const list = document.getElementById('live-matches-list');
+  if (!list) return;
+
+  if (liveMatches.length === 0) {
+    list.innerHTML = '<div class="live-matches-empty">No live matches</div>';
+    return;
+  }
+
+  const now = Date.now();
+  const html = liveMatches.map(m => {
+    let currentDurationMs = m.durationMs;
+    if (m.fetchedAt) {
+      currentDurationMs += now - m.fetchedAt;
+    }
+    const timeStr = formatMatchDuration(currentDurationMs);
+    const modeLabel = m.mode.toUpperCase();
+    const playerInfo = m.playerCount > 0
+      ? `${m.playerCount} player${m.playerCount > 1 ? 's' : ''}`
+      : '';
+    const botInfo = m.botCount > 0
+      ? `${m.botCount} bot${m.botCount > 1 ? 's' : ''}`
+      : '';
+    const sep = playerInfo && botInfo ? ', ' : '';
+    const countText = `${playerInfo}${sep}${botInfo}`;
+    const spectatorText = m.spectatorCount > 0 ? ` | ${m.spectatorCount} watching` : '';
+    const botBadge = m.isBotMatch ? '<span class="live-match-bot-badge">BOT</span> ' : '';
+
+    return `<div class="live-match-item" data-match-id="${m.matchId}">
+      <div class="live-match-info">
+        <span class="live-match-mode">${modeLabel}</span>
+        ${botBadge}
+        <span class="live-match-players">${countText}${spectatorText}</span>
+      </div>
+      <span class="live-match-time">${timeStr}</span>
+      <button type="button" class="live-match-watch" data-match-id="${m.matchId}">Watch</button>
+    </div>`;
+  }).join('');
+
+  list.innerHTML = html;
+
+  // Add click handlers for Watch buttons
+  list.querySelectorAll('.live-match-watch').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const matchId = (btn as HTMLElement).dataset.matchId;
+      if (matchId) {
+        startSpectate(matchId);
+      }
+    });
+  });
+}
+
+function startLiveMatchPolling(): void {
+  if (liveMatchPollInterval) return;
+  fetchLiveMatches();
+  liveMatchPollInterval = window.setInterval(() => {
+    fetchLiveMatches();
+  }, 10000);
+}
+
+function stopLiveMatchPolling(): void {
+  if (liveMatchPollInterval) {
+    clearInterval(liveMatchPollInterval);
+    liveMatchPollInterval = null;
   }
 }
 
@@ -1807,9 +1918,10 @@ async function fetchAndRenderAuth(): Promise<void> {
   await fetchSavedMatchStatus();
   await fetchActiveMatchesInfo();
   
-  // Start real-time clock updates and polling for active matches
+  // Start real-time clock updates and polling for active matches + live matches
   startMatchClockUpdates();
   startMatchPolling();
+  startLiveMatchPolling();
   
   // Check for new registration (from OAuth redirect)
   const urlParams = new URLSearchParams(window.location.search);
@@ -2025,8 +2137,10 @@ function onKeyDown(e: KeyboardEvent): void {
   if (isObserver) {
     if (e.code === 'ArrowRight' || e.code === 'KeyD') {
       observerFollowIndex++;
+      observerFreeLook = false; // Return to following a van
     } else if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
       observerFollowIndex = Math.max(0, observerFollowIndex - 1);
+      observerFreeLook = false; // Return to following a van
     }
     e.preventDefault();
     return;
@@ -2145,6 +2259,34 @@ function sendInputImmediately(): void {
 canvas.addEventListener('touchend', (e) => {
   e.preventDefault();
   if (e.touches.length === 0) {
+    // Spectator mode: swipe left/right to cycle players, tap to select a van
+    if (isObserver) {
+      const dx = joystickCurrentX - joystickOriginX;
+      const dy = joystickCurrentY - joystickOriginY;
+      const dist = Math.hypot(dx, dy);
+      if (dist >= JOYSTICK_DEADZONE) {
+        // Swipe gesture: cycle players if horizontal swipe
+        const nx = dx / dist;
+        if (nx > 0.5) {
+          observerFollowIndex++;
+          observerFreeLook = false;
+        } else if (nx < -0.5) {
+          observerFollowIndex = Math.max(0, observerFollowIndex - 1);
+          observerFreeLook = false;
+        }
+      } else if (e.changedTouches.length === 1) {
+        // Tap (no significant drag): check if tapped on a van
+        const touch = e.changedTouches[0];
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        const screenX = (touch.clientX - rect.left) * scaleX;
+        const screenY = (touch.clientY - rect.top) * scaleY;
+        handleObserverTapOnVan(screenX, screenY);
+      }
+      joystickActive = false;
+      return;
+    }
     joystickActive = false;
     // Immediately clear input flags and send to server
     setInputFlag(INPUT_LEFT, false);
@@ -2199,6 +2341,26 @@ canvas.addEventListener('contextmenu', (e) => {
   e.preventDefault();
 });
 
+// --- Spectator: tap/click on a van to follow that player ---
+function handleObserverTapOnVan(screenX: number, screenY: number): void {
+  if (!isObserver || !latestSnapshot) return;
+  const cam = getCamera();
+  const worldX = screenX + cam.x;
+  const worldY = screenY + cam.y;
+  const VAN_TAP_RADIUS = 70; // generous tap target around the 50-unit van
+  const alivePlayers = latestSnapshot.players.filter(p => !p.eliminated);
+  for (let i = 0; i < alivePlayers.length; i++) {
+    const pl = alivePlayers[i];
+    const dx = worldX - pl.x;
+    const dy = worldY - pl.y;
+    if (dx * dx + dy * dy <= VAN_TAP_RADIUS * VAN_TAP_RADIUS) {
+      observerFollowIndex = i;
+      observerFreeLook = false;
+      return;
+    }
+  }
+}
+
 // --- Click/Tap on other shelters to send ally request (disabled in Teams mode) ---
 function handleAllyRequestAtPosition(screenX: number, screenY: number): void {
   if (selectedMode === 'teams') return; // Teams mode: alliances are automatic
@@ -2223,12 +2385,19 @@ function handleAllyRequestAtPosition(screenX: number, screenY: number): void {
 }
 
 canvas.addEventListener('click', (e) => {
-  if (!latestSnapshot || !myPlayerId || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
   const scaleY = canvas.height / rect.height;
   const screenX = (e.clientX - rect.left) * scaleX;
   const screenY = (e.clientY - rect.top) * scaleY;
+
+  // Spectator mode: click on a van to follow that player
+  if (isObserver) {
+    handleObserverTapOnVan(screenX, screenY);
+    return;
+  }
+
+  if (!latestSnapshot || !myPlayerId || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
   
   // Convert screen to world coordinates for boss mill check
   const cam = getCamera();
@@ -2270,6 +2439,15 @@ function panCameraToMinimapPos(clientX: number, clientY: number): void {
   const scale = MAP_WIDTH / 120; // minimap is 120px, map is MAP_WIDTH
   const worldX = clickX * scale;
   const worldY = clickY * scale;
+
+  if (isObserver) {
+    // Spectator mode: directly set observer camera to clicked position
+    observerCameraX = worldX;
+    observerCameraY = worldY;
+    observerFreeLook = true;
+    return;
+  }
+
   // Set camera offset to center view on clicked world position
   const playerX = predictedPlayer?.x ?? MAP_WIDTH / 2;
   const playerY = predictedPlayer?.y ?? MAP_HEIGHT / 2;
@@ -2332,6 +2510,7 @@ const PAN_THRESHOLD_PX = 10;
 let observerCameraX = MAP_WIDTH / 2;
 let observerCameraY = MAP_HEIGHT / 2;
 const OBSERVER_PAN_SPEED = 15; // pixels per frame
+let observerFreeLook = false; // true when spectator clicked minimap to free-roam
 let isPanning = false;
 let panStartClientX = 0;
 let panStartClientY = 0;
@@ -2352,13 +2531,15 @@ function getCamera(): { x: number; y: number; w: number; h: number } {
   const isEliminated = me?.eliminated === true;
   
   if (isObserver) {
-    // Full spectator mode: follow a player by index
-    const players = latestSnapshot?.players.filter(p => !p.eliminated) ?? [];
-    if (players.length > 0) {
-      const idx = observerFollowIndex % players.length;
-      const target = players[idx];
-      observerCameraX = target.x;
-      observerCameraY = target.y;
+    if (!observerFreeLook) {
+      // Full spectator mode: follow a player by index
+      const players = latestSnapshot?.players.filter(p => !p.eliminated) ?? [];
+      if (players.length > 0) {
+        const idx = observerFollowIndex % players.length;
+        const target = players[idx];
+        observerCameraX = target.x;
+        observerCameraY = target.y;
+      }
     }
     const camX = Math.max(0, Math.min(MAP_WIDTH - w, observerCameraX - w / 2));
     const camY = Math.max(0, Math.min(MAP_HEIGHT - h, observerCameraY - h / 2));
@@ -2510,6 +2691,7 @@ function attemptAutoReconnect(): void {
     updateResumeMatchUI();
     startMatchClockUpdates();
     startMatchPolling();
+    startLiveMatchPolling();
     fetchActiveMatchesInfo();
     connectLobbyLeaderboard();
     startServerClockWhenOnLobby();
@@ -2754,7 +2936,9 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
             currentMatchId = msg.matchId;
           }
           isObserver = false;
+          observerOverlayMinimized = false;
           observerOverlayEl.classList.add('hidden');
+          observerMiniBtnEl.classList.add('hidden');
           playWelcome();
         }
         if (msg.type === 'observing') {
@@ -2762,14 +2946,18 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           myPlayerId = null; // observer has no player entity
           observerFollowIndex = 0;
           currentMatchId = msg.matchId ?? null;
+          observerOverlayMinimized = false;
           observerOverlayEl.classList.remove('hidden');
+          observerMiniBtnEl.classList.add('hidden');
           lobbyOverlayEl.classList.add('hidden');
         }
         if (msg.type === 'promoted') {
           // Observer promoted to player
           isObserver = false;
+          observerOverlayMinimized = false;
           myPlayerId = msg.playerId;
           observerOverlayEl.classList.add('hidden');
+          observerMiniBtnEl.classList.add('hidden');
           showToast('A slot opened! You are now playing.', 'success');
         }
         if (msg.type === 'savedMatchExpired') {
@@ -2846,6 +3034,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           fetchActiveMatchesInfo(); // Refresh match list from server
           startMatchClockUpdates();
           startMatchPolling();
+          startLiveMatchPolling();
           connectionOverlayEl?.classList.add('hidden');
           startServerClockWhenOnLobby();
           connectLobbyLeaderboard();
@@ -3282,7 +3471,9 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     sentAllyRequests.clear();
     iAmReady = false;
     isObserver = false;
+    observerOverlayMinimized = false;
     observerOverlayEl.classList.add('hidden');
+    observerMiniBtnEl.classList.add('hidden');
     wasBossModeActive = false;
     releaseWakeLock();
     
@@ -6218,8 +6409,8 @@ function render(dt: number): void {
       minimapCtx.fillStyle = 'rgba(123, 237, 159, 0.6)';
       minimapCtx.fillRect(z.x * scale - r, z.y * scale - r, r * 2, r * 2);
     }
-    // Only draw stray pets if hideStraysOnMinimap is false
-    if (!hideStraysOnMinimap) {
+    // Only draw stray pets if hideStraysOnMinimap is false and not spectating
+    if (!hideStraysOnMinimap && !isObserver) {
       minimapCtx.fillStyle = '#c9a86c';
       // When many pets, draw every Nth to keep minimap responsive
       const petCount = latestSnapshot.pets.length;
@@ -6691,19 +6882,33 @@ function render(dt: number): void {
 
   // UI
   const me = latestSnapshot?.players.find((p) => p.id === myPlayerId) ?? predictedPlayer;
-  const rawCapacity = me ? Math.floor(me.size) : 0;
+  // When observing, resolve the followed player for HUD display
+  const observedPlayer = isObserver && !observerFreeLook
+    ? (() => {
+        const alivePlayers = latestSnapshot?.players.filter(p => !p.eliminated) ?? [];
+        return alivePlayers.length > 0 ? alivePlayers[observerFollowIndex % alivePlayers.length] : null;
+      })()
+    : null;
+  const hudPlayer = observedPlayer ?? me;
+  const rawCapacity = hudPlayer ? Math.floor(hudPlayer.size) : 0;
   // Vans always capped at VAN_MAX_CAPACITY (shelter capacity shown on shelter building)
   const capacity = Math.min(rawCapacity, VAN_MAX_CAPACITY);
-  const inside = me?.petsInside.length ?? 0;
+  const inside = hudPlayer?.petsInside.length ?? 0;
   // Use server-provided total (pets array may be capped for performance)
   const strayCount = latestSnapshot?.totalOutdoorStrays ?? 0;
-  scoreEl.textContent = me?.eliminated ? 'Observer Mode' : `Size: ${rawCapacity}`;
-  carriedEl.textContent = me?.eliminated ? 'WASD to pan | Drag to move' : `Pets: ${inside}/${capacity}`;
+  if (isObserver && observedPlayer) {
+    const obsName = observedPlayer.displayName ?? observedPlayer.id;
+    scoreEl.textContent = `${obsName} - Size: ${rawCapacity}`;
+    carriedEl.textContent = `Pets: ${inside}/${capacity}`;
+  } else {
+    scoreEl.textContent = me?.eliminated ? 'Observer Mode' : `Size: ${rawCapacity}`;
+    carriedEl.textContent = me?.eliminated ? 'WASD to pan | Drag to move' : `Pets: ${inside}/${capacity}`;
+  }
   
   // Show/hide build shelter button - requires size >= 50 and tokens >= 250
   const hasShelter = !!(me?.shelterId);
   const isEliminated = !!(me?.eliminated);
-  const playerTokens = me?.money ?? 0;
+  const playerTokens = (isObserver ? hudPlayer?.money : me?.money) ?? 0;
   const canBuildShelter = me && me.size >= 50 && !hasShelter && !isEliminated && matchPhase === 'playing';
   
   // Update tokens display
@@ -6831,8 +7036,9 @@ function render(dt: number): void {
   
   const nowTick = latestSnapshot?.tick ?? 0;
   const tickRate = TICK_RATE;
-  const speedBoostRemain = me && (me.speedBoostUntil ?? 0) > nowTick ? ((me.speedBoostUntil! - nowTick) / tickRate).toFixed(1) : '';
-  if (tagCooldownEl) tagCooldownEl.textContent = me ? `Adoptions: ${me.totalAdoptions}  •  Strays: ${strayCount}${speedBoostRemain ? `  •  Speed: ${speedBoostRemain}s` : ''}` : '';
+  const tagPlayer = isObserver ? hudPlayer : me;
+  const speedBoostRemain = tagPlayer && (tagPlayer.speedBoostUntil ?? 0) > nowTick ? ((tagPlayer.speedBoostUntil! - nowTick) / tickRate).toFixed(1) : '';
+  if (tagCooldownEl) tagCooldownEl.textContent = tagPlayer ? `Adoptions: ${tagPlayer.totalAdoptions}  •  Strays: ${strayCount}${speedBoostRemain ? `  •  Speed: ${speedBoostRemain}s` : ''}` : '';
   const matchEndAt = latestSnapshot?.matchEndAt ?? 0;
   const remainingTicks = Math.max(0, matchEndAt - nowTick);
   const remainingSec = remainingTicks / tickRate;
@@ -6847,9 +7053,10 @@ function render(dt: number): void {
   const leaderArea = Math.PI * leaderRadius * leaderRadius;
   const leaderPercent = mapArea > 0 ? Math.min(100, Math.floor((leaderArea / mapArea) * 100)) : 0;
   const leaderPlayer = latestSnapshot?.players.find(p => p.shelterId === leaderShelter?.id);
-  const points = me?.totalAdoptions ?? 0;
-  const myShelterForStatus = me?.shelterId ? (latestSnapshot?.shelters?.find(s => s.id === me.shelterId) ?? null) : null;
-  const shelterLabel = myShelterForStatus ? `🏠 lvl${myShelterForStatus.tier}` : '🏠 --';
+  const timerPlayer = isObserver ? hudPlayer : me;
+  const points = timerPlayer?.totalAdoptions ?? 0;
+  const timerShelter = timerPlayer?.shelterId ? (latestSnapshot?.shelters?.find(s => s.id === timerPlayer.shelterId) ?? null) : null;
+  const shelterLabel = timerShelter ? `🏠 lvl${timerShelter.tier}` : '🏠 --';
   timerEl.textContent = matchPhase === 'playing' ? `⭐ ${points}  ${shelterLabel}` : '';
   
   // Update game clock (stop updating when match is over)
@@ -7012,7 +7219,10 @@ function render(dt: number): void {
            <a href="${buildAuthUrl('/auth/google')}" style="display:inline-block;padding:6px 16px;background:#fff;color:#333;border-radius:6px;font:600 12px Rubik,sans-serif;text-decoration:none;">Sign in with Google</a>
          </div>`
       : '';
-    leaderboardEl.innerHTML = `<strong>${title}</strong>${teamScoreLine}<br>` + sorted.map((p, i) => playerLine(p, i)).join('<br>') + tokenLines + guestSavePrompt + adHtml + '<div style="display:flex;gap:12px;margin-top:16px;"><button type="button" id="play-again-btn" class="fight-ally-btn ally-btn" style="flex:1">Play again</button><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn" style="flex:1">Back to lobby</button></div>';
+    const endButtons = isObserver
+      ? '<div style="display:flex;gap:12px;margin-top:16px;"><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn" style="flex:1">Back to lobby</button></div>'
+      : '<div style="display:flex;gap:12px;margin-top:16px;"><button type="button" id="play-again-btn" class="fight-ally-btn ally-btn" style="flex:1">Play again</button><button type="button" id="lobby-btn" class="fight-ally-btn fight-btn" style="flex:1">Back to lobby</button></div>';
+    leaderboardEl.innerHTML = `<strong>${title}</strong>${teamScoreLine}<br>` + sorted.map((p, i) => playerLine(p, i)).join('<br>') + tokenLines + guestSavePrompt + adHtml + endButtons;
   } else {
     leaderboardEl.classList.remove('show');
   }
@@ -7160,6 +7370,18 @@ lobbyReadyBtnEl.addEventListener('click', () => {
     : "You're ready! Waiting for other player(s)…";
 });
 
+// --- Observer: Minimize / restore overlay ---
+observerMinimizeBtnEl.addEventListener('click', () => {
+  observerOverlayMinimized = true;
+  observerOverlayEl.classList.add('hidden');
+  observerMiniBtnEl.classList.remove('hidden');
+});
+observerMiniBtnEl.addEventListener('click', () => {
+  observerOverlayMinimized = false;
+  observerOverlayEl.classList.remove('hidden');
+  observerMiniBtnEl.classList.add('hidden');
+});
+
 // --- Observer: Back to lobby ---
 observerBackBtnEl.addEventListener('click', () => {
   if (gameWs) {
@@ -7167,7 +7389,9 @@ observerBackBtnEl.addEventListener('click', () => {
     gameWs = null;
   }
   isObserver = false;
+  observerOverlayMinimized = false;
   observerOverlayEl.classList.add('hidden');
+  observerMiniBtnEl.classList.add('hidden');
   gameWrapEl.classList.remove('visible');
   landingEl.classList.remove('hidden');
   authAreaEl.classList.remove('hidden');
@@ -7419,6 +7643,8 @@ document.addEventListener('keydown', (e) => {
     }
   }
   // Easter egg: Cycle season visuals (Ctrl+Shift+Alt+*) - client-side only, cosmetic
+  // Block easter eggs for spectators and eliminated observers
+  if ((isObserver || isPlayerObserver()) && e.ctrlKey && e.shiftKey && e.altKey && (e.key === '*' || e.key === '8')) return;
   if (e.ctrlKey && e.shiftKey && e.altKey && (e.key === '*' || e.key === '8')) {
     e.preventDefault();
     const SEASON_ORDER: Season[] = ['winter', 'spring', 'summer', 'fall'];
@@ -7436,6 +7662,8 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   // Easter egg: Force boss mode (Ctrl+Shift+B) - check BEFORE regular B handler
+  // Block easter eggs for spectators and eliminated observers
+  if ((isObserver || isPlayerObserver()) && e.ctrlKey && e.shiftKey && (e.key === 'b' || e.key === 'B')) return;
   if (e.ctrlKey && e.shiftKey && (e.key === 'b' || e.key === 'B')) {
     e.preventDefault();
     if (gameWs?.readyState === WebSocket.OPEN) {
@@ -7546,7 +7774,15 @@ hideStraysToggleEl.addEventListener('change', () => {
   localStorage.setItem('hideStrays', hideStraysOnMinimap ? 'true' : 'false');
 });
 
-settingsBtnEl.addEventListener('click', () => settingsPanelEl.classList.toggle('hidden'));
+settingsBtnEl.addEventListener('click', () => {
+  settingsPanelEl.classList.toggle('hidden');
+  // Hide "Exit to lobby" in spectator mode (use the observer panel's back button instead)
+  if (isObserver) {
+    exitToLobbyBtnEl.style.display = 'none';
+  } else {
+    exitToLobbyBtnEl.style.display = '';
+  }
+});
 settingsCloseEl.addEventListener('click', () => settingsPanelEl.classList.add('hidden'));
 
 // Event panel megaphone toggle
@@ -7643,6 +7879,7 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
     startMatchClockUpdates();
     startMatchPolling();
   }
+  startLiveMatchPolling();
 });
 switchServerBtnEl.addEventListener('click', () => {
   cancelAutoReconnect();
@@ -7878,6 +8115,146 @@ function showItemSelectionModal(): Promise<ItemSelection> {
   });
 }
 
+// --- Spectate: connect to a match as observer ---
+async function connectAsSpectator(matchId: string): Promise<void> {
+  matchEndedNormally = false;
+  disconnectLobbyLeaderboard();
+  stopGameStatsPolling();
+  if (pingIntervalId) {
+    clearInterval(pingIntervalId);
+    pingIntervalId = null;
+  }
+  switchServerEl.classList.add('hidden');
+  const isLocalhostUrl = (url: string) => /^wss?:\/\/localhost(\b|:|\/|$)/i.test(url) || /^wss?:\/\/127\.0\.0\.1(\b|:|\/|$)/i.test(url);
+  const gameUrlFromPage = () => {
+    const { protocol, host } = window.location;
+    const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${wsProtocol}//${host}/ws-game`;
+  };
+  let gameUrl = isLocalhostUrl(window.location.href) ? 'ws://localhost:4001' : gameUrlFromPage();
+  const ws = new WebSocket(SIGNALING_URL);
+  await new Promise<void>((resolve, reject) => {
+    const t = setTimeout(() => {
+      ws.close();
+      reject(new Error('Connection timeout.'));
+    }, CONNECT_TIMEOUT_MS);
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'join', mode: 'spectate' }));
+    };
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'joined' && msg.gameUrl) {
+          clearTimeout(t);
+          gameUrl = msg.gameUrl;
+          if (!isLocalhostUrl(window.location.href) && isLocalhostUrl(gameUrl)) gameUrl = gameUrlFromPage();
+          resolve();
+        }
+      } catch { /* ignore */ }
+    };
+    ws.onerror = () => { clearTimeout(t); reject(new Error('WebSocket error.')); };
+    ws.onclose = () => { clearTimeout(t); if (ws.readyState !== WebSocket.OPEN) reject(new Error('Signaling connection closed.')); };
+  });
+  const gameWsLocal = new WebSocket(gameUrl);
+  gameWsLocal.binaryType = 'arraybuffer';
+  gameWsLocal.onopen = () => {
+    gameWs = gameWsLocal;
+    // Send spectate request (no player entity, no inventory)
+    gameWs.send(JSON.stringify({ type: 'spectate', matchId }));
+  };
+  gameWsLocal.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'observing') {
+          isObserver = true;
+          myPlayerId = null;
+          observerFollowIndex = 0;
+          currentMatchId = msg.matchId ?? null;
+          observerOverlayMinimized = false;
+          observerOverlayEl.classList.remove('hidden');
+          observerMiniBtnEl.classList.add('hidden');
+        }
+        if (msg.type === 'error') {
+          showToast(msg.message || 'Could not spectate this match.', 'error');
+          gameWsLocal.close();
+          return;
+        }
+        if (msg.type === 'playerMap' && Array.isArray(msg.players)) {
+          for (const p of msg.players) {
+            if (p.userId) playerIdToUserId.set(p.playerId, p.userId);
+          }
+        }
+        if (msg.type === 'matchEnd' || msg.type === 'matchResult') {
+          // Match ended, return to lobby
+          showToast('Match ended.', 'info');
+          gameWsLocal.close();
+        }
+      } catch { /* ignore */ }
+      return;
+    }
+    // Handle binary snapshots
+    const buf = e.data as ArrayBuffer;
+    if (buf.byteLength < 1) return;
+    if (new DataView(buf).getUint8(0) === MSG_SNAPSHOT) {
+      const snap = decodeSnapshot(buf);
+      latestSnapshot = snap;
+      if (matchPhase !== 'playing') {
+        matchPhase = 'playing';
+        lobbyOverlayEl.classList.add('hidden');
+      }
+      // Update interpolated player positions
+      for (const p of snap.players) {
+        const prev = interpolatedPlayers.get(p.id)?.next ?? p;
+        interpolatedPlayers.set(p.id, { prev, next: { ...p }, t: 0 });
+      }
+    }
+  };
+  gameWsLocal.onclose = () => {
+    // Return to lobby on spectator disconnect
+    gameWs = null;
+    isObserver = false;
+    observerOverlayMinimized = false;
+    observerOverlayEl.classList.add('hidden');
+    observerMiniBtnEl.classList.add('hidden');
+    gameWrapEl.classList.remove('visible');
+    landingEl.classList.remove('hidden');
+    authAreaEl.classList.remove('hidden');
+    startLiveMatchPolling();
+    startMatchClockUpdates();
+    startMatchPolling();
+    connectLobbyLeaderboard();
+    startServerClockWhenOnLobby();
+    startGameStatsPolling();
+  };
+}
+
+function startSpectate(matchId: string): void {
+  enterMobileFullscreen();
+  stopMatchClockUpdates();
+  stopMatchPolling();
+  stopLiveMatchPolling();
+  stopServerClock();
+
+  landingEl.classList.add('hidden');
+  connectionOverlayEl.classList.remove('hidden');
+  connectionOverlayEl.innerHTML = '<h2>Connecting...</h2><p>Joining as spectator.</p>';
+  authAreaEl.classList.add('hidden');
+
+  connectAsSpectator(matchId)
+    .then(() => {
+      connectionOverlayEl.classList.add('hidden');
+      gameWrapEl.classList.add('visible');
+      requestAnimationFrame(tick);
+    })
+    .catch((err: Error) => {
+      showConnectionError(err.message || 'Could not spectate.');
+      exitMobileFullscreen();
+      authAreaEl.classList.remove('hidden');
+      startLiveMatchPolling();
+    });
+}
+
 function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boolean; resume?: boolean; rejoinMatchId?: string }): void {
   // Request fullscreen immediately while still in user gesture context
   enterMobileFullscreen();
@@ -7886,6 +8263,7 @@ function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boole
   stopServerClock();
   stopMatchClockUpdates();
   stopMatchPolling();
+  stopLiveMatchPolling();
 
   const doConnect = () => {
     landingEl.classList.add('hidden');
@@ -8397,12 +8775,13 @@ function updateBossModeTimer(): void {
   }
 }
 
-// --- Landing: music toggle + play on load ---
-if (landingMusicToggleEl) {
-  landingMusicToggleEl.checked = getMusicEnabled();
-  landingMusicToggleEl.addEventListener('change', () => {
-    setMusicEnabled(landingMusicToggleEl!.checked);
-    if (landingMusicToggleEl!.checked) playMusic();
+// --- Landing: music volume slider + play on load ---
+if (landingMusicSliderEl) {
+  landingMusicSliderEl.value = String(getMusicEnabled() ? getMusicVolume() : 0);
+  landingMusicSliderEl.addEventListener('input', () => {
+    const vol = parseInt(landingMusicSliderEl!.value, 10);
+    setMusicVolume(vol);
+    if (vol > 0) playMusic();
   });
 }
 // Start music when the first page loads (may be blocked by browser until user interaction)

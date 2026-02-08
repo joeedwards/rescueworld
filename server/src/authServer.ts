@@ -29,7 +29,7 @@ import { getInventory, depositAfterMatch, withdrawForMatch } from './inventory.j
 import { recordMatchWin, recordRtEarned, updateReputationOnQuit } from './leaderboard.js';
 import { getGameStats } from './gameStats.js';
 import { getKarmaBalance, getKarmaInfo, awardKarmaPoints, getKarmaHistory } from './karmaService.js';
-import { getRealtimeStats, getActiveMatchForUser, getActiveMatchesForUser, getMatchDurationMs, isMatchPaused, isMatchBotsEnabled } from './GameServer.js';
+import { getRealtimeStats, getActiveMatchForUser, getActiveMatchesForUser, getMatchDurationMs, isMatchPaused, isMatchBotsEnabled, getLiveMatches } from './GameServer.js';
 
 /** Timestamped log function for server output */
 function log(message: string): void {
@@ -448,6 +448,11 @@ app.get('/api/active-matches', (req: Request, res: Response) => {
     botsEnabled: isMatchBotsEnabled(info.matchId),
   }));
   res.json({ matches });
+});
+
+// Get all live matches available for spectating (public, no auth required)
+app.get('/api/live-matches', (_req: Request, res: Response) => {
+  res.json({ matches: getLiveMatches() });
 });
 
 // Get first active FFA/Teams match info for a user (backward compatibility)

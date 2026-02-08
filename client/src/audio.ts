@@ -3,6 +3,7 @@
  */
 
 const MUSIC_KEY = 'rescueworld_music';
+const MUSIC_VOLUME_KEY = 'rescueworld_music_volume';
 const SFX_KEY = 'rescueworld_sfx';
 const VAN_SOUND_TYPE_KEY = 'rescueworld_van_sound_type';
 const SHELTER_ADOPT_SFX_KEY = 'rescueworld_shelter_adopt_sfx';
@@ -32,13 +33,52 @@ export function getMusicEnabled(): boolean {
   return getStored(MUSIC_KEY, true);
 }
 
+/** Get the music volume (0-100). Defaults to 100. */
+export function getMusicVolume(): number {
+  try {
+    const v = localStorage.getItem(MUSIC_VOLUME_KEY);
+    if (v != null) {
+      const n = parseInt(v, 10);
+      if (!isNaN(n) && n >= 0 && n <= 100) return n;
+    }
+  } catch { /* ignore */ }
+  return 100;
+}
+
+/** Set the music volume (0-100). Also updates playing audio elements. */
+export function setMusicVolume(vol: number): void {
+  const clamped = Math.max(0, Math.min(100, Math.round(vol)));
+  try { localStorage.setItem(MUSIC_VOLUME_KEY, String(clamped)); } catch { /* ignore */ }
+  const fraction = clamped / 100;
+  if (musicAudio) musicAudio.volume = fraction;
+  if (bossAudio) bossAudio.volume = fraction;
+  // If volume > 0 and music is enabled but paused, start playing
+  if (clamped > 0) {
+    setStored(MUSIC_KEY, true);
+    if (isBossMusicActive && bossAudio && bossAudio.paused) {
+      const p = bossAudio.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } else if (musicAudio && musicAudio.paused) {
+      const p = musicAudio.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+  } else {
+    // Volume 0 = muted
+    setStored(MUSIC_KEY, false);
+    if (musicAudio) musicAudio.pause();
+    if (bossAudio) bossAudio.pause();
+  }
+}
+
 export function setMusicEnabled(on: boolean): void {
   setStored(MUSIC_KEY, on);
-  if (musicAudio) musicAudio.volume = on ? 1 : 0;
+  const vol = on ? getMusicVolume() / 100 : 0;
+  if (musicAudio) musicAudio.volume = vol;
   if (!on && musicAudio) musicAudio.pause();
   // Also handle boss music
   if (!on && bossAudio) bossAudio.pause();
   if (on && isBossMusicActive && bossAudio) {
+    bossAudio.volume = vol;
     const p = bossAudio.play();
     if (p && typeof p.catch === 'function') p.catch(() => {});
   }
@@ -1066,7 +1106,7 @@ export function playMusic(): void {
     if (!musicAudio) {
       musicAudio = new Audio();
       musicAudio.loop = true;
-      musicAudio.volume = 1;
+      musicAudio.volume = getMusicVolume() / 100;
       musicAudio.preload = 'auto';
       musicAudio.src = getMusicUrl();
       let musicTriedFallback = false;
@@ -1078,7 +1118,7 @@ export function playMusic(): void {
       });
       musicAudio.load();
     }
-    musicAudio.volume = getMusicEnabled() ? 1 : 0;
+    musicAudio.volume = getMusicEnabled() ? getMusicVolume() / 100 : 0;
     const p = musicAudio.play();
     if (p && typeof p.catch === 'function') p.catch(() => {});
   } catch {
@@ -1125,7 +1165,7 @@ export function playBossMusic(): void {
     if (!bossAudio) {
       bossAudio = new Audio();
       bossAudio.loop = true;
-      bossAudio.volume = 1;
+      bossAudio.volume = getMusicVolume() / 100;
       bossAudio.preload = 'auto';
       bossAudio.src = getBossMusicUrl();
       let bossTriedFallback = false;
@@ -1137,7 +1177,7 @@ export function playBossMusic(): void {
       });
       bossAudio.load();
     }
-    bossAudio.volume = 1;
+    bossAudio.volume = getMusicVolume() / 100;
     bossAudio.currentTime = 0;
     const p = bossAudio.play();
     if (p && typeof p.catch === 'function') p.catch(() => {});
