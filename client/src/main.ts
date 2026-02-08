@@ -2961,8 +2961,9 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           const rewards = Array.isArray(msg.rewards) ? msg.rewards : [];
           showBreederRewards(tokenBonus, rewards);
         }
-        // Boss mode messages (enter/exit handled by proximity detection, not messages)
-        if (msg.type === 'bossPurchaseResult' || msg.type === 'bossSubmitMealResult' || msg.type === 'karmaAwarded') {
+        // Boss mode messages (per-player events via WS)
+        if (msg.type === 'bossMillEnter' || msg.type === 'bossMillExit' || msg.type === 'bossCaught' || msg.type === 'bossMillKick' ||
+            msg.type === 'bossPurchaseResult' || msg.type === 'bossSubmitMealResult' || msg.type === 'karmaAwarded') {
           handleBossMessage(msg as { type: string; [key: string]: unknown });
         }
         // Easter egg boss mode result
@@ -3252,29 +3253,17 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
       wasBossModeActive = bossModeActive;
       
       if (bossModeActive) {
-        const currentPlayerAtMill = snap.bossMode!.playerAtMill;
-        
-        // Detect when player enters a mill (proximity-based, server tells us)
-        if (currentPlayerAtMill >= 0 && lastPlayerAtMill < 0) {
-          // Player just entered a mill - open the modal
-          openBossMillModalFromProximity(currentPlayerAtMill);
-        } else if (currentPlayerAtMill < 0 && lastPlayerAtMill >= 0) {
-          // Player left the mill - close the modal
-          closeBossMillModal();
-        }
-        
-        lastPlayerAtMill = currentPlayerAtMill;
-        
-        // Update modal content if still open
+        // Modal open/close is now driven by WS messages (bossMillEnter/Exit),
+        // not by snapshot playerAtMill. Just update modal content if open.
         if (bossMillOpen) {
           updateBossMillModal();
         }
       } else {
-        // Boss mode ended
+        // Boss mode ended - close any open modal
         if (bossMillOpen) {
           closeBossMillModal();
+          myBossMillPurchased = {};
         }
-        lastPlayerAtMill = -1;
       }
     }
   };
@@ -5363,7 +5352,7 @@ const BOSS_MILL_EMOJIS: Record<number, string> = {
 
 /** Draw the PetMall and all boss mills */
 function drawBossMode(bossMode: BossModeState, vL: number, vR: number, vT: number, vB: number): void {
-  const { mallX, mallY, mills, tycoonX, tycoonY, tycoonTargetMill, playerAtMill, millsCleared, rebuildingMill } = bossMode;
+  const { mallX, mallY, mills, tycoonX, tycoonY, tycoonTargetMill, millsCleared, rebuildingMill } = bossMode;
   
   ctx.save();
   
@@ -5394,7 +5383,7 @@ function drawBossMode(bossMode: BossModeState, vL: number, vR: number, vT: numbe
   for (const mill of mills) {
     if (mill.x + millMargin < vL || mill.x - millMargin > vR || mill.y + millMargin < vT || mill.y - millMargin > vB) continue;
     const isRebuilding = rebuildingMill !== undefined && rebuildingMill === mill.id;
-    drawBossMill(mill, mill.id === playerAtMill, mill.id === tycoonTargetMill, isRebuilding);
+    drawBossMill(mill, mill.id === currentBossMillId, mill.id === tycoonTargetMill, isRebuilding);
   }
   
   // Draw Breeder Tycoon — viewport culled
@@ -6384,7 +6373,7 @@ function render(dt: number): void {
         
         if (mill.completed) {
           minimapCtx.fillStyle = 'rgba(100, 255, 100, 0.6)';
-        } else if (mill.id === bm.playerAtMill) {
+        } else if (mill.id === currentBossMillId) {
           minimapCtx.fillStyle = 'rgba(0, 170, 255, 0.8)';
         } else if (mill.id === bm.tycoonTargetMill) {
           minimapCtx.fillStyle = 'rgba(255, 100, 100, 0.8)';
@@ -6397,7 +6386,7 @@ function render(dt: number): void {
         minimapCtx.fill();
         
         if (!mill.completed) {
-          minimapCtx.strokeStyle = mill.id === bm.playerAtMill ? '#00aaff' : '#ffd700';
+          minimapCtx.strokeStyle = mill.id === currentBossMillId ? '#00aaff' : '#ffd700';
           minimapCtx.lineWidth = 1.5;
           minimapCtx.stroke();
         }
@@ -8126,8 +8115,8 @@ const bossMillWarning = document.getElementById('boss-mill-warning');
 
 let currentBossMillId: number = -1;
 let bossMillOpen = false;
-let lastPlayerAtMill: number = -1; // Track previous value to detect changes
 let wasBossModeActive = false; // Track boss mode transitions for music
+let myBossMillPurchased: { [ingredient: string]: number } = {}; // Per-player purchase state (synced via WS)
 
 /** Ingredient emojis for display */
 const INGREDIENT_EMOJIS: Record<string, string> = {
@@ -8194,7 +8183,7 @@ function updateBossMillModal(): void {
     let allComplete = true;
     
     for (const [ingredient, needed] of Object.entries(mill.recipe)) {
-      const purchased = mill.purchased[ingredient] ?? 0;
+      const purchased = myBossMillPurchased[ingredient] ?? 0;
       const isComplete = purchased >= needed;
       if (!isComplete) allComplete = false;
       
@@ -8273,15 +8262,42 @@ bossMillIngredients?.addEventListener('pointerdown', (e) => {
 // Handle server responses for boss mode
 function handleBossMessage(msg: { type: string; [key: string]: unknown }): void {
   switch (msg.type) {
+    case 'bossMillEnter':
+      // Server tells us we entered a mill - open modal with recipe/purchases
+      currentBossMillId = msg.millId as number;
+      myBossMillPurchased = (msg.purchased as { [ingredient: string]: number }) ?? {};
+      openBossMillModalFromProximity(msg.millId as number);
+      break;
+    case 'bossMillExit':
+      // Server tells us we left the mill
+      closeBossMillModal();
+      myBossMillPurchased = {};
+      break;
+    case 'bossCaught':
+      // Tycoon caught us - update our purchases (after 50% penalty) and close modal
+      myBossMillPurchased = (msg.purchased as { [ingredient: string]: number }) ?? {};
+      closeBossMillModal();
+      break;
+    case 'bossMillKick':
+      // Another player completed/rebuilt our mill - close modal
+      closeBossMillModal();
+      myBossMillPurchased = {};
+      break;
     case 'bossPurchaseResult':
+      if (msg.success && msg.purchased) {
+        // Sync our local purchase state with server's authoritative state
+        myBossMillPurchased = msg.purchased as { [ingredient: string]: number };
+      }
       if (!msg.success) {
         showToast(String(msg.message || 'Purchase failed'), 'error');
       }
-      // Modal will update on next snapshot
+      // Update modal immediately with new purchase state
+      if (bossMillOpen) updateBossMillModal();
       break;
     case 'bossSubmitMealResult':
       if (msg.success) {
         closeBossMillModal();
+        myBossMillPurchased = {};
         // Show celebration
         if (msg.kpAwarded) {
           showToast('All mills cleared! +1 Karma Point!', 'success');

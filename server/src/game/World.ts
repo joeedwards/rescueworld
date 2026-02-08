@@ -288,7 +288,7 @@ export class World {
       petType: number;
       petCount: number;
       recipe: { [ingredient: string]: number };
-      purchased: { [ingredient: string]: number };
+      purchased: { [ingredient: string]: number }; // Legacy (unused), kept for snapshot compat
       completed: boolean;
       x: number;
       y: number;
@@ -300,11 +300,13 @@ export class World {
     millsCleared: number;
     mallX: number;
     mallY: number;
-    playerAtMill: number;
+    playerAtMills: Map<string, number>; // playerId -> millId (-1 = not at any)
+    playerMillPurchases: Map<string, { [ingredient: string]: number }>; // playerId -> purchases for their current mill
     lastMillClearTick: number; // For combo bonus tracking
     rebuildingMill: number; // Which mill tycoon is rebuilding (-1 = none)
     rebuildStartTick: number; // When rebuild started
     visitedMills: number[]; // Track visit history to avoid immediate repeats
+    pendingBossEvents: Array<{ type: string; playerId: string; millId: number; purchased?: Record<string, number>; reason?: string }>;
   } | null = null;
   
   // Match-wide announcements queue
@@ -3275,11 +3277,13 @@ export class World {
       millsCleared: 0,
       mallX,
       mallY,
-      playerAtMill: -1,
+      playerAtMills: new Map(),
+      playerMillPurchases: new Map(),
       lastMillClearTick: 0,
       rebuildingMill: -1,
       rebuildStartTick: 0,
       visitedMills: [],
+      pendingBossEvents: [],
     };
 
     this.pendingAnnouncements.push('BOSS MODE: The Breeder Tycoon has arrived with the PetMall! Prepare meals to rescue the pets!');
@@ -3312,38 +3316,75 @@ export class World {
     this.updateTycoonPatrol();
   }
 
-  /** Check if player van is near a boss mill and update playerAtMill accordingly */
+  /** Check ALL player vans for proximity to boss mills and update per-player state */
   private updateBossMillProximity(): void {
     if (!this.bossMode?.active) return;
     const bm = this.bossMode;
 
-    // Find ANY human player (non-CPU) near a boss mill
-    let nearMillId = -1;
-    let nearPlayer: { id: string; x: number; y: number } | null = null;
+    // Track which players are currently near mills
+    const currentNearMills = new Map<string, number>(); // playerId -> millId
+
     for (const p of this.players.values()) {
-      if (p.id.startsWith('cpu-') || this.eliminatedPlayerIds.has(p.id)) continue;
+      if (p.id.startsWith('cpu-') || p.id.startsWith('cpu_') || this.eliminatedPlayerIds.has(p.id)) continue;
+
+      // Find the nearest non-completed mill within range for this player
+      let nearMillId = -1;
       for (let i = 0; i < bm.mills.length; i++) {
         const mill = bm.mills[i];
         if (mill.completed) continue;
         const bossMillR = BOSS_MILL_RADIUS + VAN_FIXED_RADIUS;
         if (distSq(p.x, p.y, mill.x, mill.y) <= bossMillR * bossMillR) {
           nearMillId = i;
-          nearPlayer = p;
           break;
         }
       }
-      if (nearMillId >= 0) break;
+
+      if (nearMillId >= 0) {
+        currentNearMills.set(p.id, nearMillId);
+      }
+
+      const prevMillId = bm.playerAtMills.get(p.id) ?? -1;
+
+      if (nearMillId >= 0 && prevMillId < 0) {
+        // Player just entered a mill
+        bm.playerAtMills.set(p.id, nearMillId);
+        bm.playerMillPurchases.set(p.id, {});
+        const mill = bm.mills[nearMillId];
+        bm.pendingBossEvents.push({
+          type: 'bossMillEnter',
+          playerId: p.id,
+          millId: nearMillId,
+          purchased: {},
+        });
+        log(`Player ${p.id} entered boss mill ${nearMillId} (${BOSS_MILL_NAMES[mill.petType]})`);
+      } else if (nearMillId >= 0 && prevMillId >= 0 && nearMillId !== prevMillId) {
+        // Player moved to a different mill - exit old, enter new
+        bm.playerAtMills.set(p.id, nearMillId);
+        bm.playerMillPurchases.set(p.id, {});
+        bm.pendingBossEvents.push({ type: 'bossMillExit', playerId: p.id, millId: prevMillId });
+        bm.pendingBossEvents.push({
+          type: 'bossMillEnter',
+          playerId: p.id,
+          millId: nearMillId,
+          purchased: {},
+        });
+        log(`Player ${p.id} switched from mill ${prevMillId} to mill ${nearMillId}`);
+      } else if (nearMillId < 0 && prevMillId >= 0) {
+        // Player left the mill
+        bm.playerAtMills.delete(p.id);
+        bm.playerMillPurchases.delete(p.id);
+        bm.pendingBossEvents.push({ type: 'bossMillExit', playerId: p.id, millId: prevMillId });
+        log(`Player ${p.id} exited boss mill ${prevMillId}`);
+      }
     }
 
-    // Update playerAtMill state
-    if (nearMillId >= 0 && bm.playerAtMill !== nearMillId) {
-      // Player entered a new mill
-      bm.playerAtMill = nearMillId;
-      log(`Player ${nearPlayer!.id} entered boss mill ${nearMillId} (${BOSS_MILL_NAMES[bm.mills[nearMillId].petType]})`);
-    } else if (nearMillId < 0 && bm.playerAtMill >= 0) {
-      // Player left the mill
-      log(`Player exited boss mill`);
-      bm.playerAtMill = -1;
+    // Clean up players that disconnected while at a mill
+    for (const [playerId, millId] of bm.playerAtMills) {
+      if (!this.players.has(playerId)) {
+        bm.playerAtMills.delete(playerId);
+        bm.playerMillPurchases.delete(playerId);
+        log(`Cleaned up disconnected player ${playerId} from boss mill ${millId}`);
+      }
     }
   }
 
@@ -3381,8 +3422,16 @@ export class World {
         const mill = bm.mills[bm.rebuildingMill];
         if (mill && mill.completed) {
           mill.completed = false;
-          mill.purchased = {}; // Reset ingredients
+          mill.purchased = {}; // Reset legacy field
           bm.millsCleared = Math.max(0, bm.millsCleared - 1);
+          // Kick any players at this mill (shouldn't happen normally, but be safe)
+          for (const [pid, mid] of bm.playerAtMills) {
+            if (mid === bm.rebuildingMill) {
+              bm.playerAtMills.delete(pid);
+              bm.playerMillPurchases.delete(pid);
+              bm.pendingBossEvents.push({ type: 'bossMillKick', playerId: pid, millId: bm.rebuildingMill, reason: 'rebuilt' });
+            }
+          }
           this.pendingAnnouncements.push(`The Breeder Tycoon rebuilt ${BOSS_MILL_NAMES[mill.petType] ?? 'a mill'}!`);
           log(`Tycoon rebuilt mill ${bm.rebuildingMill} (${BOSS_MILL_NAMES[mill.petType]}). Mills cleared: ${bm.millsCleared}`);
         }
@@ -3391,10 +3440,8 @@ export class World {
         bm.tycoonTargetMill = this.pickRandomMill(bm.tycoonTargetMill);
         bm.tycoonMoveAtTick = this.tick + BOSS_TYCOON_DWELL_TICKS;
       }
-      // While rebuilding, still check if player arrives (caught!)
-      if (bm.playerAtMill === bm.tycoonTargetMill) {
-        this.handleTycoonCatchPlayer();
-      }
+      // While rebuilding, still check if any player arrives (caught!)
+      this.handleTycoonCatchPlayers();
       return; // Don't move while rebuilding
     }
 
@@ -3421,10 +3468,8 @@ export class World {
         bm.tycoonX = targetMill.x;
         bm.tycoonY = targetMill.y;
         
-        // Check if player is at this mill (caught!)
-        if (bm.playerAtMill === bm.tycoonTargetMill) {
-          this.handleTycoonCatchPlayer();
-        }
+        // Check if any players are at this mill (caught!)
+        this.handleTycoonCatchPlayers();
         
         // If this mill was cleared, start rebuilding it
         if (targetMill.completed && bm.rebuildingMill < 0) {
@@ -3436,26 +3481,50 @@ export class World {
     }
   }
 
-  /** Handle player being caught by tycoon at a mill */
-  private handleTycoonCatchPlayer(): void {
+  /** Handle ALL players being caught by tycoon at the target mill */
+  private handleTycoonCatchPlayers(): void {
     if (!this.bossMode) return;
     const bm = this.bossMode;
-    const mill = bm.mills[bm.playerAtMill];
+    const targetMillId = bm.tycoonTargetMill;
+    const mill = bm.mills[targetMillId];
     if (!mill) return;
 
-    // Lose 50% of purchased ingredients
-    for (const ing of Object.keys(mill.purchased)) {
-      mill.purchased[ing] = Math.floor(mill.purchased[ing] * (1 - BOSS_CAUGHT_PENALTY));
-      if (mill.purchased[ing] <= 0) {
-        delete mill.purchased[ing];
+    // Find all players at the tycoon's target mill
+    const caughtPlayers: string[] = [];
+    for (const [playerId, millId] of bm.playerAtMills) {
+      if (millId === targetMillId) {
+        caughtPlayers.push(playerId);
       }
     }
 
-    // Force player out of mill
-    bm.playerAtMill = -1;
+    if (caughtPlayers.length === 0) return;
+
+    // Apply penalty to each caught player's individual purchases
+    for (const playerId of caughtPlayers) {
+      const playerPurchased = bm.playerMillPurchases.get(playerId);
+      if (playerPurchased) {
+        for (const ing of Object.keys(playerPurchased)) {
+          playerPurchased[ing] = Math.floor(playerPurchased[ing] * (1 - BOSS_CAUGHT_PENALTY));
+          if (playerPurchased[ing] <= 0) {
+            delete playerPurchased[ing];
+          }
+        }
+        // Queue event with updated purchases so client can update modal
+        bm.pendingBossEvents.push({
+          type: 'bossCaught',
+          playerId,
+          millId: targetMillId,
+          purchased: { ...playerPurchased },
+        });
+      }
+
+      // Force player out of mill
+      bm.playerAtMills.delete(playerId);
+      bm.playerMillPurchases.delete(playerId);
+    }
     
     this.pendingAnnouncements.push('Caught by the Breeder Tycoon! You lost half your prepared ingredients!');
-    log(`Player caught by tycoon at mill ${mill.id}, lost ${BOSS_CAUGHT_PENALTY * 100}% ingredients`);
+    log(`${caughtPlayers.length} player(s) caught by tycoon at mill ${mill.id}, lost ${BOSS_CAUGHT_PENALTY * 100}% ingredients`);
   }
 
   /** End boss mode with victory or timeout */
@@ -3530,22 +3599,29 @@ export class World {
 
   // Player enters/exits boss mills automatically via proximity detection in updateBossMillProximity()
 
-  /** Purchase an ingredient for the current boss mill */
-  purchaseBossIngredient(playerId: string, ingredient: string, amount: number): { success: boolean; message: string } {
+  /** Purchase an ingredient for the player's current boss mill (per-player purchases) */
+  purchaseBossIngredient(playerId: string, ingredient: string, amount: number): { success: boolean; message: string; purchased?: { [ingredient: string]: number } } {
     if (!this.bossMode?.active) return { success: false, message: 'Boss mode not active' };
     
-    const millId = this.bossMode.playerAtMill;
+    const millId = this.bossMode.playerAtMills.get(playerId) ?? -1;
     if (millId < 0) return { success: false, message: 'Not at a mill' };
     
     const mill = this.bossMode.mills[millId];
     if (!mill || mill.completed) return { success: false, message: 'Mill completed or invalid' };
+    
+    // Get per-player purchases
+    let playerPurchased = this.bossMode.playerMillPurchases.get(playerId);
+    if (!playerPurchased) {
+      playerPurchased = {};
+      this.bossMode.playerMillPurchases.set(playerId, playerPurchased);
+    }
     
     // Check if ingredient is in recipe
     const needed = mill.recipe[ingredient] ?? 0;
     if (needed <= 0) return { success: false, message: 'Ingredient not needed for this mill' };
     
     // Check how many more we need
-    const purchased = mill.purchased[ingredient] ?? 0;
+    const purchased = playerPurchased[ingredient] ?? 0;
     const remaining = needed - purchased;
     if (remaining <= 0) return { success: false, message: 'Already have enough of this ingredient' };
     
@@ -3563,25 +3639,26 @@ export class World {
     
     // Deduct money and add ingredient
     this.deductPlayerMoney(playerId, totalCost);
-    mill.purchased[ingredient] = purchased + actualAmount;
+    playerPurchased[ingredient] = purchased + actualAmount;
     
     log(`Player ${playerId} purchased ${actualAmount}x ${ingredient} for ${totalCost} RT at mill ${millId}`);
-    return { success: true, message: `Purchased ${actualAmount}x ${ingredient}` };
+    return { success: true, message: `Purchased ${actualAmount}x ${ingredient}`, purchased: { ...playerPurchased } };
   }
 
-  /** Submit the prepared meal to rescue pets from current mill */
+  /** Submit the prepared meal to rescue pets from current mill (per-player purchases) */
   submitBossMeal(playerId: string): { success: boolean; message: string; rtBonus: number; kpAwarded: boolean } {
     if (!this.bossMode?.active) return { success: false, message: 'Boss mode not active', rtBonus: 0, kpAwarded: false };
     
-    const millId = this.bossMode.playerAtMill;
+    const millId = this.bossMode.playerAtMills.get(playerId) ?? -1;
     if (millId < 0) return { success: false, message: 'Not at a mill', rtBonus: 0, kpAwarded: false };
     
     const mill = this.bossMode.mills[millId];
     if (!mill || mill.completed) return { success: false, message: 'Mill completed or invalid', rtBonus: 0, kpAwarded: false };
     
-    // Check if all ingredients are purchased
+    // Check if all ingredients are purchased (per-player purchases)
+    const playerPurchased = this.bossMode.playerMillPurchases.get(playerId) ?? {};
     for (const [ing, needed] of Object.entries(mill.recipe)) {
-      const purchased = mill.purchased[ing] ?? 0;
+      const purchased = playerPurchased[ing] ?? 0;
       if (purchased < needed) {
         return { success: false, message: `Need ${needed - purchased} more ${ing}`, rtBonus: 0, kpAwarded: false };
       }
@@ -3590,7 +3667,18 @@ export class World {
     // Success! Mark mill as completed
     mill.completed = true;
     this.bossMode.millsCleared++;
-    this.bossMode.playerAtMill = -1;
+    
+    // Kick ALL players currently at this mill (they each had independent progress)
+    for (const [pid, mid] of this.bossMode.playerAtMills) {
+      if (mid === millId) {
+        this.bossMode.playerAtMills.delete(pid);
+        this.bossMode.playerMillPurchases.delete(pid);
+        if (pid !== playerId) {
+          // Notify other players at this mill that it was completed
+          this.bossMode.pendingBossEvents.push({ type: 'bossMillKick', playerId: pid, millId, reason: 'completed' });
+        }
+      }
+    }
     
     // Cancel any in-progress rebuild of this mill
     if (this.bossMode.rebuildingMill === millId) {
@@ -3599,7 +3687,6 @@ export class World {
     
     // Calculate bonus (speed bonus if cleared quickly)
     let rtBonus = 0;
-    const ticksSinceStart = this.tick - this.bossMode.startTick;
     const timeSinceLastClear = this.tick - this.bossMode.lastMillClearTick;
     
     // Speed bonus: cleared within 30 seconds (750 ticks) of entering
@@ -3623,7 +3710,7 @@ export class World {
     return { success: true, message: `${millName} rescued!`, rtBonus, kpAwarded };
   }
 
-  /** Get boss mode state for snapshot */
+  /** Get boss mode state for snapshot (shared across all players) */
   getBossModeState(): BossModeState | undefined {
     if (!this.bossMode?.active) return undefined;
     const bm = this.bossMode;
@@ -3636,7 +3723,7 @@ export class World {
         petType: m.petType,
         petCount: m.petCount,
         recipe: { ...m.recipe },
-        purchased: { ...m.purchased },
+        purchased: {}, // Per-player now, sent via WS messages
         completed: m.completed,
         x: m.x,
         y: m.y,
@@ -3647,9 +3734,21 @@ export class World {
       millsCleared: bm.millsCleared,
       mallX: bm.mallX,
       mallY: bm.mallY,
-      playerAtMill: bm.playerAtMill,
+      playerAtMill: -1, // Deprecated: per-player now via WS messages
       rebuildingMill: bm.rebuildingMill >= 0 ? bm.rebuildingMill : undefined,
     };
+  }
+
+  /** Get pending boss events (enter/exit/catch per player) for GameServer to relay */
+  getPendingBossEvents(): Array<{ type: string; playerId: string; millId: number; purchased?: Record<string, number>; reason?: string }> {
+    return this.bossMode?.pendingBossEvents ?? [];
+  }
+
+  /** Clear pending boss events after broadcasting */
+  clearPendingBossEvents(): void {
+    if (this.bossMode) {
+      this.bossMode.pendingBossEvents = [];
+    }
   }
 
   /** Check if boss mode resulted in a full victory (for KP award) */

@@ -1987,6 +1987,42 @@ setInterval(() => {
           match.world.clearPendingAnnouncements();
         }
         
+        // Process per-player boss mode events (mill enter/exit/catch)
+        const bossEvents = match.world.getPendingBossEvents();
+        if (bossEvents.length > 0) {
+          for (const ev of bossEvents) {
+            const playerWs = match.players.get(ev.playerId);
+            if (!playerWs || playerWs.readyState !== 1) continue;
+            
+            if (ev.type === 'bossMillEnter') {
+              // Send mill recipe so client knows what ingredients are needed
+              const bossState = match.world.getBossModeState();
+              const mill = bossState?.mills.find(m => m.id === ev.millId);
+              playerWs.send(JSON.stringify({
+                type: 'bossMillEnter',
+                millId: ev.millId,
+                recipe: mill?.recipe ?? {},
+                purchased: ev.purchased ?? {},
+              }));
+            } else if (ev.type === 'bossMillExit') {
+              playerWs.send(JSON.stringify({ type: 'bossMillExit' }));
+            } else if (ev.type === 'bossCaught') {
+              playerWs.send(JSON.stringify({
+                type: 'bossCaught',
+                millId: ev.millId,
+                purchased: ev.purchased ?? {},
+              }));
+            } else if (ev.type === 'bossMillKick') {
+              playerWs.send(JSON.stringify({
+                type: 'bossMillKick',
+                millId: ev.millId,
+                reason: ev.reason ?? 'completed',
+              }));
+            }
+          }
+          match.world.clearPendingBossEvents();
+        }
+        
         // Send binary snapshots every 2nd tick (12.5 Hz) — halves encode + network cost
         // Game logic still runs at 25 Hz; client interpolation (100ms buffer) smooths the gap
         if (snapshot.tick % 2 === 0) {
