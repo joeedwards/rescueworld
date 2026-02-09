@@ -7,11 +7,11 @@
 import type { WebSocket } from 'ws';
 import { WebSocketServer } from 'ws';
 import { World } from './game/World.js';
-import { TICK_RATE, TICK_MS, MAX_FFA_PLAYERS, MAX_RT_PER_MATCH } from 'shared';
+import { TICK_RATE, TICK_MS, MAX_FFA_PLAYERS, MAX_RT_PER_MATCH, SHELTER_BUILD_COST } from 'shared';
 import { decodeInput, encodeSnapshot, MSG_INPUT } from 'shared';
 import { registerServer, appendReplay, getNextGuestName } from './registry.js';
 import { withdrawForMatch, withdrawForMatchSelective, depositAfterMatch, getInventory, type Inventory, type ItemSelection } from './inventory.js';
-import { recordMatchWin, recordMatchLoss, updateReputationOnQuit, ensureGuestUser } from './leaderboard.js';
+import { recordMatchWin, recordMatchLoss, updateReputationOnQuit, ensureGuestUser, ensureBotUser } from './leaderboard.js';
 import { saveSavedMatch, getSavedMatch, deleteSavedMatch, insertMatchHistory, incrementGameCount, saveFfaMatch, getAllSavedFfaMatches, deleteSavedFfaMatch, purgeSavedBotMatches, getFriendsOf } from './referrals.js';
 import { awardKarmaPoints } from './karmaService.js';
 
@@ -91,6 +91,8 @@ interface Match {
   botsEnabled?: boolean;
   /** Observers watching this match (no player entity, receive snapshots only) */
   observers: Map<string, WebSocket>;
+  /** Voluntary spectators who clicked Watch — never auto-promoted to players */
+  spectators: Set<string>;
   /** Team assignments for Teams mode: playerId -> 'red' | 'blue' */
   playerTeams?: Map<string, 'red' | 'blue'>;
   /** True for always-running bot-only matches (spectatable, never pause) */
@@ -162,6 +164,7 @@ function restoreSavedFfaMatches(): void {
           lastReplayTick: 0,
           playerStartingInventory: new Map(),
           observers: new Map(),
+          spectators: new Set(),
           botsEnabled: true,
           playerTeams: saved.mode === 'teams' ? new Map() : undefined,
         };
@@ -506,6 +509,7 @@ function createMatch(mode: 'ffa' | 'solo' | 'teams'): Match {
     playerUserIds: new Map(),
     playerStartingInventory: new Map(),
     observers: new Map(),
+    spectators: new Set(),
     playerTeams: mode === 'teams' ? new Map() : undefined,
   };
   matches.set(match.id, match);
@@ -528,6 +532,7 @@ function destroyMatch(matchId: string): void {
     try { obsWs.close(); } catch { /* ignore */ }
   }
   match.observers.clear();
+  match.spectators.clear();
   // Clean up FFA/Teams rejoin tracking for any users in this match
   for (const [userId, userMatches] of userIdToFfaMatches.entries()) {
     const filtered = userMatches.filter(info => info.matchId !== matchId);
@@ -570,12 +575,25 @@ function getHumanPlayerIdFromState(worldStateJson: string): string | null {
   return null;
 }
 
+/** Spawn a bot into a match with a random skill profile, starting RT, and pre-match boosts. */
+function addBotWithProfile(match: Match, cid: string): void {
+  const profile = match.world.generateCpuProfile(cid);
+  const shelterTier3 = (profile.shelterBuilder && profile.startingRT >= SHELTER_BUILD_COST) ? 1 : 0;
+  match.world.addPlayer(cid, pickBotName(match), profile.startingRT, profile.ports, shelterTier3, profile.adoptSpeedBoosts);
+  // Apply pre-match boosts (size bonus, speed boost) just like human players
+  match.world.applyStartingBoosts(cid, {
+    sizeBonus: profile.sizeBonus,
+    speedBoost: profile.speedBoost,
+  });
+  log(`Bot ${cid} profile: RT=${profile.startingRT} size+=${profile.sizeBonus} speed=${profile.speedBoost} shelter=${profile.shelterBuilder} boss=${profile.bossParticipant} hesit=${profile.hesitationRate.toFixed(3)} target=${profile.optimalTargeting.toFixed(2)}`);
+}
+
 /** Add a bot to a specific team in a Teams match. */
 function addBotToTeam(match: Match, team: 'red' | 'blue'): void {
   const idx = match.cpuIds.size + 1;
   const cid = `cpu-${idx}`;
   if (!match.cpuIds.has(cid)) {
-    match.world.addPlayer(cid, pickBotName(match));
+    addBotWithProfile(match, cid);
     match.cpuIds.add(cid);
     if (match.playerTeams) {
       match.playerTeams.set(cid, team);
@@ -590,7 +608,7 @@ function ensureCpusForMatch(match: Match): void {
     for (let i = 1; i <= 3; i++) {
       const cid = `cpu-${i}`;
       if (!match.cpuIds.has(cid)) {
-        match.world.addPlayer(cid, pickBotName(match));
+        addBotWithProfile(match, cid);
         match.cpuIds.add(cid);
       }
     }
@@ -615,7 +633,7 @@ function ensureCpusForMatch(match: Match): void {
       const idx = match.cpuIds.size + 1;
       const cid = `cpu-${idx}`;
       if (!match.cpuIds.has(cid) && getMatchTotalPlayers(match) < MAX_FFA_PLAYERS) {
-        match.world.addPlayer(cid, pickBotName(match));
+        addBotWithProfile(match, cid);
         match.cpuIds.add(cid);
       }
     }
@@ -650,6 +668,7 @@ function createBotMatch(mode: 'ffa' | 'teams'): Match {
     playerUserIds: new Map(),
     playerStartingInventory: new Map(),
     observers: new Map(),
+    spectators: new Set(),
     playerTeams: mode === 'teams' ? new Map() : undefined,
     botsEnabled: true,
     isBotMatch: true,
@@ -660,13 +679,13 @@ function createBotMatch(mode: 'ffa' | 'teams'): Match {
     const botCount = 2 + Math.floor(Math.random() * 5); // 2..6
     for (let i = 1; i <= botCount; i++) {
       const cid = `cpu-${i}`;
-      match.world.addPlayer(cid, pickBotName(match));
+      addBotWithProfile(match, cid);
       match.cpuIds.add(cid);
     }
   } else {
-    // Teams bot match: 4-8 random vans, split evenly between red/blue
-    const botCount = 4 + Math.floor(Math.random() * 5); // 4..8
-    const perTeam = Math.ceil(botCount / 2);
+    // Teams bot match: 4, 6, or 8 random vans (always even), split evenly between red/blue
+    const perTeam = 2 + Math.floor(Math.random() * 3); // 2, 3, or 4 per team
+    const botCount = perTeam * 2; // 4, 6, or 8
     for (let i = 1; i <= perTeam; i++) {
       addBotToTeam(match, 'red');
     }
@@ -674,7 +693,7 @@ function createBotMatch(mode: 'ffa' | 'teams'): Match {
       // Need unique IDs so offset the index
       const cid = `cpu-${match.cpuIds.size + 1}`;
       if (!match.cpuIds.has(cid)) {
-        match.world.addPlayer(cid, pickBotName(match));
+        addBotWithProfile(match, cid);
         match.cpuIds.add(cid);
         if (match.playerTeams) {
           match.playerTeams.set(cid, 'blue');
@@ -1187,6 +1206,7 @@ wss.on('connection', async (ws) => {
           // Add as observer (unlimited spectators)
           const obsId = `obs-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           match.observers.set(obsId, ws);
+          match.spectators.add(obsId); // Mark as voluntary spectator — never auto-promote
           currentMatchId = match.id;
           ws.send(JSON.stringify({ type: 'observing', matchId: match.id, mode: match.mode }));
           log(`Spectator ${obsId} joined match ${match.id} (${match.mode})`);
@@ -1274,6 +1294,7 @@ wss.on('connection', async (ws) => {
                         playerUserIds: new Map([[humanId, playerUserId]]),
                         playerStartingInventory: new Map(),
                         observers: new Map(),
+                        spectators: new Set(),
                         soloUserId: playerUserId,
                         soloPlayerId: humanId,
                         soloDisplayName: world.getSnapshot().players.find((pl) => pl.id === humanId)?.displayName ?? displayNameToUse,
@@ -1675,10 +1696,8 @@ wss.on('connection', async (ws) => {
           return;
         }
         
-        if (msg.type === 'fightAlly' && typeof msg.targetId === 'string' && (msg.choice === 'fight' || msg.choice === 'ally')) {
-          if (match.mode === 'teams') return; // Teams mode: no manual fight/ally
-          match.fightAllyChoices.set(`${playerId},${msg.targetId}`, msg.choice);
-          return;
+        if (msg.type === 'fightAlly') {
+          return; // Combat removed — no fight/ally system
         }
 
         if (msg.type === 'allyRequest' && typeof msg.targetId === 'string') {
@@ -1932,16 +1951,22 @@ wss.on('connection', async (ws) => {
           return;
         }
 
-        // Instant rescue for mills and camps at any level - requires tier 3+ shelter
+        // Instant rescue: mills at any level, camps at level 3+ — requires tier 3+ shelter
         if (msg.type === 'instantRescue' && typeof msg.cost === 'number' && typeof msg.totalPets === 'number') {
           const level = typeof msg.level === 'number' ? msg.level : 1;
           const isMill = !!msg.isMill;
           const cost = msg.cost;
           
-          // Validate player has a tier 3+ shelter
-          const shelter = match.world.getPlayerShelterInfo(effectivePlayerId);
-          if (!shelter || shelter.tier < 3) {
-            log(`Instant rescue rejected: player ${effectivePlayerId} doesn't have tier 3+ shelter`);
+          // Validate level requirement: camps need level 3+, mills always allowed
+          if (!isMill && level < 3) {
+            log(`Instant rescue rejected: camp level ${level} < 3 for player ${effectivePlayerId}`);
+            return;
+          }
+          
+          // Validate player or any ally has a tier 3+ shelter
+          const bestTier = match.world.getHighestAllyShelterTier(effectivePlayerId);
+          if (bestTier < 3) {
+            log(`Instant rescue rejected: player ${effectivePlayerId} and allies don't have tier 3+ shelter`);
             return;
           }
           
@@ -2324,22 +2349,27 @@ setInterval(() => {
               obsWs.send(buf);
             } else {
               match.observers.delete(obsId);
+              match.spectators.delete(obsId);
             }
           }
         }
         
-        // Promote first observer if a player slot opened up (not for bot matches)
+        // Promote first non-spectator observer if a player slot opened up (not for bot matches)
+        // Voluntary spectators (who clicked Watch) are never promoted
         if (!match.isBotMatch && match.observers.size > 0 && getMatchTotalPlayers(match) < MAX_FFA_PLAYERS) {
-          const [obsId, obsWs] = match.observers.entries().next().value as [string, WebSocket];
-          if (obsWs.readyState === 1) {
-            match.observers.delete(obsId);
-            // Create a real player for this observer
-            const newPlayerId = `p-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-            match.world.addPlayer(newPlayerId, `Player`, 0, 0, 0, 0);
-            match.players.set(newPlayerId, obsWs);
-            playerToMatch.set(newPlayerId, match.id);
-            obsWs.send(JSON.stringify({ type: 'promoted', playerId: newPlayerId, matchId: match.id }));
-            log(`Observer ${obsId} promoted to player ${newPlayerId} in match ${match.id}`);
+          for (const [obsId, obsWs] of match.observers.entries()) {
+            if (match.spectators.has(obsId)) continue; // Skip voluntary spectators
+            if (obsWs.readyState === 1) {
+              match.observers.delete(obsId);
+              // Create a real player for this observer
+              const newPlayerId = `p-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+              match.world.addPlayer(newPlayerId, `Player`, 0, 0, 0, 0);
+              match.players.set(newPlayerId, obsWs);
+              playerToMatch.set(newPlayerId, match.id);
+              obsWs.send(JSON.stringify({ type: 'promoted', playerId: newPlayerId, matchId: match.id }));
+              log(`Observer ${obsId} promoted to player ${newPlayerId} in match ${match.id}`);
+            }
+            break; // Only promote one per tick
           }
         }
         
@@ -2449,6 +2479,34 @@ setInterval(() => {
                 winningTeam: winningTeam || undefined,
                 myTeam: playerTeam || undefined,
               }));
+            }
+          }
+
+          // Record bot scores so they appear on leaderboards
+          for (const cpuId of match.cpuIds) {
+            const botState = snapshot.players.find(p => p.id === cpuId);
+            if (!botState) continue;
+            try {
+              const botUserId = ensureBotUser(botState.displayName);
+              const botRT = isStrayLoss ? 0 : (botState.money ?? 0);
+              let botIsWinner: boolean;
+              if (match.mode === 'teams') {
+                const botTeam = match.world.getPlayerTeam(cpuId);
+                botIsWinner = !isStrayLoss && botTeam === winningTeam;
+              } else if (match.mode === 'ffa') {
+                botIsWinner = !isStrayLoss && snapshot.winnerId != null;
+              } else {
+                botIsWinner = !isStrayLoss && snapshot.winnerId === cpuId;
+              }
+              if (isStrayLoss) {
+                recordMatchLoss(botUserId, 0);
+              } else if (botIsWinner) {
+                recordMatchWin(botUserId, botRT);
+              } else {
+                recordMatchLoss(botUserId, botRT);
+              }
+            } catch (botErr) {
+              log(`Error recording bot ${cpuId} score: ${botErr}`);
             }
           }
         }

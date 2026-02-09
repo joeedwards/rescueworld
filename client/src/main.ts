@@ -16,7 +16,6 @@ import {
   ADOPTION_ZONE_RADIUS,
   GROWTH_ORB_RADIUS,
   SPEED_BOOST_MULTIPLIER,
-  COMBAT_MIN_SIZE,
   // Boss Mode constants
   BOSS_PETMALL_RADIUS,
   BOSS_MILL_RADIUS,
@@ -122,6 +121,8 @@ import {
   setMusicVolume,
   getSfxEnabled,
   setSfxEnabled,
+  getSfxVolume,
+  setSfxVolume,
   getShelterAdoptSfxEnabled,
   setShelterAdoptSfxEnabled,
   getVanSoundType,
@@ -286,6 +287,15 @@ const eventPanelEl = document.getElementById('event-panel')!;
 const eventPanelListEl = document.getElementById('event-panel-list')!;
 const eventToggleBtnEl = document.getElementById('event-toggle-btn')!;
 let eventPanelOpen = false;
+const statsPanelEl = document.getElementById('stats-panel')!;
+const statsToggleBtnEl = document.getElementById('stats-toggle-btn')!;
+const statsFpsEl = document.getElementById('stats-fps')!;
+const statsPingEl = document.getElementById('stats-ping')!;
+let statsPanelOpen = false;
+// FPS measurement: rolling window of frame deltas
+const fpsFrameTimes: number[] = [];
+let lastFpsMeasureTime = 0;
+let measuredFps = 0;
 const carriedEl = document.getElementById('carried')!;
 const tagCooldownEl = document.getElementById('tag-cooldown')!;
 const timerEl = document.getElementById('timer')!;
@@ -309,7 +319,9 @@ const settingsBtnEl = document.getElementById('settings-btn')!;
 const settingsPanelEl = document.getElementById('settings-panel')!;
 const exitToLobbyBtnEl = document.getElementById('exit-to-lobby-btn')!;
 const musicToggleEl = document.getElementById('music-toggle') as HTMLInputElement;
+const musicSliderEl = document.getElementById('music-slider') as HTMLInputElement | null;
 const sfxToggleEl = document.getElementById('sfx-toggle') as HTMLInputElement;
+const sfxSliderEl = document.getElementById('sfx-slider') as HTMLInputElement | null;
 const shelterAdoptSfxToggleEl = document.getElementById('shelter-adopt-sfx-toggle') as HTMLInputElement;
 const vanSoundSelectEl = document.getElementById('van-sound-select') as HTMLSelectElement;
 const hideStraysToggleEl = document.getElementById('hide-strays-toggle') as HTMLInputElement;
@@ -337,11 +349,9 @@ const referralClaimBtn = document.getElementById('referral-claim-btn') as HTMLBu
 const cookieBannerEl = document.getElementById('cookie-banner')!;
 const cookieAcceptBtn = document.getElementById('cookie-accept')!;
 const cookieEssentialBtn = document.getElementById('cookie-essential')!;
-const fightAllyOverlayEl = document.getElementById('fight-ally-overlay')!;
-const fightAllyNameEl = document.getElementById('fight-ally-name')!;
-const fightAllyFightBtn = document.getElementById('fight-ally-fight')!;
-const fightAllyAllyBtn = document.getElementById('fight-ally-ally')!;
-const cpuWarningEl = document.getElementById('cpu-warning')!;
+const fightAllyOverlayEl = document.getElementById('fight-ally-overlay');
+const fightAllyFightBtn = document.getElementById('fight-ally-fight');
+const fightAllyAllyBtn = document.getElementById('fight-ally-ally');;
 const actionMenuEl = document.getElementById('action-menu')!;
 const actionMenuCloseEl = document.getElementById('action-menu-close')!;
 const actionSizeTextEl = document.getElementById('action-size-text')!;
@@ -2976,6 +2986,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           // Return to lobby
           myPlayerId = null;
           latestSnapshot = null;
+          clearStrayTiles();
           leaderboardEl.classList.remove('show');
           matchEndPlayed = false;
           matchEndTokensAwarded = false;
@@ -3018,6 +3029,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           }
           myPlayerId = null;
           latestSnapshot = null;
+          clearStrayTiles();
           leaderboardEl.classList.remove('show');
           matchEndPlayed = false;
           matchEndTokensAwarded = false;
@@ -3339,6 +3351,8 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           if (entry.gen !== curGen) interpolatedPets.delete(id);
         }
       }
+      // Update tiled static stray cache (separates static vs wandering, re-renders dirty tiles)
+      updateStrayTiles(snap.pets);
       const me = snap.players.find((q) => q.id === myPlayerId);
       if (me) {
         // Only show +1 Size popup if:
@@ -3465,6 +3479,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     gameWs = null;
     myPlayerId = null;
     latestSnapshot = null;
+    clearStrayTiles();
     lastShelterPortCharges = 0;
     predictedPlayer = null;
     matchPhase = 'playing';
@@ -3483,6 +3498,20 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         matchDisconnectInfo = { matchId: wasMatchId, mode: wasMode, attempts: 0 };
       }
       attemptAutoReconnect();
+    } else if (wasObserver) {
+      // Observer disconnect — clear match ID to prevent visibility handler from triggering player reconnect
+      currentMatchId = null;
+      // Return to lobby
+      gameWrapEl.classList.remove('visible');
+      landingEl.classList.remove('hidden');
+      authAreaEl.classList.remove('hidden');
+      exitMobileFullscreen();
+      startLiveMatchPolling();
+      startMatchClockUpdates();
+      startMatchPolling();
+      connectLobbyLeaderboard();
+      startServerClockWhenOnLobby();
+      startGameStatsPolling();
     }
   };
   await new Promise<void>((resolve, reject) => {
@@ -3534,6 +3563,16 @@ function tick(now: number): void {
   const dt = Math.min((now - lastTickTime) / 1000, 0.1);
   lastTickTime = now;
   lastRenderTime = now;
+
+  // FPS measurement: track frame deltas in a rolling window
+  fpsFrameTimes.push(now);
+  if (fpsFrameTimes.length > 60) fpsFrameTimes.shift();
+  if (now - lastFpsMeasureTime >= 500 && fpsFrameTimes.length >= 2) {
+    const oldest = fpsFrameTimes[0];
+    const span = now - oldest;
+    if (span > 0) measuredFps = Math.round(((fpsFrameTimes.length - 1) / span) * 1000);
+    lastFpsMeasureTime = now;
+  }
 
   applyJoystickToInput();
   
@@ -3608,94 +3647,9 @@ function tick(now: number): void {
       playerDisplayX = tx;
       playerDisplayY = ty;
     }
-    // Show Fight/Ally when my SHELTER overlaps another player's SHELTER — vans cannot attack
-    // Show CPU warning when overlapping a CPU shelter (no prompt)
-    // In Teams mode: no fight/ally prompt — teammates are auto-allied, opponents auto-fight
-    let overlappingId: string | null = null;
-    let cpuOverlapping = false;
-    let anyHumanShelterOverlap = false; // Track if we're overlapping any human shelter (even already-chosen ones)
-    if (latestSnapshot && selectedMode !== 'teams') {
-      const me = latestSnapshot.players.find(p => p.id === myPlayerId);
-      const myShelter = me?.shelterId ? latestSnapshot.shelters?.find(s => s.id === me.shelterId) : null;
-      
-      // Only show combat if I have a shelter
-      if (myShelter) {
-        const myR = SHELTER_BASE_RADIUS + myShelter.size * SHELTER_RADIUS_PER_SIZE;
-        
-        for (const pl of latestSnapshot.players) {
-          if (pl.id === myPlayerId) continue;
-          
-          // Other player must also have a shelter for combat
-          const otherShelter = pl.shelterId ? latestSnapshot.shelters?.find(s => s.id === pl.shelterId) : null;
-          if (!otherShelter) continue;
-          
-          const or = SHELTER_BASE_RADIUS + otherShelter.size * SHELTER_RADIUS_PER_SIZE;
-          // Use SHELTER positions for overlap detection
-          const overlap = Math.abs(myShelter.x - otherShelter.x) <= myR + or && 
-                          Math.abs(myShelter.y - otherShelter.y) <= myR + or;
-          if (!overlap) continue;
-          
-          // Combat only starts at size 10+
-          if (myShelter.size < COMBAT_MIN_SIZE || otherShelter.size < COMBAT_MIN_SIZE) continue;
-          
-          if (pl.id.startsWith('cpu-')) {
-            cpuOverlapping = true;
-            continue;
-          }
-          // Skip players we're already allied with — no fight/ally prompt needed
-          if (me?.allies?.includes(pl.id)) continue;
-          
-          anyHumanShelterOverlap = true;
-          if (!fightAllyChosenTargets.has(pl.id)) {
-            overlappingId = pl.id;
-            break;
-          }
-        }
-      }
-    }
-    if (overlappingId) {
-      const other = latestSnapshot!.players.find((p) => p.id === overlappingId);
-      fightAllyTargetId = overlappingId;
-      const otherName = other?.displayName ?? overlappingId;
-      const otherRel = getRelationshipByPlayerId(overlappingId);
-      const relLabel = otherRel === 'friend' ? ' (Friend)' : otherRel === 'foe' ? ' (Foe)' : '';
-      fightAllyNameEl.textContent = otherName + relLabel;
-      if (otherRel === 'friend') fightAllyNameEl.style.color = '#2ecc71';
-      else if (otherRel === 'foe') fightAllyNameEl.style.color = '#e74c3c';
-      else fightAllyNameEl.style.color = '';
-      const wasHidden = fightAllyOverlayEl.classList.contains('hidden');
-      fightAllyOverlayEl.classList.remove('hidden');
-      // Play attack warning when first showing human fight overlay
-      if (wasHidden && Date.now() - lastAttackWarnTime > ATTACK_WARN_COOLDOWN_MS) {
-        lastAttackWarnTime = Date.now();
-        playAttackWarning();
-      }
-    } else {
-      fightAllyOverlayEl.classList.add('hidden');
-      fightAllyTargetId = null;
-      // Only clear choices when truly not overlapping any human shelters —
-      // prevents the overlay from flickering back after clicking a button
-      if (!anyHumanShelterOverlap) {
-        fightAllyChosenTargets.clear();
-      }
-    }
-    if (cpuOverlapping) {
-      const wasHidden = cpuWarningEl.classList.contains('hidden');
-      cpuWarningEl.classList.remove('hidden');
-      // Play attack warning when first showing CPU warning
-      if (wasHidden && Date.now() - lastAttackWarnTime > ATTACK_WARN_COOLDOWN_MS) {
-        lastAttackWarnTime = Date.now();
-        playAttackWarning();
-      }
-    } else {
-      cpuWarningEl.classList.add('hidden');
-    }
   } else {
     playerDisplayX = null;
     playerDisplayY = null;
-    fightAllyOverlayEl.classList.add('hidden');
-    fightAllyTargetId = null;
-    cpuWarningEl.classList.add('hidden');
   }
 
   const interpStep = dt * (1000 / INTERP_BUFFER_MS);
@@ -5815,10 +5769,126 @@ function endStrayBatch(): void {
   ctx.restore();
 }
 
-/** Draw a single stray using pre-rendered sprite. Must be called between beginStrayBatch/endStrayBatch. */
+/** LOD rendering: strays beyond this squared distance from camera center render as cheap colored dots */
+const LOD_DIST_SQ = 500 * 500;
+const strayDotColors: Record<number, string> = {
+  [PET_TYPE_CAT]: '#d4a574',
+  [PET_TYPE_DOG]: '#a0785a',
+  [PET_TYPE_BIRD]: '#7ec8e3',
+  [PET_TYPE_RABBIT]: '#d4b896',
+  [PET_TYPE_SPECIAL]: '#ffd700',
+};
+/** Camera center coords cached per frame for LOD distance checks */
+let lodCamCenterX = 0;
+let lodCamCenterY = 0;
+
+/** Draw a single stray using pre-rendered sprite or LOD dot. Must be called between beginStrayBatch/endStrayBatch. */
 function drawStray(x: number, y: number, petType: number = PET_TYPE_CAT): void {
-  const sprite = straySprites.get(petType) ?? straySprites.get(PET_TYPE_CAT)!;
-  ctx.drawImage(sprite, x - STRAY_SPRITE_SIZE / 2, y - STRAY_SPRITE_SIZE / 2);
+  const dx = x - lodCamCenterX;
+  const dy = y - lodCamCenterY;
+  if (dx * dx + dy * dy > LOD_DIST_SQ) {
+    // Far strays: cheap 3x3 colored dot
+    ctx.fillStyle = strayDotColors[petType] ?? '#d4a574';
+    ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+  } else {
+    // Close strays: full emoji sprite
+    const sprite = straySprites.get(petType) ?? straySprites.get(PET_TYPE_CAT)!;
+    ctx.drawImage(sprite, x - STRAY_SPRITE_SIZE / 2, y - STRAY_SPRITE_SIZE / 2);
+  }
+}
+
+// --- Tiled offscreen canvas system for static strays (vx=0 && vy=0) ---
+// Divides the 4800x4800 map into a 10x10 grid of 480x480 tiles.
+// Static strays are pre-rendered into tile canvases and only re-rendered when the
+// set of strays in a tile changes (dirty-flag). This eliminates per-frame drawImage
+// calls for stationary strays, replacing them with a few large tile draws per frame.
+const STRAY_TILE_SIZE = 480;
+const STRAY_TILE_COLS = Math.ceil(MAP_WIDTH / STRAY_TILE_SIZE);   // 10
+const STRAY_TILE_ROWS = Math.ceil(MAP_HEIGHT / STRAY_TILE_SIZE);  // 10
+const STRAY_TILE_COUNT = STRAY_TILE_COLS * STRAY_TILE_ROWS;
+const strayTiles: (HTMLCanvasElement | null)[] = new Array(STRAY_TILE_COUNT).fill(null);
+const strayTileCtxs: (CanvasRenderingContext2D | null)[] = new Array(STRAY_TILE_COUNT).fill(null);
+const strayTileHashes: string[] = new Array(STRAY_TILE_COUNT).fill('');
+/** Wandering strays (vx!==0 || vy!==0) extracted from latest snapshot for per-frame rendering */
+let wanderingStrays: PetState[] = [];
+
+/** Separate snapshot strays into static (tiles) and wandering (per-frame).
+ *  Call once per snapshot update. Only re-renders tiles whose stray set changed. */
+function updateStrayTiles(pets: PetState[]): void {
+  // Bin strays into static (for tiles) and wandering (for per-frame render)
+  const tileBins: PetState[][] = [];
+  for (let i = 0; i < STRAY_TILE_COUNT; i++) tileBins.push([]);
+  const newWandering: PetState[] = [];
+
+  for (const pet of pets) {
+    if (pet.insideShelterId !== null) continue;
+    if (pet.x === 0 && pet.y === 0) continue;
+    if (pet.vx === 0 && pet.vy === 0) {
+      // Static stray → goes into a tile
+      const col = Math.min(STRAY_TILE_COLS - 1, (pet.x / STRAY_TILE_SIZE) | 0);
+      const row = Math.min(STRAY_TILE_ROWS - 1, (pet.y / STRAY_TILE_SIZE) | 0);
+      tileBins[row * STRAY_TILE_COLS + col].push(pet);
+    } else {
+      // Wandering stray → drawn individually each frame
+      newWandering.push(pet);
+    }
+  }
+  wanderingStrays = newWandering;
+
+  // Re-render only changed tiles
+  for (let i = 0; i < STRAY_TILE_COUNT; i++) {
+    const bin = tileBins[i];
+    // Build a lightweight hash from sorted pet IDs to detect changes
+    let hash = '';
+    if (bin.length > 0) {
+      // Sort in-place by id for stable comparison (pet ids are "pet-NNN")
+      bin.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      for (let j = 0; j < bin.length; j++) {
+        if (j > 0) hash += ',';
+        hash += bin[j].id;
+      }
+    }
+    if (hash === strayTileHashes[i]) continue; // unchanged
+    strayTileHashes[i] = hash;
+
+    if (bin.length === 0) {
+      // Clear tile - release canvas for GC if desired, or just null out
+      if (strayTiles[i]) {
+        strayTileCtxs[i]!.clearRect(0, 0, STRAY_TILE_SIZE, STRAY_TILE_SIZE);
+      }
+      strayTiles[i] = null;
+      continue;
+    }
+
+    // Lazy-create tile canvas
+    if (!strayTiles[i]) {
+      const c = document.createElement('canvas');
+      c.width = STRAY_TILE_SIZE;
+      c.height = STRAY_TILE_SIZE;
+      strayTiles[i] = c;
+      strayTileCtxs[i] = c.getContext('2d')!;
+    }
+    const tctx = strayTileCtxs[i]!;
+    tctx.clearRect(0, 0, STRAY_TILE_SIZE, STRAY_TILE_SIZE);
+    const col = i % STRAY_TILE_COLS;
+    const row = (i / STRAY_TILE_COLS) | 0;
+    const ox = col * STRAY_TILE_SIZE;
+    const oy = row * STRAY_TILE_SIZE;
+    for (const s of bin) {
+      const sprite = straySprites.get(s.petType) ?? straySprites.get(PET_TYPE_CAT)!;
+      tctx.drawImage(sprite, s.x - ox - STRAY_SPRITE_SIZE / 2, s.y - oy - STRAY_SPRITE_SIZE / 2);
+    }
+  }
+}
+
+/** Clear all stray tile caches (call on match reset / disconnect) */
+function clearStrayTiles(): void {
+  for (let i = 0; i < STRAY_TILE_COUNT; i++) {
+    strayTiles[i] = null;
+    strayTileCtxs[i] = null;
+    strayTileHashes[i] = '';
+  }
+  wanderingStrays = [];
 }
 
 /** Draw a breeder camp: bigger tent, small enclosed pen, random pets breeding inside */
@@ -6172,12 +6242,26 @@ function render(dt: number): void {
   const strayT = viewT - strayMargin;
   const strayB = viewB + strayMargin;
 
+  // Cache camera center for LOD distance checks
+  lodCamCenterX = safeCam.x + safeCam.w * 0.5;
+  lodCamCenterY = safeCam.y + safeCam.h * 0.5;
+
+  // 1. Draw static stray tiles (few large drawImage calls instead of hundreds of individual ones)
+  const startCol = Math.max(0, (strayL / STRAY_TILE_SIZE) | 0);
+  const endCol = Math.min(STRAY_TILE_COLS - 1, (strayR / STRAY_TILE_SIZE) | 0);
+  const startRow = Math.max(0, (strayT / STRAY_TILE_SIZE) | 0);
+  const endRow = Math.min(STRAY_TILE_ROWS - 1, (strayB / STRAY_TILE_SIZE) | 0);
+  for (let r = startRow; r <= endRow; r++) {
+    for (let c = startCol; c <= endCol; c++) {
+      const tile = strayTiles[r * STRAY_TILE_COLS + c];
+      if (tile) ctx.drawImage(tile, c * STRAY_TILE_SIZE, r * STRAY_TILE_SIZE);
+    }
+  }
+
+  // 2. Draw wandering strays individually (with viewport culling + LOD)
   beginStrayBatch();
-  for (const pet of latestSnapshot?.pets ?? []) {
-    if (pet.insideShelterId !== null) continue;
-    // Skip uninitialized pets at (0,0) - ghost stray fix
-    if (pet.x === 0 && pet.y === 0) continue;
-    // Cull BEFORE interpolation using raw snapshot position (within ~4 units of true pos)
+  for (const pet of wanderingStrays) {
+    // Cull BEFORE interpolation using raw snapshot position
     if (pet.x < strayL || pet.x > strayR || pet.y < strayT || pet.y > strayB) continue;
     const p = getInterpolatedPet(pet.id) ?? pet;
     if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
@@ -7108,6 +7192,31 @@ function render(dt: number): void {
       eventPanelOpen = false;
     }
   }
+
+  // Match stats panel (FPS + ping) — sits above the megaphone on the left side
+  if (matchPhase === 'playing') {
+    statsToggleBtnEl.classList.remove('hidden');
+    if (statsPanelOpen) {
+      statsPanelEl.classList.remove('hidden');
+      statsFpsEl.textContent = measuredFps > 0 ? String(measuredFps) : '--';
+      statsPingEl.textContent = currentRttMs > 0 ? `${currentRttMs}ms` : '--';
+      // Push megaphone button + event panel below the open stats panel
+      const panelBottom = 98 + statsPanelEl.offsetHeight + 6;
+      eventToggleBtnEl.style.top = `${panelBottom}px`;
+      eventPanelEl.style.top = `${panelBottom + 42}px`;
+    } else {
+      statsPanelEl.classList.add('hidden');
+      // Stats button visible but panel closed — megaphone sits just below the stats button
+      eventToggleBtnEl.style.top = '98px';
+      eventPanelEl.style.top = '140px';
+    }
+  } else {
+    statsToggleBtnEl.classList.add('hidden');
+    statsPanelEl.classList.add('hidden');
+    // No stats button — megaphone returns to its default position
+    eventToggleBtnEl.style.top = '56px';
+    eventPanelEl.style.top = '98px';
+  }
   
   const iAmEliminated = !!(me?.eliminated);
   const matchEndedEarly = !!(latestSnapshot?.matchEndedEarly);
@@ -7257,6 +7366,7 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
     matchEndWasStrayLoss = false;
     wasPlayerObserver = false; // Reset observer state for new match
     latestSnapshot = null;
+    clearStrayTiles();
     connectionOverlayEl.classList.remove('hidden');
     connectionOverlayEl.innerHTML = selectedMode === 'ffa'
       ? '<h2>Connecting…</h2><p>Joining FFA lobby…</p>'
@@ -7283,6 +7393,7 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
     matchEndTokensAwarded = false;
     matchEndWasStrayLoss = false;
     latestSnapshot = null;
+    clearStrayTiles();
     currentMatchId = null;
     gameWrapEl.classList.remove('visible');
     landingEl.classList.remove('hidden');
@@ -7426,11 +7537,11 @@ function sendFightAllyChoice(choice: 'fight' | 'ally'): void {
   if (!fightAllyTargetId || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
   gameWs.send(JSON.stringify({ type: 'fightAlly', targetId: fightAllyTargetId, choice }));
   fightAllyChosenTargets.add(fightAllyTargetId);
-  fightAllyOverlayEl.classList.add('hidden');
+  fightAllyOverlayEl?.classList.add('hidden');
   fightAllyTargetId = null;
 }
-fightAllyFightBtn.addEventListener('click', () => sendFightAllyChoice('fight'));
-fightAllyAllyBtn.addEventListener('click', () => sendFightAllyChoice('ally'));
+fightAllyFightBtn?.addEventListener('click', () => sendFightAllyChoice('fight'));
+fightAllyAllyBtn?.addEventListener('click', () => sendFightAllyChoice('ally'));
 
 // --- Ground button ---
 groundBtnEl.addEventListener('click', () => {
@@ -7750,12 +7861,36 @@ musicToggleEl.checked = getMusicEnabled();
 sfxToggleEl.checked = getSfxEnabled();
 shelterAdoptSfxToggleEl.checked = getShelterAdoptSfxEnabled();
 vanSoundSelectEl.value = getVanSoundType();
+
+// Music volume slider (in-match settings)
+if (musicSliderEl) {
+  musicSliderEl.value = String(getMusicEnabled() ? getMusicVolume() : 0);
+  musicSliderEl.addEventListener('input', () => {
+    const vol = parseInt(musicSliderEl!.value, 10);
+    setMusicVolume(vol);
+    musicToggleEl.checked = vol > 0;
+    if (vol > 0) playMusic();
+  });
+}
 musicToggleEl.addEventListener('change', () => {
   setMusicEnabled(musicToggleEl.checked);
+  if (musicSliderEl) musicSliderEl.value = String(musicToggleEl.checked ? getMusicVolume() : 0);
   if (musicToggleEl.checked) playMusic();
 });
+
+// SFX volume slider (in-match settings)
+if (sfxSliderEl) {
+  sfxSliderEl.value = String(getSfxEnabled() ? getSfxVolume() : 0);
+  sfxSliderEl.addEventListener('input', () => {
+    const vol = parseInt(sfxSliderEl!.value, 10);
+    setSfxVolume(vol);
+    sfxToggleEl.checked = vol > 0;
+    if (vol <= 0) stopEngineLoop();
+  });
+}
 sfxToggleEl.addEventListener('change', () => {
   setSfxEnabled(sfxToggleEl.checked);
+  if (sfxSliderEl) sfxSliderEl.value = String(sfxToggleEl.checked ? getSfxVolume() : 0);
   if (!sfxToggleEl.checked) stopEngineLoop(); // Stop van engine when SFX disabled
 });
 shelterAdoptSfxToggleEl.addEventListener('change', () => {
@@ -7776,6 +7911,9 @@ hideStraysToggleEl.addEventListener('change', () => {
 
 settingsBtnEl.addEventListener('click', () => {
   settingsPanelEl.classList.toggle('hidden');
+  // Sync slider values when opening settings
+  if (musicSliderEl) musicSliderEl.value = String(getMusicEnabled() ? getMusicVolume() : 0);
+  if (sfxSliderEl) sfxSliderEl.value = String(getSfxEnabled() ? getSfxVolume() : 0);
   // Hide "Exit to lobby" in spectator mode (use the observer panel's back button instead)
   if (isObserver) {
     exitToLobbyBtnEl.style.display = 'none';
@@ -7792,6 +7930,16 @@ eventToggleBtnEl.addEventListener('click', () => {
     eventPanelEl.classList.remove('hidden');
   } else {
     eventPanelEl.classList.add('hidden');
+  }
+});
+
+// Stats panel toggle
+statsToggleBtnEl.addEventListener('click', () => {
+  statsPanelOpen = !statsPanelOpen;
+  if (statsPanelOpen) {
+    statsPanelEl.classList.remove('hidden');
+  } else {
+    statsPanelEl.classList.add('hidden');
   }
 });
 
@@ -7838,6 +7986,7 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
   }
   myPlayerId = null;
   latestSnapshot = null;
+  clearStrayTiles();
   leaderboardEl.classList.remove('show');
   matchEndPlayed = false;
   matchEndTokensAwarded = false;
@@ -8208,12 +8357,15 @@ async function connectAsSpectator(matchId: string): Promise<void> {
         const prev = interpolatedPlayers.get(p.id)?.next ?? p;
         interpolatedPlayers.set(p.id, { prev, next: { ...p }, t: 0 });
       }
+      // Update tiled static stray cache for spectator view
+      updateStrayTiles(snap.pets);
     }
   };
   gameWsLocal.onclose = () => {
     // Return to lobby on spectator disconnect
     gameWs = null;
     isObserver = false;
+    currentMatchId = null; // Prevent visibility handler from triggering player reconnect
     observerOverlayMinimized = false;
     observerOverlayEl.classList.add('hidden');
     observerMiniBtnEl.classList.add('hidden');
@@ -8933,18 +9085,28 @@ function setupInstantRescueButton(): void {
   const btn = document.getElementById('instant-rescue-btn') as HTMLButtonElement | null;
   if (!btn) return;
 
-  // Hide instant rescue for mills/camps — must play the minigame manually
-  if (breederGame.isMill) {
+  // Instant rescue availability:
+  // - Mills: always available (any level)
+  // - Camps: only for level 3+
+  // Both require a tier 3+ shelter
+  if (!breederGame.isMill && breederGame.level < 3) {
     btn.classList.add('hidden');
     return;
   }
 
-  // Only show for tier 3+ shelters
+  // Only show if player or any ally has a tier 3+ shelter
   const me = latestSnapshot?.players.find(p => p.id === myPlayerId);
   const myShelter = latestSnapshot?.shelters?.find(s => s.ownerId === myPlayerId);
-  const shelterTier = myShelter?.tier ?? 0;
+  let bestTier = myShelter?.tier ?? 0;
+  // Check allies' shelter tiers (teammates in Teams mode are included as allies)
+  if (me?.allies && latestSnapshot?.shelters) {
+    for (const allyId of me.allies) {
+      const allyShelter = latestSnapshot.shelters.find(s => s.ownerId === allyId);
+      if (allyShelter && allyShelter.tier > bestTier) bestTier = allyShelter.tier;
+    }
+  }
   
-  if (shelterTier < 3) {
+  if (bestTier < 3) {
     btn.classList.add('hidden');
     return;
   }
@@ -8966,6 +9128,9 @@ function setupInstantRescueButton(): void {
       showToast(`Not enough RT! Need ${cost}`, 'error');
       return;
     }
+    // Disable immediately to prevent double-clicks
+    newBtn.disabled = true;
+    newBtn.classList.add('hidden');
     // Send instant rescue request to server
     sendInstantRescue();
   });
@@ -8984,10 +9149,26 @@ function sendInstantRescue(): void {
     isMill: breederGame.isMill
   }));
   
-  // Immediately end the minigame with full success (server will validate)
+  // Mark all pets as rescued locally
   breederGame.rescuedCount = breederGame.totalPets;
   breederGame.pets.forEach(p => p.rescued = true);
-  endBreederMiniGame(true);
+  
+  // Stop timers
+  if (breederGame.timerInterval) {
+    clearInterval(breederGame.timerInterval);
+    breederGame.timerInterval = null;
+  }
+  if (breederGame.addPetInterval) {
+    clearInterval(breederGame.addPetInterval);
+    breederGame.addPetInterval = null;
+  }
+  
+  // Show result UI (do NOT call endBreederMiniGame — it sends a duplicate breederComplete)
+  breederFoodsEl.style.display = 'none';
+  breederResultEl.classList.remove('hidden');
+  breederCloseBtnEl.classList.remove('hidden');
+  breederResultTitleEl.textContent = 'All Pets Rescued!';
+  breederRewardsEl.innerHTML = '<p style="color:rgba(255,255,255,0.7)">Calculating rewards...</p>';
 }
 
 /** Show/hide water and bowl buttons based on breeder level */
@@ -9272,6 +9453,10 @@ function endBreederMiniGame(completed: boolean): void {
       level: breederGame.level,
     }));
   }
+  
+  // Hide instant rescue button when game ends normally
+  const instantBtn = document.getElementById('instant-rescue-btn') as HTMLButtonElement | null;
+  if (instantBtn) instantBtn.classList.add('hidden');
   
   // Show result and continue button (will be updated when server responds with rewards)
   breederFoodsEl.style.display = 'none';
@@ -10186,7 +10371,8 @@ document.addEventListener('visibilitychange', () => {
   }
   
   // Check if we have an active match but the websocket is dead
-  if (currentMatchId && (!gameWs || gameWs.readyState !== WebSocket.OPEN) && !matchEndedNormally) {
+  // Skip reconnect for observers — they should return to lobby, not rejoin as a player
+  if (currentMatchId && (!gameWs || gameWs.readyState !== WebSocket.OPEN) && !matchEndedNormally && !isObserver) {
     const mode = selectedMode;
     if (mode === 'ffa' || mode === 'teams') {
       // The websocket died while the page was hidden (mobile sleep)

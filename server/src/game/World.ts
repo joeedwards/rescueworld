@@ -27,16 +27,6 @@ import {
   ADOPTION_TICKS_GROUNDED,
   ADOPTION_FAST_PET_THRESHOLD,
   GROWTH_PER_ADOPTION,
-  COMBAT_MIN_SIZE,
-  COMBAT_GRACE_TICKS,
-  COMBAT_TRANSFER_SIZE_RATIO_DIVISOR,
-  COMBAT_PET_WEIGHT,
-  COMBAT_STRENGTH_WEIGHT,
-  COMBAT_STRAY_VARIANCE,
-  COMBAT_MAX_VARIANCE,
-  EARLY_GAME_PROTECTION_SIZE,
-  EARLY_GAME_PROTECTION_ADOPTIONS,
-  EARLY_GAME_PROTECTION_TICKS,
   INITIAL_SHELTER_SIZE,
   STRAY_SPAWN_TICKS,
   STRAY_SPAWN_COUNT,
@@ -81,6 +71,55 @@ import { BOSS_MILL_HORSE, BOSS_MILL_CAT, BOSS_MILL_DOG, BOSS_MILL_BIRD, BOSS_MIL
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+/** Per-bot skill profile – randomised at spawn, never persisted. */
+interface BotProfile {
+  startingRT: number;            // 0-1000
+  shelterBuilder: boolean;       // will attempt to build shelter
+  hesitationRate: number;        // 0.005-0.04 (lower = better)
+  optimalTargeting: number;      // 0.3-0.9 (higher = picks nearest more often)
+  bossParticipant: boolean;      // will interact with boss mills
+  shelterBuildThreshold: number; // size at which bot tries to build (50-120)
+  sizeBonus: number;             // pre-match size bonus (0-30)
+  speedBoost: boolean;           // pre-match speed boost
+  ports: number;                 // starting port charges (0-3)
+  adoptSpeedBoosts: number;      // starting adopt speed boosts (0-2)
+}
+
+/** Generate a random bot profile. `matchMode` influences probabilities. */
+function generateBotProfile(matchMode: 'ffa' | 'solo' | 'teams'): BotProfile {
+  // RT weighted toward lower end (quadratic distribution)
+  const startingRT = Math.floor(Math.random() ** 2 * 1001); // 0-1000
+
+  // Shelter builders more likely in teams mode
+  const shelterBuilder = matchMode === 'teams'
+    ? Math.random() < 0.50
+    : Math.random() < 0.30;
+
+  const hesitationRate = 0.005 + Math.random() * 0.035;    // 0.005-0.04
+  const optimalTargeting = 0.3 + Math.random() * 0.6;      // 0.3-0.9
+  const bossParticipant = Math.random() < 0.40;
+  const shelterBuildThreshold = 50 + Math.floor(Math.random() * 71); // 50-120
+
+  // Pre-match boosts (same distribution a human might bring in)
+  const sizeBonus = Math.floor(Math.random() ** 1.5 * 31); // 0-30, skewed low
+  const speedBoost = Math.random() < 0.25;
+
+  // Port charges: 60% 0, 25% 1, 15% 2-3
+  let ports = 0;
+  const portRoll = Math.random();
+  if (portRoll > 0.85) ports = 2 + Math.floor(Math.random() * 2); // 2-3
+  else if (portRoll > 0.60) ports = 1;
+
+  // Adopt speed boosts: 0-2
+  const adoptSpeedBoosts = Math.floor(Math.random() * 3);
+
+  return {
+    startingRT, shelterBuilder, hesitationRate, optimalTargeting,
+    bossParticipant, shelterBuildThreshold, sizeBonus, speedBoost,
+    ports, adoptSpeedBoosts,
+  };
 }
 
 /** Get random pet type with weighted distribution: 35% cat, 35% dog, 15% bird, 15% rabbit (no special) */
@@ -158,6 +197,7 @@ export class World {
   private matchEndAt = 0;
   private matchStarted = false;
   private matchEndedEarly = false; // True if match ended due to domination
+  private bossModePlayed = false; // True once boss mode has been triggered (prevents re-triggering)
   private players = new Map<string, PlayerState>();
   private pets = new Map<string, PetState>();
   /** Reusable array of outdoor strays for snapshots (avoids per-tick allocation) */
@@ -204,6 +244,8 @@ export class World {
   private matchProcessed = false; // Whether match-end inventory/leaderboard has been processed
   
   // CPU AI target persistence to prevent diagonal jitter
+  /** Per-bot skill profiles – generated at spawn, never stored. */
+  private cpuProfiles = new Map<string, BotProfile>();
   private cpuTargets = new Map<string, { x: number; y: number; type: 'stray' | 'pickup' | 'zone' | 'wander'; breederClaimId?: string }>();
   /** CPU retarget cooldown: tick when bot can pick a new target (simulates reaction time) */
   private cpuRetargetCooldown = new Map<string, number>();
@@ -230,6 +272,10 @@ export class World {
   private breederClaimedBy = new Map<string, string>();
   /** Cooldown preventing CPU from targeting breeders after abandoning one: cpuId -> tick when they can target again */
   private cpuBreederCooldown = new Map<string, number>();
+  /** Tick-based cooldown for CPU shelter building checks: cpuId -> next check tick */
+  private cpuShelterBuildCooldown = new Map<string, number>();
+  /** Tick-based cooldown for CPU boss ingredient purchases: cpuId -> next purchase tick */
+  private cpuBossNextPurchaseTick = new Map<string, number>();
   /** Cooldown after a human player retreats from a camp/mill: playerId -> tick when they can engage again */
   private retreatCooldownUntilTick = new Map<string, number>();
   
@@ -431,6 +477,18 @@ export class World {
       this.playerAdoptSpeedBoosts.set(id, adoptSpeedBoosts);
       log(`Player ${name} starting with ${adoptSpeedBoosts} adopt speed boost(s)`);
     }
+  }
+
+  /** Generate and store a random skill profile for a CPU player. Returns the profile so GameServer can read boost values. */
+  generateCpuProfile(cpuId: string): BotProfile {
+    const profile = generateBotProfile(this.matchMode);
+    this.cpuProfiles.set(cpuId, profile);
+    return profile;
+  }
+
+  /** Get a stored CPU profile (if any). */
+  getCpuProfile(cpuId: string): BotProfile | undefined {
+    return this.cpuProfiles.get(cpuId);
   }
 
   private shelterInZoneAABB(p: PlayerState, zone: AdoptionZoneState): boolean {
@@ -990,11 +1048,18 @@ export class World {
     const zone = this.adoptionZones[0];
     if (!zone) return 0;
 
+    // Boss mode override: navigate to mills or flee tycoon
+    if (this.bossMode?.active) {
+      return this.cpuBossNavigate(p);
+    }
+
     // Bot imperfection: occasional hesitation (stand still for ~0.5-1.5s simulating thinking)
+    const profile = this.cpuProfiles.get(p.id);
     const hesitateUntil = this.cpuHesitateTill.get(p.id) ?? 0;
     if (this.tick < hesitateUntil) return 0; // Stand still during hesitation
-    // ~2% chance per tick to hesitate for 12-38 ticks (0.5-1.5s)
-    if (Math.random() < 0.02) {
+    // Hesitation chance from profile (default 0.02 for legacy bots without profile)
+    const hesitationRate = profile?.hesitationRate ?? 0.02;
+    if (Math.random() < hesitationRate) {
       const duration = 12 + Math.floor(Math.random() * 26);
       this.cpuHesitateTill.set(p.id, this.tick + duration);
     }
@@ -1125,13 +1190,15 @@ export class World {
     }
 
     // Bot imperfection: retarget cooldown (don't pick a new target immediately)
+    // Smarter bots (high optimalTargeting) retarget faster
     const cooldownUntil = this.cpuRetargetCooldown.get(p.id) ?? 0;
     if (this.tick < cooldownUntil) {
       // Wander aimlessly during cooldown
       return 0;
     }
-    // Set a short cooldown before next retarget (15-40 ticks = 0.6-1.6s)
-    this.cpuRetargetCooldown.set(p.id, this.tick + 15 + Math.floor(Math.random() * 25));
+    // Cooldown: 10-40 ticks, inversely proportional to skill
+    const retargetBase = Math.floor(10 + (1 - (profile?.optimalTargeting ?? 0.5)) * 30);
+    this.cpuRetargetCooldown.set(p.id, this.tick + retargetBase + Math.floor(Math.random() * 10));
 
     // Need new target - look for strays/pickups across the ENTIRE map
     const strayCandidates: { x: number; y: number; d: number }[] = [];
@@ -1178,16 +1245,19 @@ export class World {
     }
     pickupCandidates.sort((a, b) => a.d - b.d);
 
-    // Pick target with significant randomness (bots are good but not optimal)
+    // Pick target with skill-based randomness from profile
+    // optimalTargeting (0.3-0.9): higher = picks nearest more often
+    const opt = profile?.optimalTargeting ?? 0.5;
     const pickWithJitter = <T extends { x: number; y: number; d: number }>(arr: T[]): T | null => {
       if (arr.length === 0) return null;
       if (arr.length === 1) return arr[0];
-      // 50% nearest, 25% second nearest, 15% third, 10% random further
+      // Distribute probability: opt% nearest, remaining split across 2nd/3rd/random
+      const remaining = 1 - opt;
       const r = Math.random();
       let idx: number;
-      if (r < 0.50) idx = 0;
-      else if (r < 0.75) idx = Math.min(1, arr.length - 1);
-      else if (r < 0.90) idx = Math.min(2, arr.length - 1);
+      if (r < opt) idx = 0;
+      else if (r < opt + remaining * 0.45) idx = Math.min(1, arr.length - 1);
+      else if (r < opt + remaining * 0.75) idx = Math.min(2, arr.length - 1);
       else idx = Math.min(Math.floor(Math.random() * Math.min(5, arr.length)), arr.length - 1);
       return arr[idx] ?? null;
     };
@@ -1226,6 +1296,114 @@ export class World {
     const wanderY = MAP_HEIGHT * (0.1 + Math.random() * 0.8);
     this.setCpuTarget(p.id, { x: wanderX, y: wanderY, type: 'wander' });
     return this.directionToward(p.x, p.y, wanderX, wanderY);
+  }
+
+  /** Boss mode navigation AI for CPU bots. Returns input flags (movement direction). */
+  private cpuBossNavigate(p: PlayerState): number {
+    if (!this.bossMode?.active) return 0;
+    const bm = this.bossMode;
+    const profile = this.cpuProfiles.get(p.id);
+
+    // Non-participant bots just wander during boss mode
+    if (!profile || !profile.bossParticipant) {
+      const wanderX = MAP_WIDTH * (0.1 + Math.random() * 0.8);
+      const wanderY = MAP_HEIGHT * (0.1 + Math.random() * 0.8);
+      const currentTarget = this.cpuTargets.get(p.id);
+      if (!currentTarget || currentTarget.type !== 'wander' || dist(p.x, p.y, currentTarget.x, currentTarget.y) < 30) {
+        this.setCpuTarget(p.id, { x: wanderX, y: wanderY, type: 'wander' });
+      }
+      const t = this.cpuTargets.get(p.id);
+      return t ? this.directionToward(p.x, p.y, t.x, t.y) : 0;
+    }
+
+    const atMillId = bm.playerAtMills.get(p.id) ?? -1;
+
+    // If at a mill, check if tycoon is heading here - flee if danger
+    if (atMillId >= 0) {
+      const mill = bm.mills[atMillId];
+      if (mill) {
+        // Flee if tycoon is targeting THIS mill and is within warning distance
+        if (bm.tycoonTargetMill === atMillId) {
+          const tycoonDist = dist(bm.tycoonX, bm.tycoonY, mill.x, mill.y);
+          // Warning: tycoon within ~3 seconds of arriving (speed * 3s * tick_rate)
+          const warningDist = BOSS_TYCOON_SPEED * TICK_RATE * 3;
+          if (tycoonDist < warningDist) {
+            // Flee away from the mill
+            const fleeX = clamp(p.x + (p.x - mill.x) * 3, 50, MAP_WIDTH - 50);
+            const fleeY = clamp(p.y + (p.y - mill.y) * 3, 50, MAP_HEIGHT - 50);
+            this.setCpuTarget(p.id, { x: fleeX, y: fleeY, type: 'wander' });
+            return this.directionToward(p.x, p.y, fleeX, fleeY);
+          }
+        }
+      }
+      // Otherwise stay still at mill (auto-purchase happens in cpuBossAutoPurchase)
+      return 0;
+    }
+
+    // Not at a mill - find the best uncompleted, unoccupied mill to go to
+    // Build set of occupied mills (mills another player is already at)
+    const occupiedMills = new Set<number>();
+    for (const [otherId, otherMillId] of bm.playerAtMills) {
+      if (otherId !== p.id) occupiedMills.add(otherMillId);
+    }
+
+    let bestMill: { x: number; y: number; idx: number; d: number } | null = null;
+    for (let i = 0; i < bm.mills.length; i++) {
+      const mill = bm.mills[i];
+      if (mill.completed) continue;
+      // Skip mills already occupied by another player (first come, first served)
+      if (occupiedMills.has(i)) continue;
+      // Avoid the mill the tycoon is currently heading to (unless all others are done)
+      const availableCount = bm.mills.filter((m, idx) => !m.completed && !occupiedMills.has(idx)).length;
+      if (i === bm.tycoonTargetMill && availableCount > 1) continue;
+      const d = dist(p.x, p.y, mill.x, mill.y);
+      if (!bestMill || d < bestMill.d) {
+        bestMill = { x: mill.x, y: mill.y, idx: i, d };
+      }
+    }
+
+    if (bestMill) {
+      this.setCpuTarget(p.id, { x: bestMill.x, y: bestMill.y, type: 'pickup' });
+      return this.directionToward(p.x, p.y, bestMill.x, bestMill.y);
+    }
+
+    // All mills completed or none available - just wander
+    return 0;
+  }
+
+  /** Periodically check if CPU bots with shelterBuilder profile should build a shelter. */
+  private cpuTryShelterBuild(): void {
+    for (const p of this.players.values()) {
+      if (!p.id.startsWith('cpu-')) continue;
+      if (this.eliminatedPlayerIds.has(p.id)) continue;
+      if (this.hasShelter(p.id)) continue; // already built
+
+      const profile = this.cpuProfiles.get(p.id);
+      if (!profile || !profile.shelterBuilder) continue;
+
+      // Only check every ~100 ticks (4 seconds) per bot to reduce cost
+      const nextCheck = this.cpuShelterBuildCooldown.get(p.id) ?? 0;
+      if (this.tick < nextCheck) continue;
+      this.cpuShelterBuildCooldown.set(p.id, this.tick + 75 + Math.floor(Math.random() * 50)); // 3-5s
+
+      // Must meet profile's size threshold and have enough RT
+      if (p.size < profile.shelterBuildThreshold) continue;
+      const rt = this.playerMoney.get(p.id) ?? 0;
+      if (rt < SHELTER_BUILD_COST) continue;
+
+      // Don't build inside or too close to adoption zone
+      const zone = this.adoptionZones[0];
+      if (zone) {
+        const d = dist(p.x, p.y, zone.x, zone.y);
+        if (d < zone.radius + 150) continue; // stay well outside the zone
+      }
+
+      // Attempt to build
+      const result = this.buildShelter(p.id);
+      if (result.success) {
+        log(`CPU ${p.id} (${p.displayName}) built a shelter at (${Math.round(p.x)}, ${Math.round(p.y)})`);
+      }
+    }
   }
 
   private applyInput(p: PlayerState, inputFlags: number): void {
@@ -1899,8 +2077,9 @@ export class World {
             insideShelterId: null,
             petType: randomPetType(),
           });
-          // Cap wandering strays at 300 — excess spawn as stationary (no client interp cost)
-          if (this.wildStrayIds.size < 300) {
+          // Cap wandering strays at 500 — excess spawn as stationary (no client interp cost)
+          // Raised from 300→500 thanks to client-side tiled rendering + LOD optimisation.
+          if (this.wildStrayIds.size < 500) {
             this.wildStrayIds.add(petId);
           } else {
             // Spawn as stationary stray (no velocity)
@@ -2097,171 +2276,11 @@ export class World {
       p.y = clamp(ny, radius, MAP_HEIGHT - radius);
     }
 
-    // Combat: overlapping shelters can fight after sustained overlap time
-    const playerList = Array.from(this.players.values());
-    let strayCountForCombat = 0;
-    for (const pet of this.pets.values()) {
-      if (pet.insideShelterId === null) strayCountForCombat++;
-    }
-    for (let i = 0; i < playerList.length; i++) {
-      const a = playerList[i];
-      if (this.eliminatedPlayerIds.has(a.id)) continue;
-      for (let j = i + 1; j < playerList.length; j++) {
-        const b = playerList[j];
-        if (this.eliminatedPlayerIds.has(b.id)) continue;
-        const key = World.pairKey(a.id, b.id);
-        // Must be size 10+ to engage
-        if (a.size < COMBAT_MIN_SIZE || b.size < COMBAT_MIN_SIZE) {
-          this.combatOverlapTicks.delete(key);
-          continue;
-        }
-        // Only shelters can engage in combat - vans cannot attack
-        const shelterA = this.getPlayerShelter(a.id);
-        const shelterB = this.getPlayerShelter(b.id);
-        if (!shelterA || !shelterB) {
-          this.combatOverlapTicks.delete(key);
-          continue;
-        }
-        // Use shelter positions and sizes for combat detection
-        const ra = Math.min(shelterVisualRadius(shelterA.size), 400);
-        const rb = Math.min(shelterVisualRadius(shelterB.size), 400);
-        if (!aabbOverlap(shelterA.x, shelterA.y, ra, shelterB.x, shelterB.y, rb)) {
-          this.combatOverlapTicks.delete(key);
-          continue;
-        }
-        // Teams mode: teammates never fight (already allied); skip combat entirely for same team
-        if (this.matchMode === 'teams') {
-          const teamA = this.playerTeams.get(a.id);
-          const teamB = this.playerTeams.get(b.id);
-          if (teamA && teamB && teamA === teamB) {
-            this.combatOverlapTicks.delete(key);
-            continue;
-          }
-          // Opponents in Teams mode always fight - no ally popup, no ally negotiation
-          if (teamA && teamB && teamA !== teamB) {
-            // Skip ally logic entirely - go straight to combat
-          }
-        }
-        // Check ally: only ally if BOTH chose 'ally' for each other (FFA/Solo only in practice)
-        const aIsCpu = a.id.startsWith('cpu-');
-        const bIsCpu = b.id.startsWith('cpu-');
-        if (fightAllyChoices && this.matchMode !== 'teams') {
-          const aToB = fightAllyChoices.get(`${a.id},${b.id}`);
-          const bToA = fightAllyChoices.get(`${b.id},${a.id}`);
-          
-          // CPU ally logic: if human chose ally towards CPU, CPU randomly decides
-          // CPU has 40% base chance to ally, higher if human is larger (they're safer)
-          if (aIsCpu && !bIsCpu && bToA === 'ally' && aToB === undefined) {
-            const cpuAllyChance = 0.4 + (b.size > a.size ? 0.2 : 0);
-            fightAllyChoices.set(`${a.id},${b.id}`, Math.random() < cpuAllyChance ? 'ally' : 'fight');
-          }
-          if (bIsCpu && !aIsCpu && aToB === 'ally' && bToA === undefined) {
-            const cpuAllyChance = 0.4 + (a.size > b.size ? 0.2 : 0);
-            fightAllyChoices.set(`${b.id},${a.id}`, Math.random() < cpuAllyChance ? 'ally' : 'fight');
-          }
-          
-          // Re-check after CPU decision
-          const aToBFinal = fightAllyChoices.get(`${a.id},${b.id}`);
-          const bToAFinal = fightAllyChoices.get(`${b.id},${a.id}`);
-          if (aToBFinal === 'ally' && bToAFinal === 'ally') {
-            this.combatOverlapTicks.delete(key);
-            continue;
-          }
-        }
-        // Check for mutual ally requests (clicked ally on each other before overlap) - not in Teams
-        if (!aIsCpu && !bIsCpu && this.matchMode !== 'teams' && hasMutualAllyRequest(a.id, b.id)) {
-          this.combatOverlapTicks.delete(key);
-          continue;
-        }
-        // Gradual combat: transfer 1 size per combat tick (territorial.io style)
-        // Combat tick interval = faster player's adoption interval (faster adopters attack faster)
-        const intervalA = this.getAdoptionIntervalTicks(a, false);
-        const intervalB = this.getAdoptionIntervalTicks(b, false);
-        const combatTickInterval = Math.max(1, Math.min(intervalA, intervalB));
-        
-        const nextTicks = (this.combatOverlapTicks.get(key) ?? 0) + 1;
-        this.combatOverlapTicks.set(key, nextTicks);
-        
-        // Grace period: no combat damage until players have had time to click Ally
-        if (nextTicks < COMBAT_GRACE_TICKS) continue;
-        
-        // Only resolve one "combat tick" per interval (after grace period)
-        const ticksAfterGrace = nextTicks - COMBAT_GRACE_TICKS;
-        if (ticksAfterGrace % combatTickInterval !== 0) continue;
+    // CPU shelter building (check periodically, not every tick)
+    this.cpuTryShelterBuild();
 
-        // Resolve combat with variance (size + pets carried + adopt speed)
-        const strengthA = (a.size + a.petsInside.length * COMBAT_PET_WEIGHT) * (ADOPTION_TICKS_INTERVAL / intervalA);
-        const strengthB = (b.size + b.petsInside.length * COMBAT_PET_WEIGHT) * (ADOPTION_TICKS_INTERVAL / intervalB);
-        const baseChanceA = 0.5 + (strengthA - strengthB) * COMBAT_STRENGTH_WEIGHT;
-        const variance = Math.min(COMBAT_MAX_VARIANCE, strayCountForCombat * COMBAT_STRAY_VARIANCE);
-        const jitter = (Math.random() - 0.5) * 2 * variance;
-        const chanceA = clamp(baseChanceA + jitter, 0.1, 0.9);
-        const winner = Math.random() < chanceA ? a : b;
-        const loser = winner === a ? b : a;
-
-        // Transfer scales with winner size so large vs small is nearly instant (within ~2 adopt intervals)
-        const transferCap = Math.max(1, Math.floor(winner.size / COMBAT_TRANSFER_SIZE_RATIO_DIVISOR));
-        let transfer = Math.min(Math.floor(loser.size), transferCap);
-
-        // Early-game protection: no elimination below EARLY_GAME_PROTECTION_SIZE until conditions met
-        const matchAgeTicks = this.tick - this.matchStartTick;
-        const maxAdoptions = Math.max(...Array.from(this.players.values()).map(p => p.totalAdoptions));
-        const earlyGameActive = matchAgeTicks < EARLY_GAME_PROTECTION_TICKS && maxAdoptions < EARLY_GAME_PROTECTION_ADOPTIONS;
-        if (earlyGameActive) {
-          // Cap transfer so loser doesn't drop below protection threshold
-          const maxTransfer = Math.max(0, Math.floor(loser.size) - EARLY_GAME_PROTECTION_SIZE);
-          transfer = Math.min(transfer, maxTransfer);
-        }
-
-        if (transfer > 0) {
-          winner.size += transfer;
-          loser.size -= transfer;
-          
-          // Risk-on-carry: Raid drop - loser drops 50% of carried strays as loose strays
-          const dropCount = Math.floor(loser.petsInside.length * 0.5);
-          for (let i = 0; i < dropCount; i++) {
-            const droppedId = loser.petsInside.pop();
-            if (droppedId) {
-              const pet = this.pets.get(droppedId);
-              if (pet) {
-                pet.insideShelterId = null;
-                // Drop strays nearby so others can steal them
-                pet.x = loser.x + (Math.random() - 0.5) * 150;
-                pet.y = loser.y + (Math.random() - 0.5) * 150;
-              }
-            }
-          }
-        }
-
-        if (loser.size <= World.ELIMINATED_SIZE_THRESHOLD) {
-          this.eliminatedPlayerIds.add(loser.id);
-          // Clean up CPU state when eliminated
-          const cpuTarget = this.cpuTargets.get(loser.id);
-          if (cpuTarget?.breederClaimId) {
-            this.breederClaimedBy.delete(cpuTarget.breederClaimId);
-          }
-          this.cpuTargets.delete(loser.id);
-          this.cpuAtBreeder.delete(loser.id);
-          this.pendingCpuBreederCompletions.delete(loser.id);
-        }
-        // Eject excess pets from loser when capacity drops below what they're holding
-        const loserCapacity = Math.floor(loser.size);
-        while (loser.petsInside.length > Math.max(0, loserCapacity)) {
-          const ejectedId = loser.petsInside.pop();
-          if (ejectedId) {
-            const pet = this.pets.get(ejectedId);
-            if (pet) {
-              pet.insideShelterId = null;
-              pet.x = loser.x + (Math.random() - 0.5) * 100;
-              pet.y = loser.y + (Math.random() - 0.5) * 100;
-            }
-          }
-        }
-      }
-    }
-    
-    // Shelters are protected - no van-vs-shelter combat (removed for cooperative gameplay)
-    // Vans can push each other away from shelters but cannot attack
+    // Combat removed — no shelter-vs-shelter fighting, no elimination, no size transfer.
+    // Shelters coexist peacefully; alliances are for sharing benefits (Instant Rescue, pet delivery).
     
     // Stray count for loss and warnings
     let strayCountVictory = 0;
@@ -2290,7 +2309,8 @@ export class World {
     }
     // Victory check: zero strays AND all breeders cleared (no camps, no mills)
     // Triggers boss mode in ALL match modes (solo, ffa, teams)
-    if (!this.matchEndedEarly && this.shelters.size > 0 && !this.bossMode?.active) {
+    // bossModePlayed prevents re-triggering after a loss (boss mode is a one-shot event)
+    if (!this.matchEndedEarly && !this.bossModePlayed && this.shelters.size > 0 && !this.bossMode?.active) {
       const allBreedersCleared = this.breederShelters.size === 0 && this.breederCamps.size === 0;
       if (strayCountVictory === 0 && allBreedersCleared) {
         this.enterBossMode();
@@ -2748,8 +2768,9 @@ export class World {
 
   /** True outdoor stray count (before snapshot cap). */
   private outdoorStrayCount = 0;
-  /** Max strays included in a single snapshot (caps decode + network cost). */
-  private static readonly SNAPSHOT_STRAY_CAP = 500;
+  /** Max strays included in a single snapshot (caps decode + network cost).
+   *  Raised from 500→800 thanks to client-side tiled rendering + LOD optimisation. */
+  private static readonly SNAPSHOT_STRAY_CAP = 800;
 
   /** Build reusable array of outdoor strays only (pets not inside any shelter).
    *  Capped at SNAPSHOT_STRAY_CAP to keep snapshots small; prioritises strays near players. */
@@ -3214,13 +3235,27 @@ export class World {
     return { id: shelter.id, tier: shelter.tier, size: shelter.size };
   }
 
+  /** Get the highest shelter tier among a player and all their allies (including teammates). */
+  getHighestAllyShelterTier(playerId: string): number {
+    let best = 0;
+    const own = this.getPlayerShelter(playerId);
+    if (own) best = own.tier;
+    for (const other of this.players.values()) {
+      if (other.id === playerId) continue;
+      if (!this.isAlly(playerId, other.id, this.lastAllyPairs)) continue;
+      const s = this.getPlayerShelter(other.id);
+      if (s && s.tier > best) best = s.tier;
+    }
+    return best;
+  }
+
   // ============================================
   // BOSS MODE METHODS
   // ============================================
 
   /** Easter egg: Force enter boss mode */
   debugEnterBossMode(): boolean {
-    if (this.bossMode?.active) return false;
+    if (this.bossMode?.active || this.bossModePlayed) return false;
     this.enterBossMode();
     return true;
   }
@@ -3228,6 +3263,7 @@ export class World {
   /** Enter boss mode - called when solo player clears all strays and breeders */
   private enterBossMode(): void {
     if (this.bossMode?.active) return; // Already in boss mode
+    this.bossModePlayed = true; // Mark as played so it never re-triggers
 
     // Find map center for PetMall
     const mallX = MAP_WIDTH / 2;
@@ -3312,8 +3348,65 @@ export class World {
     // Auto-detect player entering/exiting boss mills (proximity-based, like breeder camps)
     this.updateBossMillProximity();
 
+    // CPU boss AI: auto-purchase ingredients and submit meals
+    this.cpuBossAutoPurchase();
+
     // Update tycoon patrol
     this.updateTycoonPatrol();
+  }
+
+  /** CPU bots at boss mills auto-purchase ingredients and submit meals. */
+  private cpuBossAutoPurchase(): void {
+    if (!this.bossMode?.active) return;
+    const bm = this.bossMode;
+
+    for (const p of this.players.values()) {
+      if (!p.id.startsWith('cpu-')) continue;
+      const profile = this.cpuProfiles.get(p.id);
+      if (!profile || !profile.bossParticipant) continue;
+
+      const millId = bm.playerAtMills.get(p.id);
+      if (millId === undefined || millId < 0) continue; // not at a mill
+
+      const mill = bm.mills[millId];
+      if (!mill || mill.completed) continue;
+
+      // Rate-limit: purchase ~1 ingredient every 25-50 ticks (1-2 seconds)
+      const nextPurchase = this.cpuBossNextPurchaseTick.get(p.id) ?? 0;
+      if (this.tick < nextPurchase) continue;
+      this.cpuBossNextPurchaseTick.set(p.id, this.tick + 25 + Math.floor(Math.random() * 25));
+
+      // Find the next unpurchased ingredient
+      const playerPurchased = bm.playerMillPurchases.get(p.id) ?? {};
+      let boughtSomething = false;
+      for (const [ingredient, needed] of Object.entries(mill.recipe)) {
+        const have = playerPurchased[ingredient] ?? 0;
+        if (have < needed) {
+          // Attempt purchase
+          const result = this.purchaseBossIngredient(p.id, ingredient, 1);
+          if (result.success) {
+            boughtSomething = true;
+          }
+          break; // one ingredient per tick interval
+        }
+      }
+
+      // If all ingredients purchased, submit the meal
+      if (!boughtSomething) {
+        // Check if recipe is complete
+        let allDone = true;
+        for (const [ingredient, needed] of Object.entries(mill.recipe)) {
+          const have = playerPurchased[ingredient] ?? 0;
+          if (have < needed) { allDone = false; break; }
+        }
+        if (allDone) {
+          const result = this.submitBossMeal(p.id);
+          if (result.success) {
+            log(`CPU ${p.id} completed boss mill ${millId} (${BOSS_MILL_NAMES[mill.petType]})`);
+          }
+        }
+      }
+    }
   }
 
   /** Check ALL player vans for proximity to boss mills and update per-player state */
@@ -3325,7 +3418,12 @@ export class World {
     const currentNearMills = new Map<string, number>(); // playerId -> millId
 
     for (const p of this.players.values()) {
-      if (p.id.startsWith('cpu-') || p.id.startsWith('cpu_') || this.eliminatedPlayerIds.has(p.id)) continue;
+      if (this.eliminatedPlayerIds.has(p.id)) continue;
+      // Only allow CPU bots with bossParticipant profile to interact with mills
+      if (p.id.startsWith('cpu-') || p.id.startsWith('cpu_')) {
+        const profile = this.cpuProfiles.get(p.id);
+        if (!profile || !profile.bossParticipant) continue;
+      }
 
       // Find the nearest non-completed mill within range for this player
       let nearMillId = -1;
@@ -3336,6 +3434,20 @@ export class World {
         if (distSq(p.x, p.y, mill.x, mill.y) <= bossMillR * bossMillR) {
           nearMillId = i;
           break;
+        }
+      }
+
+      // Check if another player already occupies this mill (first come, first served)
+      if (nearMillId >= 0) {
+        let millOccupied = false;
+        for (const [otherId, otherMillId] of bm.playerAtMills) {
+          if (otherId !== p.id && otherMillId === nearMillId) {
+            millOccupied = true;
+            break;
+          }
+        }
+        if (millOccupied) {
+          nearMillId = -1; // Treat as not near any mill - it's taken
         }
       }
 
@@ -3590,10 +3702,39 @@ export class World {
         log(`Boss Mode ended with partial victory (${bm.millsCleared}/5 mills). Awarded ${rtBonus} RT`);
       }
     } else {
-      // LOSS: 0 mills cleared - game continues, boss mode can re-trigger
-      this.bossMode = null;
-      this.pendingAnnouncements.push(`You lost the boss! The Breeder Tycoon escaped with all the pets.`);
-      log(`Boss Mode ended with LOSS (0 mills cleared). Game continues.`);
+      // LOSS: 0 mills cleared - match ends with no bonus (boss mode is a one-shot event)
+      this.matchEndedEarly = true;
+      this.matchEndAt = this.tick;
+
+      // Determine winner same as victory path
+      if (this.matchMode === 'teams') {
+        const redScore = this.teamScores.get('red') ?? 0;
+        const blueScore = this.teamScores.get('blue') ?? 0;
+        this.winningTeam = redScore >= blueScore ? 'red' : 'blue';
+        let winnerId: string | null = null;
+        let maxAdoptions = 0;
+        for (const p of this.players.values()) {
+          const team = this.playerTeams.get(p.id);
+          if (team === this.winningTeam && p.totalAdoptions > maxAdoptions) {
+            maxAdoptions = p.totalAdoptions;
+            winnerId = p.id;
+          }
+        }
+        this.winnerId = winnerId;
+      } else {
+        let winnerId: string | null = null;
+        let maxAdoptions = 0;
+        for (const p of this.players.values()) {
+          if (p.totalAdoptions > maxAdoptions) {
+            maxAdoptions = p.totalAdoptions;
+            winnerId = p.id;
+          }
+        }
+        this.winnerId = winnerId;
+      }
+
+      this.pendingAnnouncements.push(`You lost the boss! The Breeder Tycoon escaped with all the pets. No boss bonus.`);
+      log(`Boss Mode ended with LOSS (0 mills cleared). Match over, no bonus.`);
     }
   }
 

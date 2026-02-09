@@ -5,6 +5,7 @@
 const MUSIC_KEY = 'rescueworld_music';
 const MUSIC_VOLUME_KEY = 'rescueworld_music_volume';
 const SFX_KEY = 'rescueworld_sfx';
+const SFX_VOLUME_KEY = 'rescueworld_sfx_volume';
 const VAN_SOUND_TYPE_KEY = 'rescueworld_van_sound_type';
 const SHELTER_ADOPT_SFX_KEY = 'rescueworld_shelter_adopt_sfx';
 
@@ -92,6 +93,36 @@ export function setSfxEnabled(on: boolean): void {
   setStored(SFX_KEY, on);
 }
 
+/** Get the SFX volume (0-100). Defaults to 100. */
+export function getSfxVolume(): number {
+  try {
+    const v = localStorage.getItem(SFX_VOLUME_KEY);
+    if (v != null) {
+      const n = parseInt(v, 10);
+      if (!isNaN(n) && n >= 0 && n <= 100) return n;
+    }
+  } catch { /* ignore */ }
+  return 100;
+}
+
+/** Set the SFX volume (0-100). Also updates enabled state. */
+export function setSfxVolume(vol: number): void {
+  const clamped = Math.max(0, Math.min(100, Math.round(vol)));
+  try { localStorage.setItem(SFX_VOLUME_KEY, String(clamped)); } catch { /* ignore */ }
+  if (clamped > 0) {
+    setStored(SFX_KEY, true);
+  } else {
+    setStored(SFX_KEY, false);
+    stopEngineLoop();
+  }
+}
+
+/** Get the effective SFX volume fraction (0-1), accounting for enabled state. */
+export function getSfxVolumeFraction(): number {
+  if (!getSfxEnabled()) return 0;
+  return getSfxVolume() / 100;
+}
+
 export function getShelterAdoptSfxEnabled(): boolean {
   return getStored(SHELTER_ADOPT_SFX_KEY, true);
 }
@@ -150,6 +181,8 @@ function getContext(): AudioContext | null {
 
 function playTone(frequency: number, duration: number, type: OscillatorType = 'sine', volume = 0.3): void {
   if (!getSfxEnabled()) return;
+  const volFraction = getSfxVolumeFraction();
+  if (volFraction <= 0) return;
   const ctx = getContext();
   if (!ctx) return;
   try {
@@ -159,7 +192,7 @@ function playTone(frequency: number, duration: number, type: OscillatorType = 's
     gain.connect(ctx.destination);
     osc.frequency.value = frequency;
     osc.type = type;
-    gain.gain.setValueAtTime(volume, ctx.currentTime);
+    gain.gain.setValueAtTime(volume * volFraction, ctx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
     osc.start(ctx.currentTime);
     osc.stop(ctx.currentTime + duration);
@@ -176,6 +209,8 @@ export function playPickupGrowth(): void {
 export function playPickupSpeed(): void {
   // "Turbo Ignition" - dramatic bass-drop effect for speed boost activation
   if (!getSfxEnabled()) return;
+  const vf = getSfxVolumeFraction();
+  if (vf <= 0) return;
   const ctx = getContext();
   if (!ctx) return;
   try {
@@ -187,7 +222,7 @@ export function playPickupSpeed(): void {
     osc1.type = 'sawtooth';
     osc1.frequency.setValueAtTime(150, ctx.currentTime);
     osc1.frequency.exponentialRampToValueAtTime(60, ctx.currentTime + 0.12);
-    gain1.gain.setValueAtTime(0.28, ctx.currentTime);
+    gain1.gain.setValueAtTime(0.28 * vf, ctx.currentTime);
     gain1.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.18);
     osc1.start(ctx.currentTime);
     osc1.stop(ctx.currentTime + 0.18);
@@ -199,7 +234,7 @@ export function playPickupSpeed(): void {
     gain2.connect(ctx.destination);
     osc2.type = 'square';
     osc2.frequency.value = 100;
-    gain2.gain.setValueAtTime(0.20, ctx.currentTime);
+    gain2.gain.setValueAtTime(0.20 * vf, ctx.currentTime);
     gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.08);
     osc2.start(ctx.currentTime);
     osc2.stop(ctx.currentTime + 0.08);
@@ -215,7 +250,7 @@ export function playPickupSpeed(): void {
       osc3.type = 'triangle';
       osc3.frequency.setValueAtTime(200, ctx2.currentTime);
       osc3.frequency.exponentialRampToValueAtTime(400, ctx2.currentTime + 0.10);
-      gain3.gain.setValueAtTime(0.18, ctx2.currentTime);
+      gain3.gain.setValueAtTime(0.18 * vf, ctx2.currentTime);
       gain3.gain.exponentialRampToValueAtTime(0.001, ctx2.currentTime + 0.12);
       osc3.start(ctx2.currentTime);
       osc3.stop(ctx2.currentTime + 0.12);
@@ -228,7 +263,7 @@ export function playPickupSpeed(): void {
     gain4.connect(ctx.destination);
     osc4.type = 'sine';
     osc4.frequency.value = 50;
-    gain4.gain.setValueAtTime(0.22, ctx.currentTime);
+    gain4.gain.setValueAtTime(0.22 * vf, ctx.currentTime);
     gain4.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
     osc4.start(ctx.currentTime);
     osc4.stop(ctx.currentTime + 0.15);
@@ -285,6 +320,8 @@ function playAdoptionRabbit(): void {
 /** Horse adoption: proud whinny - rising sweep with warm harmonics */
 function playAdoptionHorse(): void {
   if (!getSfxEnabled()) return;
+  const vf = getSfxVolumeFraction();
+  if (vf <= 0) return;
   const ctx = getContext();
   if (!ctx) return;
   try {
@@ -297,7 +334,7 @@ function playAdoptionHorse(): void {
     osc.frequency.setValueAtTime(220, ctx.currentTime);
     osc.frequency.linearRampToValueAtTime(440, ctx.currentTime + 0.15);
     osc.frequency.linearRampToValueAtTime(350, ctx.currentTime + 0.25);
-    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.setValueAtTime(0.15 * vf, ctx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.30);
     osc.start(ctx.currentTime);
     osc.stop(ctx.currentTime + 0.30);
@@ -309,7 +346,7 @@ function playAdoptionHorse(): void {
     gain2.connect(ctx.destination);
     osc2.type = 'sine';
     osc2.frequency.value = 165;
-    gain2.gain.setValueAtTime(0.12, ctx.currentTime);
+    gain2.gain.setValueAtTime(0.12 * vf, ctx.currentTime);
     gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.20);
     osc2.start(ctx.currentTime);
     osc2.stop(ctx.currentTime + 0.20);
@@ -416,6 +453,8 @@ export function playAttackWarning(): void {
 export function playPort(): void {
   // Teleport/warp sound - rising frequency sweep
   if (!getSfxEnabled()) return;
+  const vf = getSfxVolumeFraction();
+  if (vf <= 0) return;
   const ctx = getContext();
   if (!ctx) return;
   try {
@@ -428,7 +467,7 @@ export function playPort(): void {
     // Sweep from 200Hz to 800Hz over 0.15s
     osc.frequency.setValueAtTime(200, ctx.currentTime);
     osc.frequency.exponentialRampToValueAtTime(800, ctx.currentTime + 0.15);
-    gain.gain.setValueAtTime(0.25, ctx.currentTime);
+    gain.gain.setValueAtTime(0.25 * vf, ctx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
     osc.start(ctx.currentTime);
     osc.stop(ctx.currentTime + 0.2);
@@ -441,7 +480,7 @@ export function playPort(): void {
     osc2.type = 'triangle';
     osc2.frequency.setValueAtTime(400, ctx.currentTime);
     osc2.frequency.exponentialRampToValueAtTime(1200, ctx.currentTime + 0.12);
-    gain2.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain2.gain.setValueAtTime(0.15 * vf, ctx.currentTime);
     gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
     osc2.start(ctx.currentTime);
     osc2.stop(ctx.currentTime + 0.15);
@@ -872,8 +911,9 @@ function createEngineNodes(ctx: AudioContext, isBoost: boolean): EngineNodes | n
 
 function fadeInEngine(nodes: EngineNodes, ctx: AudioContext): void {
   const now = ctx.currentTime;
+  const vf = getSfxVolumeFraction();
   nodes.masterGain.gain.setValueAtTime(0, now);
-  nodes.masterGain.gain.linearRampToValueAtTime(1, now + 0.1);
+  nodes.masterGain.gain.linearRampToValueAtTime(vf, now + 0.1);
 }
 
 function fadeOutEngine(nodes: EngineNodes, ctx: AudioContext, callback?: () => void): void {

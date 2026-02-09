@@ -151,6 +151,25 @@ function clampReputation(value: number): number {
 }
 
 /**
+ * Ensure a bot (CPU) player has a row in the users table so they can appear on leaderboards.
+ * Uses a stable bot userId derived from the display name to accumulate stats across matches.
+ */
+export function ensureBotUser(botDisplayName: string): string {
+  const botUserId = `bot-${botDisplayName.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+  const conn = db();
+  const existing = conn.prepare('SELECT id FROM users WHERE id = ?').get(botUserId);
+  if (existing) {
+    return botUserId;
+  }
+  const referralCode = 'b-' + botUserId.slice(4, 16) + '-' + Math.random().toString(36).slice(2, 6);
+  conn.prepare(
+    'INSERT OR IGNORE INTO users (id, provider, provider_id, email, display_name, referral_code, shelter_color, created_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)'
+  ).run(botUserId, 'bot', botUserId, botDisplayName, referralCode, null, Date.now());
+  log(`Created bot user record for ${botUserId} (${botDisplayName})`);
+  return botUserId;
+}
+
+/**
  * Ensure a guest user has a row in the users table so they can appear on leaderboards.
  * No-op for non-guest users (they already have a users row from auth).
  */
