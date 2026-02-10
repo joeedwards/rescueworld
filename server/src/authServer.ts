@@ -28,7 +28,7 @@ import { getLeaderboard, getUserRank } from './leaderboard.js';
 import { getInventory, depositAfterMatch, withdrawForMatch } from './inventory.js';
 import { recordMatchWin, recordRtEarned, updateReputationOnQuit } from './leaderboard.js';
 import { getGameStats } from './gameStats.js';
-import { getKarmaBalance, getKarmaInfo, awardKarmaPoints, getKarmaHistory } from './karmaService.js';
+import { getKarmaBalance, getKarmaInfo, awardKarmaPoints, getKarmaHistory, hasVanLure, purchaseVanLure } from './karmaService.js';
 import { getRealtimeStats, getActiveMatchForUser, getActiveMatchesForUser, getMatchDurationMs, isMatchPaused, isMatchBotsEnabled, getLiveMatches } from './GameServer.js';
 
 /** Timestamped log function for server output */
@@ -594,20 +594,36 @@ app.post('/api/inventory/deposit', (req: Request, res: Response) => {
 app.get('/api/karma', (req: Request, res: Response) => {
   const userId = req.signedCookies?.session;
   if (!userId) {
-    res.json({ karmaPoints: 0, signedIn: false });
+    res.json({ karmaPoints: 0, signedIn: false, hasVanLure: false });
     return;
   }
   const karmaInfo = getKarmaInfo(userId);
   if (!karmaInfo) {
-    res.json({ karmaPoints: 0, signedIn: true, userId });
+    res.json({ karmaPoints: 0, signedIn: true, userId, hasVanLure: hasVanLure(userId) });
     return;
   }
   res.json({ 
     karmaPoints: karmaInfo.karmaPoints, 
     displayName: karmaInfo.displayName,
     userId: karmaInfo.userId,
-    signedIn: true 
+    signedIn: true,
+    hasVanLure: hasVanLure(userId),
   });
+});
+
+// Buy Van Lure permanent boost with Karma Points
+app.post('/api/karma/buy-van-lure', (req: Request, res: Response) => {
+  const userId = req.signedCookies?.session;
+  if (!userId) {
+    res.status(401).json({ error: 'not_signed_in' });
+    return;
+  }
+  const result = purchaseVanLure(userId);
+  if (!result.success) {
+    res.status(400).json({ error: result.error, karmaPoints: result.newBalance });
+    return;
+  }
+  res.json({ success: true, karmaPoints: result.newBalance, hasVanLure: true });
 });
 
 // Get karma transaction history for current user

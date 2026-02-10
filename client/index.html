@@ -749,6 +749,9 @@
     .live-match-bot-badge { font: 600 9px Rubik, sans-serif; color: #ff9f43; background: rgba(255,159,67,0.15); padding: 1px 6px; border-radius: 3px; }
     .live-match-watch { padding: 4px 14px; font: 600 11px Rubik, sans-serif; background: rgba(123,237,159,0.2); color: #7bed9f; border: 1px solid rgba(123,237,159,0.4); border-radius: 6px; cursor: pointer; transition: background 0.2s; }
     .live-match-watch:hover { background: rgba(123,237,159,0.4); }
+    .live-match-join { padding: 4px 14px; font: 600 11px Rubik, sans-serif; background: rgba(255,159,67,0.2); color: #ff9f43; border: 1px solid rgba(255,159,67,0.4); border-radius: 6px; cursor: pointer; transition: background 0.2s; }
+    .live-match-join:hover { background: rgba(255,159,67,0.4); }
+    .live-match-waiting { font: 400 10px Rubik, sans-serif; color: rgba(255,159,67,0.7); font-style: italic; }
     .landing-center .play-btn { padding: 14px 48px; font: 700 18px Rubik, sans-serif; background: #7bed9f; color: #1a1a2e; border: none; border-radius: 10px; cursor: pointer; margin: 16px 0; box-shadow: 0 4px 16px rgba(123,237,159,0.4); }
     .landing-center .play-btn:hover { background: #9bffbf; }
     .landing-center .resume-btn { background: transparent; color: #7bed9f; border: 2px solid #7bed9f; margin-bottom: 4px; }
@@ -811,6 +814,19 @@
     .karma-label { color: rgba(255,255,255,0.8); }
     .karma-value { font-size: 18px; font-weight: 700; color: #fbbf24; }
     .karma-suffix { color: rgba(255,255,255,0.6); font-size: 12px; }
+    .karma-shop { margin-bottom: 12px; }
+    .karma-shop.hidden { display: none; }
+    .karma-shop-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: linear-gradient(135deg, rgba(251,191,36,0.1), rgba(168,85,247,0.1)); border: 1px solid rgba(251,191,36,0.2); border-radius: 8px; }
+    .karma-shop-icon { font-size: 18px; }
+    .karma-shop-info { flex: 1; }
+    .karma-shop-name { font: 600 13px Rubik, sans-serif; color: #e0e0e0; }
+    .karma-shop-desc { font: 400 11px Rubik, sans-serif; color: rgba(255,255,255,0.5); margin-top: 2px; }
+    .karma-shop-btn { font: 600 12px Rubik, sans-serif; padding: 5px 12px; border: none; border-radius: 6px; cursor: pointer; background: linear-gradient(135deg, #fbbf24, #f59e0b); color: #1a1a2e; transition: opacity 0.2s; }
+    .karma-shop-btn:hover:not(:disabled) { opacity: 0.85; }
+    .karma-shop-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .karma-shop-owned { font: 600 12px Rubik, sans-serif; color: #4ade80; padding: 5px 12px; }
+    .karma-shop-owned.hidden { display: none; }
+    .karma-shop-btn.hidden { display: none; }
     .equipment-panel { background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.15); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
     .server-clock-wrap { margin-bottom: 12px; padding: 8px 10px; background: rgba(0,0,0,0.2); border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); font-size: 12px; }
     .server-clock-label { color: rgba(255,255,255,0.6); margin-bottom: 4px; }
@@ -922,7 +938,6 @@
     </header>
     <main class="landing-main">
       <aside class="landing-left">
-        <h3>Player</h3>
         <div id="landing-profile-avatar" class="landing-profile-avatar" aria-hidden="true">?</div>
         <div id="landing-profile-name" class="landing-profile-name">Guest</div>
         <p class="landing-guest-hint" style="font-size:11px;color:rgba(255,255,255,0.7);margin-bottom:12px">Play to earn Rescue Tokens. Boosts apply this match. Sign in to save progress.</p>
@@ -947,6 +962,19 @@
             <span class="karma-label">Karma:</span>
             <span class="karma-value" id="karma-points">0</span>
             <span class="karma-suffix">KP</span>
+          </div>
+          
+          <!-- Karma Shop (Van Lure) -->
+          <div id="karma-shop" class="karma-shop hidden">
+            <div class="karma-shop-item">
+              <span class="karma-shop-icon">🧲</span>
+              <div class="karma-shop-info">
+                <div class="karma-shop-name">Van Lure</div>
+                <div class="karma-shop-desc">Extended pet pickup radius (permanent)</div>
+                <span class="karma-shop-owned hidden" id="van-lure-owned">Owned</span>
+              </div>
+              <button type="button" class="karma-shop-btn" id="buy-van-lure-btn">5 KP</button>
+            </div>
           </div>
           
           <!-- Equipment Panel (all RT available for next match) -->

@@ -79,6 +79,7 @@ function encodeSnapshot(snap) {
         size += 2; // money (Uint16)
         size += 1 + encoder.encode(p.shelterId ?? '').length; // shelterId string
         size += 1; // vanSpeedUpgrade (1 byte bool)
+        size += 1; // vanLure (1 byte bool)
         size += 1; // team (0=none, 1=red, 2=blue)
     }
     size += 2; // Uint16 for pet count (large maps can have 255+ pets)
@@ -108,7 +109,7 @@ function encodeSnapshot(snap) {
     // Breeder shelters (mills)
     size += 1;
     for (const b of breederShelters) {
-        size += 1 + encoder.encode(b.id).length + 4 + 4 + 1 + 4; // id, x, y, level, size
+        size += 1 + encoder.encode(b.id).length + 4 + 4 + 1 + 4 + 1; // id, x, y, level, size, millCount
     }
     // Adoption events
     size += 1; // count
@@ -197,6 +198,7 @@ function encodeSnapshot(snap) {
         off += 2;
         off = writeString(view, off, p.shelterId ?? '');
         view.setUint8(off++, p.vanSpeedUpgrade ? 1 : 0);
+        view.setUint8(off++, p.vanLure ? 1 : 0);
         view.setUint8(off++, p.team === 'red' ? 1 : p.team === 'blue' ? 2 : 0);
     }
     // Use Uint16 for pet count - large maps can have 255+ pets
@@ -270,6 +272,7 @@ function encodeSnapshot(snap) {
         view.setUint8(off++, (b.level ?? 1) & 0xff);
         view.setFloat32(off, b.size, true);
         off += 4;
+        view.setUint8(off++, (b.millCount ?? 1) & 0xff);
     }
     // Encode adoption events
     view.setUint8(off++, adoptionEvents.length);
@@ -420,6 +423,7 @@ function decodeSnapshot(buf) {
         const { s: shelterId, next: shelterIdNext } = readString(view, off);
         off = shelterIdNext;
         const vanSpeedUpgrade = view.getUint8(off++) !== 0;
+        const vanLure = view.getUint8(off++) !== 0;
         const teamByte = off < view.byteLength ? view.getUint8(off++) : 0;
         const team = teamByte === 1 ? 'red' : teamByte === 2 ? 'blue' : undefined;
         players.push({
@@ -443,6 +447,7 @@ function decodeSnapshot(buf) {
             ...(money > 0 ? { money } : {}),
             ...(shelterId ? { shelterId } : {}),
             ...(vanSpeedUpgrade ? { vanSpeedUpgrade: true } : {}),
+            ...(vanLure ? { vanLure: true } : {}),
             ...(team ? { team } : {}),
         });
     }
@@ -536,7 +541,8 @@ function decodeSnapshot(buf) {
         const level = view.getUint8(off++);
         const bsize = view.getFloat32(off, true);
         off += 4;
-        breederShelters.push({ id: bid, x: bx, y: by, level, size: bsize });
+        const millCount = off < view.byteLength ? view.getUint8(off++) : 1;
+        breederShelters.push({ id: bid, x: bx, y: by, level, size: bsize, millCount: millCount > 1 ? millCount : undefined });
     }
     // Decode adoption events
     const numAdoptionEvents = off < view.byteLength ? view.getUint8(off++) : 0;

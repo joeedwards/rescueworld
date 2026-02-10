@@ -81,7 +81,7 @@ loadBreederMillImage();
 const adoptionEventImage = new Image();
 let adoptionEventImageLoaded = false;
 function loadAdoptionEventImage() {
-  const paths = ['/adoption-event.png', '/rescueworld/adoption-event.png'];
+  const paths = ['/adoption-event-transparent.png', '/rescueworld/adoption-event-transparent.png', '/adoption-event.png', '/rescueworld/adoption-event.png'];
   let pathIndex = 0;
   const tryNextPath = () => {
     if (pathIndex >= paths.length) {
@@ -451,6 +451,9 @@ const equipNoteEl = document.getElementById('equip-note')!;
 // Karma Points Elements (shared across games)
 const karmaDisplayEl = document.getElementById('karma-display')!;
 const karmaPointsEl = document.getElementById('karma-points')!;
+const karmaShopEl = document.getElementById('karma-shop')!;
+const buyVanLureBtn = document.getElementById('buy-van-lure-btn') as HTMLButtonElement;
+const vanLureOwnedEl = document.getElementById('van-lure-owned')!;
 
 // Item Selection Modal Elements
 const itemSelectOverlayEl = document.getElementById('item-select-overlay')!;
@@ -459,6 +462,7 @@ const itemSelectSkipBtn = document.getElementById('item-select-skip-btn')!;
 
 // Karma state (from server)
 let currentKarmaPoints = 0;
+let hasVanLure = false;
 
 // Item selection state
 interface ItemSelection {
@@ -1145,6 +1149,7 @@ interface LiveMatch {
   spectatorCount: number;
   durationMs: number;
   isBotMatch: boolean;
+  waiting?: boolean;
   fetchedAt: number;
 }
 
@@ -1179,13 +1184,15 @@ function updateLiveMatchesDisplay(): void {
     return;
   }
 
+  // Sort: waiting matches first, then playing matches
+  const sorted = [...liveMatches].sort((a, b) => {
+    if (a.waiting && !b.waiting) return -1;
+    if (!a.waiting && b.waiting) return 1;
+    return 0;
+  });
+
   const now = Date.now();
-  const html = liveMatches.map(m => {
-    let currentDurationMs = m.durationMs;
-    if (m.fetchedAt) {
-      currentDurationMs += now - m.fetchedAt;
-    }
-    const timeStr = formatMatchDuration(currentDurationMs);
+  const html = sorted.map(m => {
     const modeLabel = m.mode.toUpperCase();
     const playerInfo = m.playerCount > 0
       ? `${m.playerCount} player${m.playerCount > 1 ? 's' : ''}`
@@ -1195,8 +1202,28 @@ function updateLiveMatchesDisplay(): void {
       : '';
     const sep = playerInfo && botInfo ? ', ' : '';
     const countText = `${playerInfo}${sep}${botInfo}`;
-    const spectatorText = m.spectatorCount > 0 ? ` | ${m.spectatorCount} watching` : '';
     const botBadge = m.isBotMatch ? '<span class="live-match-bot-badge">BOT</span> ' : '';
+
+    if (m.waiting) {
+      // Waiting match: show "waiting for players.." and "Join" button
+      return `<div class="live-match-item" data-match-id="${m.matchId}">
+      <div class="live-match-info">
+        <span class="live-match-mode">${modeLabel}</span>
+        ${botBadge}
+        <span class="live-match-players">${countText}</span>
+      </div>
+      <span class="live-match-time live-match-waiting">waiting for players..</span>
+      <button type="button" class="live-match-join" data-match-id="${m.matchId}" data-match-mode="${m.mode}">Join</button>
+    </div>`;
+    }
+
+    // Playing match: show clock and "Watch" button
+    let currentDurationMs = m.durationMs;
+    if (m.fetchedAt) {
+      currentDurationMs += now - m.fetchedAt;
+    }
+    const timeStr = formatMatchDuration(currentDurationMs);
+    const spectatorText = m.spectatorCount > 0 ? ` | ${m.spectatorCount} watching` : '';
 
     return `<div class="live-match-item" data-match-id="${m.matchId}">
       <div class="live-match-info">
@@ -1218,6 +1245,18 @@ function updateLiveMatchesDisplay(): void {
       const matchId = (btn as HTMLElement).dataset.matchId;
       if (matchId) {
         startSpectate(matchId);
+      }
+    });
+  });
+
+  // Add click handlers for Join buttons (waiting matches)
+  list.querySelectorAll('.live-match-join').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const matchId = (btn as HTMLElement).dataset.matchId;
+      const mode = (btn as HTMLElement).dataset.matchMode as 'ffa' | 'teams';
+      if (matchId && mode) {
+        startConnect({ mode, joinMatchId: matchId });
       }
     });
   });
@@ -1883,7 +1922,7 @@ async function fetchAndRenderAuth(): Promise<void> {
       `;
       landingProfileName.textContent = name;
       landingProfileAvatar.textContent = name.charAt(0).toUpperCase();
-      landingProfileActions.innerHTML = `<a href="/auth/signout" class="auth-link" style="font-size:12px">Sign out</a>`;
+      landingProfileActions.innerHTML = `<a href="/auth/signout" class="auth-link" style="font-size:12px; color:#7bed9f">Sign out</a>`;
       // Hide "Sign in with Google" button when already signed in (sign out button is in profile actions)
       landingAuthButtons.innerHTML = '';
       if (landingNickInput) landingNickInput.placeholder = name;
@@ -2743,8 +2782,11 @@ function cancelAutoReconnect(): void {
 }
 
 // --- Connect flow ---
-async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 'solo'; abandon?: boolean; rejoinMatchId?: string }): Promise<void> {
-  matchEndedNormally = false;
+async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 'solo'; abandon?: boolean; rejoinMatchId?: string; joinMatchId?: string }): Promise<void> {
+  // NOTE: matchEndedNormally is intentionally NOT reset here — it is reset in
+  // gameWsLocal.onopen below. Resetting it here causes a race condition: the old
+  // WebSocket's onclose fires after this point, sees matchEndedNormally=false, and
+  // triggers auto-reconnect which duplicates the player in the lobby.
   disconnectLobbyLeaderboard();
   stopGameStatsPolling();
   if (pingIntervalId) {
@@ -2794,6 +2836,10 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
   gameWsLocal.binaryType = 'arraybuffer';
   gameWsLocal.onopen = async () => {
     gameWs = gameWsLocal;
+    // Reset matchEndedNormally NOW that the new connection is established.
+    // This ensures the old WS's onclose (which may fire between connect() start
+    // and this point) still sees matchEndedNormally=true and skips auto-reconnect.
+    matchEndedNormally = false;
     const displayName = await getOrCreateDisplayName();
     // NOTE: Don't withdraw inventory here! The server withdraws it after validating the match.
     // This prevents inventory loss if the player tries to resume an expired match.
@@ -2806,6 +2852,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
       userId: currentUserId, // For inventory tracking - server will withdraw
       abandon: options?.abandon,
       rejoinMatchId: options?.rejoinMatchId,
+      joinMatchId: options?.joinMatchId,
       botsEnabled: (options?.mode === 'ffa' || options?.mode === 'teams') ? botsEnabled : undefined,
       team: options?.mode === 'teams' ? selectedTeam : undefined,
       guestStartingRt: guestRt,
@@ -3145,7 +3192,8 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           const isMill = !!msg.isMill;
           const timeLimitSeconds = typeof msg.timeLimitSeconds === 'number' ? msg.timeLimitSeconds : undefined;
           const addPetIntervalSeconds = typeof msg.addPetIntervalSeconds === 'number' ? msg.addPetIntervalSeconds : undefined;
-          startBreederMiniGame(msg.petCount, level, { isMill, timeLimitSeconds, addPetIntervalSeconds });
+          const millCount = typeof msg.millCount === 'number' ? msg.millCount : undefined;
+          startBreederMiniGame(msg.petCount, level, { isMill, timeLimitSeconds, addPetIntervalSeconds, millCount });
         }
         if (msg.type === 'breederAddPet') {
           if (breederGame.active) {
@@ -4295,6 +4343,44 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
   if (facingDir < 0) {
     ctx.scale(-1, 1);
   }
+
+  // Draw Van Lure extended pickup radius indicator (behind van body, after translate)
+  if (p.vanLure && !p.eliminated) {
+    ctx.save();
+    // Clear parent shadow so the lure doesn't get a dark blob underneath
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = 'transparent';
+    // Undo horizontal flip for the circle (circle is symmetric, but text/dash needs it)
+    if (facingDir < 0) ctx.scale(-1, 1);
+    const lureRadius = 120; // RESCUE_RADIUS (70) + VAN_LURE_BONUS_RADIUS (50)
+    const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.004);
+    // Warm golden glow fill
+    const lureGrad = ctx.createRadialGradient(0, 0, lureRadius * 0.3, 0, 0, lureRadius);
+    lureGrad.addColorStop(0, `rgba(251, 191, 36, ${0.02 + 0.02 * pulse})`);
+    lureGrad.addColorStop(0.7, `rgba(251, 191, 36, ${0.12 + 0.06 * pulse})`);
+    lureGrad.addColorStop(1, `rgba(251, 191, 36, 0)`);
+    ctx.fillStyle = lureGrad;
+    ctx.beginPath();
+    ctx.arc(0, 0, lureRadius, 0, Math.PI * 2);
+    ctx.fill();
+    // Animated dashed ring
+    ctx.strokeStyle = `rgba(251, 191, 36, ${0.4 + 0.2 * pulse})`;
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([8, 6]);
+    ctx.lineDashOffset = -Date.now() * 0.02; // Spinning dash animation
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Small magnet icon label above
+    ctx.fillStyle = `rgba(251, 191, 36, ${0.75 + 0.2 * pulse})`;
+    ctx.font = 'bold 11px Rubik, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.shadowColor = 'rgba(0,0,0,0.5)';
+    ctx.shadowBlur = 3;
+    ctx.fillText('🧲 Lure', 0, -lureRadius - 4);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
   
   // Handle gradient
   if (p.shelterColor?.startsWith('gradient:') && !p.eliminated) {
@@ -5441,21 +5527,25 @@ function prerenderBreederShelterSprite(shelter: BreederShelterState): HTMLCanvas
   sctx.textBaseline = 'bottom';
   sctx.shadowColor = 'rgba(200, 0, 0, 0.7)';
   sctx.shadowBlur = 6;
-  sctx.fillText(`Breeder Mill Lv${shelter.level}`, 0, -foundH / 2 - 10 * s);
+  const mc = shelter.millCount ?? 1;
+  const label = mc > 1 ? `Pet Mall Lv${shelter.level} (x${mc})` : `Breeder Mill Lv${shelter.level}`;
+  sctx.fillText(label, 0, -foundH / 2 - 10 * s);
   sctx.shadowBlur = 0;
 
   sctx.restore();
   return c;
 }
 
-/** Get or create a cached breeder shelter sprite. Invalidates on level change. */
+/** Get or create a cached breeder shelter sprite. Invalidates on level or millCount change. */
 function getBreederShelterSprite(shelter: BreederShelterState): HTMLCanvasElement {
   const cached = breederShelterSprites.get(shelter.id);
+  // Cache key encodes both level and millCount so sprite refreshes when either changes
+  const cacheKey = shelter.level * 100 + (shelter.millCount ?? 1);
   const cachedLevel = breederShelterSpriteLevel.get(shelter.id);
-  if (cached && cachedLevel === shelter.level) return cached;
+  if (cached && cachedLevel === cacheKey) return cached;
   const sprite = prerenderBreederShelterSprite(shelter);
   breederShelterSprites.set(shelter.id, sprite);
-  breederShelterSpriteLevel.set(shelter.id, shelter.level);
+  breederShelterSpriteLevel.set(shelter.id, cacheKey);
   return sprite;
 }
 
@@ -5479,7 +5569,9 @@ function drawBreederShelter(shelter: BreederShelterState): void {
   ctx.font = '10px Rubik, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillText('Spawning wild strays!', shelter.x, shelter.y + foundH / 2 + 5 * s);
+  const millCount = shelter.millCount ?? 1;
+  const warningText = millCount > 1 ? `Spawning wild strays! (x${millCount})` : 'Spawning wild strays!';
+  ctx.fillText(warningText, shelter.x, shelter.y + foundH / 2 + 5 * s);
 }
 
 // ============================================
@@ -5820,14 +5912,31 @@ function updateStrayTiles(pets: PetState[]): void {
   for (let i = 0; i < STRAY_TILE_COUNT; i++) tileBins.push([]);
   const newWandering: PetState[] = [];
 
+  const edgeMargin = STRAY_SPRITE_SIZE / 2; // 20px — sprite half-size that can overflow
   for (const pet of pets) {
     if (pet.insideShelterId !== null) continue;
     if (pet.x === 0 && pet.y === 0) continue;
     if (pet.vx === 0 && pet.vy === 0) {
-      // Static stray → goes into a tile
+      // Static stray → goes into its primary tile
       const col = Math.min(STRAY_TILE_COLS - 1, (pet.x / STRAY_TILE_SIZE) | 0);
       const row = Math.min(STRAY_TILE_ROWS - 1, (pet.y / STRAY_TILE_SIZE) | 0);
       tileBins[row * STRAY_TILE_COLS + col].push(pet);
+      // Also add to neighboring tiles if sprite overflows the edge
+      const localX = pet.x - col * STRAY_TILE_SIZE;
+      const localY = pet.y - row * STRAY_TILE_SIZE;
+      const overflowLeft = localX < edgeMargin && col > 0;
+      const overflowRight = localX > STRAY_TILE_SIZE - edgeMargin && col < STRAY_TILE_COLS - 1;
+      const overflowTop = localY < edgeMargin && row > 0;
+      const overflowBottom = localY > STRAY_TILE_SIZE - edgeMargin && row < STRAY_TILE_ROWS - 1;
+      if (overflowLeft) tileBins[row * STRAY_TILE_COLS + (col - 1)].push(pet);
+      if (overflowRight) tileBins[row * STRAY_TILE_COLS + (col + 1)].push(pet);
+      if (overflowTop) tileBins[(row - 1) * STRAY_TILE_COLS + col].push(pet);
+      if (overflowBottom) tileBins[(row + 1) * STRAY_TILE_COLS + col].push(pet);
+      // Diagonal corners
+      if (overflowLeft && overflowTop) tileBins[(row - 1) * STRAY_TILE_COLS + (col - 1)].push(pet);
+      if (overflowRight && overflowTop) tileBins[(row - 1) * STRAY_TILE_COLS + (col + 1)].push(pet);
+      if (overflowLeft && overflowBottom) tileBins[(row + 1) * STRAY_TILE_COLS + (col - 1)].push(pet);
+      if (overflowRight && overflowBottom) tileBins[(row + 1) * STRAY_TILE_COLS + (col + 1)].push(pet);
     } else {
       // Wandering stray → drawn individually each frame
       newWandering.push(pet);
@@ -6204,9 +6313,6 @@ function render(dt: number): void {
     for (const z of zones) {
       drawAdoptionZone(z);
     }
-    for (const ev of latestSnapshot.adoptionEvents ?? []) {
-      drawAdoptionEvent(ev, latestSnapshot.tick);
-    }
     // Draw pickups with viewport culling
     for (const u of latestSnapshot.pickups ?? []) {
       const margin = u.type === PICKUP_TYPE_BREEDER ? 70 : 30;
@@ -6222,11 +6328,16 @@ function render(dt: number): void {
       const ownerColor = owner?.shelterColor;
       drawShelter(shelter, isOwner, ownerColor);
     }
-    // Draw breeder shelters (enemy structures) with viewport culling
+    // Draw breeder shelters (enemy structures) BEFORE adoption events
+    // so events render on top when nearby (spacing prevents overlap, this is a fallback)
     for (const breederShelter of latestSnapshot.breederShelters ?? []) {
       const bsMargin = 180;
       if (breederShelter.x + bsMargin < viewL || breederShelter.x - bsMargin > viewR || breederShelter.y + bsMargin < viewT || breederShelter.y - bsMargin > viewB) continue;
       drawBreederShelter(breederShelter);
+    }
+    // Draw adoption events ON TOP of breeder shelters
+    for (const ev of latestSnapshot.adoptionEvents ?? []) {
+      drawAdoptionEvent(ev, latestSnapshot.tick);
     }
   }
 
@@ -6497,12 +6608,19 @@ function render(dt: number): void {
     if (!hideStraysOnMinimap && !isObserver) {
       minimapCtx.fillStyle = '#c9a86c';
       // When many pets, draw every Nth to keep minimap responsive
+      // Use stable ID-based sampling so the same pets are consistently drawn
+      // across frames (prevents blinking when the server re-sorts the array).
       const petCount = latestSnapshot.pets.length;
       const step = petCount > 1000 ? 4 : petCount > 500 ? 2 : 1;
-      for (let pi = 0; pi < petCount; pi += step) {
+      for (let pi = 0; pi < petCount; pi++) {
         const pet = latestSnapshot.pets[pi];
         if (pet.insideShelterId !== null) continue;
         if (pet.x === 0 && pet.y === 0) continue;
+        // Stable sampling: use numeric portion of pet id ("pet-123" → 123)
+        if (step > 1) {
+          const idNum = parseInt(pet.id.slice(4), 10) || 0;
+          if (idNum % step !== 0) continue;
+        }
         minimapCtx.fillRect(pet.x * scale - 2, pet.y * scale - 2, 4, 4);
       }
     }
@@ -7348,21 +7466,26 @@ function render(dt: number): void {
 // --- End match menu (delegated: Play again, Back to lobby) ---
 let leaderboardActionInProgress = false;
 function handleLeaderboardButton(btn: HTMLButtonElement): void {
-  // Prevent double actions from multiple event handlers
+  // Prevent double actions from multiple event handlers (click + mouseup + touchend)
   if (leaderboardActionInProgress) return;
   leaderboardActionInProgress = true;
-  setTimeout(() => { leaderboardActionInProgress = false; }, 500);
+  // Use a longer timeout to cover the full connect() duration and prevent
+  // accidental double-clicks from creating duplicate connections
+  setTimeout(() => { leaderboardActionInProgress = false; }, 3000);
   
   if (btn.id === 'play-again-btn') {
     // Request fullscreen immediately while still in user gesture context
     enterMobileFullscreen();
     requestWakeLock();
+    // Cancel any pending auto-reconnect before starting fresh
+    cancelAutoReconnect();
     if (gameWs) {
       gameWs.close();
       gameWs = null;
     }
     leaderboardEl.classList.remove('show');
     matchEndPlayed = false;
+    matchEndTokensAwarded = false;
     matchEndWasStrayLoss = false;
     wasPlayerObserver = false; // Reset observer state for new match
     latestSnapshot = null;
@@ -7384,6 +7507,7 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
         showConnectionError(err.message || 'Connection failed.');
       });
   } else if (btn.id === 'lobby-btn') {
+    cancelAutoReconnect();
     if (gameWs) {
       gameWs.close();
       gameWs = null;
@@ -8266,7 +8390,8 @@ function showItemSelectionModal(): Promise<ItemSelection> {
 
 // --- Spectate: connect to a match as observer ---
 async function connectAsSpectator(matchId: string): Promise<void> {
-  matchEndedNormally = false;
+  // matchEndedNormally reset deferred to onopen (same as connect()) to avoid
+  // the old WS onclose race condition that triggers spurious auto-reconnect.
   disconnectLobbyLeaderboard();
   stopGameStatsPolling();
   if (pingIntervalId) {
@@ -8308,6 +8433,7 @@ async function connectAsSpectator(matchId: string): Promise<void> {
   gameWsLocal.binaryType = 'arraybuffer';
   gameWsLocal.onopen = () => {
     gameWs = gameWsLocal;
+    matchEndedNormally = false;
     // Send spectate request (no player entity, no inventory)
     gameWs.send(JSON.stringify({ type: 'spectate', matchId }));
   };
@@ -8359,6 +8485,17 @@ async function connectAsSpectator(matchId: string): Promise<void> {
       }
       // Update tiled static stray cache for spectator view
       updateStrayTiles(snap.pets);
+
+      // Boss music for spectators: same logic as player handler
+      const bossModeActive = !!snap.bossMode?.active;
+      if (bossModeActive) {
+        if (!isBossMusicPlaying()) {
+          playBossMusic();
+        }
+      } else if (wasBossModeActive) {
+        stopBossMusic();
+      }
+      wasBossModeActive = bossModeActive;
     }
   };
   gameWsLocal.onclose = () => {
@@ -8407,7 +8544,7 @@ function startSpectate(matchId: string): void {
     });
 }
 
-function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boolean; resume?: boolean; rejoinMatchId?: string }): void {
+function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boolean; resume?: boolean; rejoinMatchId?: string; joinMatchId?: string }): void {
   // Request fullscreen immediately while still in user gesture context
   enterMobileFullscreen();
   requestWakeLock();
@@ -8422,9 +8559,11 @@ function startConnect(options: { mode: 'ffa' | 'teams' | 'solo'; abandon?: boole
     connectionOverlayEl.classList.remove('hidden');
     connectionOverlayEl.innerHTML = (options.resume || options.rejoinMatchId)
       ? '<h2>Resuming…</h2><p>Loading your saved match.</p>'
-      : '<h2>Connecting…</h2><p>Waiting for game server.</p>';
+      : options.joinMatchId
+        ? '<h2>Joining…</h2><p>Joining match lobby.</p>'
+        : '<h2>Connecting…</h2><p>Waiting for game server.</p>';
     authAreaEl.classList.add('hidden');
-    connect({ mode: options.mode, abandon: options.abandon, rejoinMatchId: options.rejoinMatchId })
+    connect({ mode: options.mode, abandon: options.abandon, rejoinMatchId: options.rejoinMatchId, joinMatchId: options.joinMatchId })
       .then(() => {
         connectionOverlayEl.classList.add('hidden');
         gameWrapEl.classList.add('visible');
@@ -8524,6 +8663,31 @@ document.querySelectorAll('.landing-buy').forEach((btn) => {
     }
     updateLandingTokens();
   });
+});
+
+// --- Karma Shop: Van Lure ---
+buyVanLureBtn.addEventListener('click', async () => {
+  if (hasVanLure || currentKarmaPoints < 5) return;
+  buyVanLureBtn.disabled = true;
+  buyVanLureBtn.textContent = '...';
+  try {
+    const res = await fetch('/api/karma/buy-van-lure', { method: 'POST', credentials: 'include' });
+    const data = await res.json();
+    if (data.success) {
+      hasVanLure = true;
+      currentKarmaPoints = data.karmaPoints;
+      updateKarmaDisplay();
+      showToast('Van Lure purchased! Extended pickup radius active.', 'success');
+    } else {
+      showToast(data.error || 'Purchase failed', 'error');
+      buyVanLureBtn.disabled = false;
+      buyVanLureBtn.textContent = '5 KP';
+    }
+  } catch {
+    showToast('Purchase failed - try again', 'error');
+    buyVanLureBtn.disabled = false;
+    buyVanLureBtn.textContent = '5 KP';
+  }
 });
 
 // --- Color selection ---
@@ -8952,6 +9116,7 @@ interface BreederStartOptions {
   isMill?: boolean;
   timeLimitSeconds?: number;
   addPetIntervalSeconds?: number;
+  millCount?: number;
 }
 
 function startBreederMiniGame(petCount: number, level: number = 1, opts: BreederStartOptions = {}): void {
@@ -8959,7 +9124,7 @@ function startBreederMiniGame(petCount: number, level: number = 1, opts: Breeder
   const me = latestSnapshot?.players.find(p => p.id === myPlayerId);
   const currentRT = me?.money ?? 0;
   const minRTNeeded = calculateMinimumRTNeeded(petCount, level);
-  const campType = opts.isMill ? 'mill' : 'breeder camp';
+  const campType = opts.isMill ? ((opts.millCount ?? 1) > 1 ? 'pet mall' : 'mill') : 'breeder camp';
   
   if (currentRT < minRTNeeded) {
     // Stop movement immediately when showing warning
@@ -9033,7 +9198,8 @@ function proceedWithBreederMiniGame(petCount: number, level: number, opts: Breed
   // Update header: mill vs camp
   const titleEl = breederMinigameEl.querySelector('.breeder-title');
   if (titleEl) {
-    titleEl.textContent = breederGame.isMill ? '🛑 Stop the Mill!' : `🚨 Stop Level ${level} Breeders!`;
+    const isPetMall = breederGame.isMill && (opts.millCount ?? 1) > 1;
+    titleEl.textContent = isPetMall ? '🛑 Stop the Pet Mall!' : breederGame.isMill ? '🛑 Stop the Mill!' : `🚨 Stop Level ${level} Breeders!`;
   }
 
   // Update instructions based on level
@@ -10202,6 +10368,7 @@ async function fetchKarma(): Promise<void> {
     const data = await res.json();
     if (data.signedIn && typeof data.karmaPoints === 'number') {
       currentKarmaPoints = data.karmaPoints;
+      hasVanLure = !!data.hasVanLure;
       updateKarmaDisplay();
     }
   } catch {
@@ -10213,8 +10380,19 @@ function updateKarmaDisplay(): void {
   if (isSignedIn) {
     karmaDisplayEl.classList.remove('hidden');
     karmaPointsEl.textContent = String(currentKarmaPoints);
+    // Show karma shop
+    karmaShopEl.classList.remove('hidden');
+    if (hasVanLure) {
+      buyVanLureBtn.classList.add('hidden');
+      vanLureOwnedEl.classList.remove('hidden');
+    } else {
+      buyVanLureBtn.classList.remove('hidden');
+      vanLureOwnedEl.classList.add('hidden');
+      buyVanLureBtn.disabled = currentKarmaPoints < 5;
+    }
   } else {
     karmaDisplayEl.classList.add('hidden');
+    karmaShopEl.classList.add('hidden');
   }
 }
 

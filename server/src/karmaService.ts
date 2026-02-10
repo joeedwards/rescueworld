@@ -159,6 +159,83 @@ export function getKarmaHistory(userId: string, limit: number = 20): KarmaTransa
 }
 
 /**
+ * Spend karma points (deducts from balance)
+ * @param userId User ID
+ * @param amount Amount to spend (must be positive)
+ * @param reason Reason for the spend
+ * @returns { success, newBalance, error? }
+ */
+export function spendKarmaPoints(
+  userId: string,
+  amount: number,
+  reason: string,
+): { success: boolean; newBalance: number; error?: string } {
+  if (amount <= 0) {
+    return { success: false, newBalance: getKarmaBalance(userId), error: 'Invalid amount' };
+  }
+
+  ensurePlayerStats(userId);
+
+  const balance = getKarmaBalance(userId);
+  if (balance < amount) {
+    return { success: false, newBalance: balance, error: `Not enough KP (have ${balance}, need ${amount})` };
+  }
+
+  const conn = db();
+
+  conn.prepare(`
+    UPDATE player_stats
+    SET karma_points = karma_points - ?
+    WHERE user_id = ?
+  `).run(amount, userId);
+
+  // Log the spend as a negative transaction
+  conn.prepare(`
+    INSERT INTO karma_transactions (user_id, amount, reason, source, created_at)
+    VALUES (?, ?, ?, 'rescueworld', ?)
+  `).run(userId, -amount, reason, Date.now());
+
+  const newBalance = getKarmaBalance(userId);
+  log(`Spent ${amount} KP from ${userId} (${reason}). New balance: ${newBalance}`);
+
+  return { success: true, newBalance };
+}
+
+/**
+ * Check if a user owns the Van Lure boost
+ */
+export function hasVanLure(userId: string): boolean {
+  const row = db().prepare(`
+    SELECT has_van_lure FROM player_stats WHERE user_id = ?
+  `).get(userId) as { has_van_lure: number | null } | undefined;
+
+  return (row?.has_van_lure ?? 0) === 1;
+
+}
+
+const VAN_LURE_COST = 5;
+
+/**
+ * Purchase the Van Lure boost with Karma Points
+ * @returns { success, newBalance, error? }
+ */
+export function purchaseVanLure(userId: string): { success: boolean; newBalance: number; error?: string } {
+  if (hasVanLure(userId)) {
+    return { success: false, newBalance: getKarmaBalance(userId), error: 'Already own Van Lure' };
+  }
+
+  const result = spendKarmaPoints(userId, VAN_LURE_COST, 'Van Lure purchase');
+  if (!result.success) return result;
+
+  db().prepare(`
+    UPDATE player_stats SET has_van_lure = 1 WHERE user_id = ?
+  `).run(userId);
+
+  log(`Player ${userId} purchased Van Lure`);
+  return { success: true, newBalance: result.newBalance };
+}
+
+/**
  * Initialize karma tables (called from ensureReferralStorage migrations)
  * This creates the karma_transactions table for audit trail
  */

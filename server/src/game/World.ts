@@ -165,6 +165,7 @@ function shelterVisualRadius(size: number): number {
 
 // Vans always have fixed collision radius - shelters are separate entities now
 const VAN_FIXED_RADIUS = 30; // Fixed collision radius for vans
+const VAN_LURE_BONUS_RADIUS = 50; // Extra pickup radius from Van Lure boost — noticeable range increase
 function effectiveRadius(_p: PlayerState): number {
   // All players (vans) use fixed radius - shelters are drawn/collided separately
   return VAN_FIXED_RADIUS;
@@ -231,6 +232,7 @@ export class World {
   private shelterIdSeq = 0;
   private playerShelterIds = new Map<string, string>(); // playerId -> shelterId
   private vanSpeedUpgrades = new Set<string>(); // playerIds with van speed upgrade
+  private vanLurePlayers = new Set<string>(); // playerIds with Van Lure (extended pickup radius)
   private lastShelterAdoptTick = new Map<string, number>(); // shelterId -> last adopt tick
   
   // Timerless game mechanics
@@ -251,6 +253,8 @@ export class World {
   private cpuRetargetCooldown = new Map<string, number>();
   /** CPU hesitation: tick until which bot stands still (simulates thinking) */
   private cpuHesitateTill = new Map<string, number>();
+  /** Boss mill re-entry cooldown: tick when bot can re-enter a mill (prevents oscillation) */
+  private bossMillReentryCooldown = new Map<string, number>();
   
   // Breeder wave spawning - about every minute (45-75s), spawn all 5 breeders of current level at once
   // Note: TICK_RATE is 25 ticks/second
@@ -295,6 +299,7 @@ export class World {
     level: number; 
     lastSpawnTick: number;
     size: number; // Grows over time
+    millCount: number; // Number of mills merged into this entity (default 1)
   }>();
   private breederShelterId = 0;
   /** Mills (breeder shelters) currently in van mini-game; cleared when game completes. */
@@ -306,6 +311,12 @@ export class World {
   /** No strays inside this radius of breeder camps or shelters (clean map). */
   private static readonly BREEDER_NO_STRAY_RADIUS = 100;
   private static readonly BREEDER_STRAY_MIN_SPAWN_DIST = 200; // Min distance from breeder shelter when spawning wild strays
+  /** Maximum number of breeder shelter entities (pet malls) on the map. */
+  private static readonly MAX_BREEDER_SHELTERS = 3;
+  /** Minimum distance between two breeder shelters (avoid visual overlap). */
+  private static readonly MIN_MILL_MILL_DISTANCE = 450;
+  /** Minimum distance between a breeder shelter center and an adoption event center. */
+  private static readonly MIN_MILL_EVENT_DISTANCE = 550;
   
   // Wild strays (from breeder shelters) - harder to catch, move around
   private wildStrayIds = new Set<string>();
@@ -353,6 +364,7 @@ export class World {
     rebuildStartTick: number; // When rebuild started
     visitedMills: number[]; // Track visit history to avoid immediate repeats
     pendingBossEvents: Array<{ type: string; playerId: string; millId: number; purchased?: Record<string, number>; reason?: string }>;
+    caughtCooldownUntil: Map<string, number>; // playerId -> tick until which they can't re-enter mills (after being caught)
   } | null = null;
   
   // Match-wide announcements queue
@@ -571,6 +583,15 @@ export class World {
           }
         }
       }
+
+      // Check minimum spacing from existing outdoor strays (half stray size apart)
+      if (ok) {
+        const minSpacing = PET_RADIUS; // 16 units = half stray visual size
+        const buf = this.gridQueryBuf;
+        buf.length = 0;
+        this.petGrid.queryRadius(x, y, minSpacing, buf);
+        if (buf.length > 0) ok = false;
+      }
       
       if (ok) return { x, y };
     }
@@ -635,6 +656,16 @@ export class World {
       const minDistance = zone.radius + 100;
       if (distance < minDistance) {
         return { success: false, reason: 'Too close to adoption center' };
+      }
+    }
+
+    // During boss mode, prevent building inside PetMall area (mills + margin)
+    if (this.bossMode?.active) {
+      const dxBoss = p.x - MAP_WIDTH / 2;
+      const dyBoss = p.y - MAP_HEIGHT / 2;
+      const bossExclusion = BOSS_PETMALL_RADIUS + BOSS_MILL_RADIUS + 50;
+      if (Math.sqrt(dxBoss * dxBoss + dyBoss * dyBoss) < bossExclusion) {
+        return { success: false, reason: "Can't build that close to the Adoption Center" };
       }
     }
     
@@ -900,6 +931,20 @@ export class World {
     }
   }
 
+  /** Set Van Lure (extended pickup radius) for a player */
+  setVanLure(id: string, active: boolean): void {
+    if (active) {
+      this.vanLurePlayers.add(id);
+    } else {
+      this.vanLurePlayers.delete(id);
+    }
+  }
+
+  /** Check if a player has Van Lure active */
+  hasVanLure(id: string): boolean {
+    return this.vanLurePlayers.has(id);
+  }
+
   /** Use one adopt speed boost: 60 seconds duration, max 5 minutes (300s) cumulative per match */
   useAdoptSpeedBoost(playerId: string): { success: boolean; remainingBoosts: number; activeUntilTick: number; usedSeconds: number } {
     const available = this.playerAdoptSpeedBoosts.get(playerId) ?? 0;
@@ -1070,23 +1115,27 @@ export class World {
     const sr = SHELTER_BASE_RADIUS + p.size * SHELTER_RADIUS_PER_SIZE;
     const touchingZone = this.shelterInZoneAABB(p, zone);
 
-    // PRIORITY: Flee from enemy shelters - don't approach them
-    for (const shelter of this.shelters.values()) {
-      if (shelter.ownerId === p.id) continue;
-      if (this.isAlly(p.id, shelter.ownerId, this.lastAllyPairs)) continue;
-      
-      const shelterR = Math.min(shelterVisualRadius(shelter.size), 400);
-      const dangerRadius = shelterR + 100; // Stay away from enemy shelters
-      const d = dist(p.x, p.y, shelter.x, shelter.y);
-      if (d < dangerRadius) {
-        // Flee away from enemy shelter
-        const dx = p.x - shelter.x;
-        const dy = p.y - shelter.y;
-        const len = Math.hypot(dx, dy) || 1;
-        const fleeX = clamp(p.x + (dx / len) * 200, 50, MAP_WIDTH - 50);
-        const fleeY = clamp(p.y + (dy / len) * 200, 50, MAP_HEIGHT - 50);
-        this.setCpuTarget(p.id, { x: fleeX, y: fleeY, type: 'wander' });
-        return this.directionToward(p.x, p.y, fleeX, fleeY);
+    // Flee from enemy shelters — but NOT if the bot has urgent tasks (full and
+    // needs to adopt, or actively heading to adoption zone / ally shelter).
+    const isFull = p.petsInside.length >= capacity;
+    if (!isFull && !touchingZone) {
+      for (const shelter of this.shelters.values()) {
+        if (shelter.ownerId === p.id) continue;
+        if (this.isAlly(p.id, shelter.ownerId, this.lastAllyPairs)) continue;
+        
+        const shelterR = Math.min(shelterVisualRadius(shelter.size), 400);
+        const dangerRadius = shelterR + 50; // Stay away from enemy shelters (reduced margin)
+        const d = dist(p.x, p.y, shelter.x, shelter.y);
+        if (d < dangerRadius) {
+          // Flee away from enemy shelter
+          const dx = p.x - shelter.x;
+          const dy = p.y - shelter.y;
+          const len = Math.hypot(dx, dy) || 1;
+          const fleeX = clamp(p.x + (dx / len) * 200, 50, MAP_WIDTH - 50);
+          const fleeY = clamp(p.y + (dy / len) * 200, 50, MAP_HEIGHT - 50);
+          this.setCpuTarget(p.id, { x: fleeX, y: fleeY, type: 'wander' });
+          return this.directionToward(p.x, p.y, fleeX, fleeY);
+        }
       }
     }
 
@@ -1116,7 +1165,7 @@ export class World {
 
     // Go to zone edge if full and not touching yet
     // But first check if we have an ally with a shelter to deliver to
-    if (p.petsInside.length >= capacity && !touchingZone) {
+    if (isFull && !touchingZone) {
       // Check for ally shelters to deliver to
       for (const other of this.players.values()) {
         if (other.id === p.id) continue;
@@ -1193,8 +1242,16 @@ export class World {
     // Smarter bots (high optimalTargeting) retarget faster
     const cooldownUntil = this.cpuRetargetCooldown.get(p.id) ?? 0;
     if (this.tick < cooldownUntil) {
-      // Wander aimlessly during cooldown
-      return 0;
+      // Keep drifting toward a wander point instead of standing still
+      const prevTarget = this.cpuTargets.get(p.id);
+      if (prevTarget) {
+        return this.directionToward(p.x, p.y, prevTarget.x, prevTarget.y);
+      }
+      // No previous target — pick a gentle wander direction so the bot isn't frozen
+      const wanderX = clamp(p.x + (Math.random() - 0.5) * 400, 50, MAP_WIDTH - 50);
+      const wanderY = clamp(p.y + (Math.random() - 0.5) * 400, 50, MAP_HEIGHT - 50);
+      this.setCpuTarget(p.id, { x: wanderX, y: wanderY, type: 'wander' });
+      return this.directionToward(p.x, p.y, wanderX, wanderY);
     }
     // Cooldown: 10-40 ticks, inversely proportional to skill
     const retargetBase = Math.floor(10 + (1 - (profile?.optimalTargeting ?? 0.5)) * 30);
@@ -1328,9 +1385,15 @@ export class World {
           // Warning: tycoon within ~3 seconds of arriving (speed * 3s * tick_rate)
           const warningDist = BOSS_TYCOON_SPEED * TICK_RATE * 3;
           if (tycoonDist < warningDist) {
-            // Flee away from the mill
-            const fleeX = clamp(p.x + (p.x - mill.x) * 3, 50, MAP_WIDTH - 50);
-            const fleeY = clamp(p.y + (p.y - mill.y) * 3, 50, MAP_HEIGHT - 50);
+            // Flee well outside the mill radius to prevent oscillation
+            const dx = p.x - mill.x;
+            const dy = p.y - mill.y;
+            const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+            const fleeDistance = BOSS_MILL_RADIUS + VAN_FIXED_RADIUS + 80; // Well outside detection range
+            const fleeX = clamp(mill.x + (dx / d) * fleeDistance, 50, MAP_WIDTH - 50);
+            const fleeY = clamp(mill.y + (dy / d) * fleeDistance, 50, MAP_HEIGHT - 50);
+            // Set re-entry cooldown: 75 ticks = 3 seconds at 25Hz
+            this.bossMillReentryCooldown.set(p.id, this.tick + 75);
             this.setCpuTarget(p.id, { x: fleeX, y: fleeY, type: 'wander' });
             return this.directionToward(p.x, p.y, fleeX, fleeY);
           }
@@ -1396,6 +1459,12 @@ export class World {
       if (zone) {
         const d = dist(p.x, p.y, zone.x, zone.y);
         if (d < zone.radius + 150) continue; // stay well outside the zone
+      }
+
+      // Don't build inside boss mode PetMall area
+      if (this.bossMode?.active) {
+        const d = dist(p.x, p.y, MAP_WIDTH / 2, MAP_HEIGHT / 2);
+        if (d < BOSS_PETMALL_RADIUS + BOSS_MILL_RADIUS + 50) continue;
       }
 
       // Attempt to build
@@ -1493,15 +1562,53 @@ export class World {
     this.adoptSpeedUsedSeconds.clear();
   }
   
+  /** Check if (x, y, radius) is a valid adoption event position — not overlapping
+   *  breeder shelters or other active adoption events. */
+  private isValidEventPosition(x: number, y: number, radius: number): boolean {
+    const buffer = 100;
+    // Check breeder shelters
+    for (const s of this.breederShelters.values()) {
+      const minDist = World.MIN_MILL_EVENT_DISTANCE;
+      const dx = x - s.x;
+      const dy = y - s.y;
+      if (dx * dx + dy * dy < minDist * minDist) return false;
+    }
+    // Check other adoption events (sum of radii + buffer)
+    for (const ev of this.adoptionEvents.values()) {
+      const minDist = radius + ev.radius + buffer;
+      const dx = x - ev.x;
+      const dy = y - ev.y;
+      if (dx * dx + dy * dy < minDist * minDist) return false;
+    }
+    // Check adoption zones
+    for (const zone of this.adoptionZones) {
+      if (Math.abs(x - zone.x) <= zone.radius + radius && Math.abs(y - zone.y) <= zone.radius + radius) return false;
+    }
+    return true;
+  }
+
   private spawnAdoptionEvent(now: number): void {
     const eventTypes: AdoptionEvent['type'][] = ['school_fair', 'farmers_market', 'petco_weekend', 'stadium_night'];
     const type = eventTypes[Math.floor(Math.random() * eventTypes.length)];
-    const x = 200 + Math.random() * (MAP_WIDTH - 400);
-    const y = 200 + Math.random() * (MAP_HEIGHT - 400);
     
     // Randomize radius between min and max
     const radius = World.ADOPTION_EVENT_RADIUS_MIN + 
       Math.floor(Math.random() * (World.ADOPTION_EVENT_RADIUS_MAX - World.ADOPTION_EVENT_RADIUS_MIN));
+
+    // Try to find a position that doesn't overlap mills or other events
+    let x = 0, y = 0, validPos = false;
+    for (let attempt = 0; attempt < 25; attempt++) {
+      x = 200 + Math.random() * (MAP_WIDTH - 400);
+      y = 200 + Math.random() * (MAP_HEIGHT - 400);
+      if (this.isValidEventPosition(x, y, radius)) {
+        validPos = true;
+        break;
+      }
+    }
+    if (!validPos) {
+      // Use last random position as fallback (avoid blocking events entirely)
+      log(`Adoption event: no ideal position after 25 attempts, using best-effort`);
+    }
     
     // Randomize total pets needed to rescue (70-300)
     const totalNeeded = World.ADOPTION_EVENT_NEEDED_MIN +
@@ -1707,6 +1814,124 @@ export class World {
     if (level >= 6) return 120;
     if (level >= 3) return 80;
     return 45; // Level 1-2 minimum
+  }
+
+  // ---- Mill spacing & merge helpers ----
+
+  /** Check whether (x, y) is a valid position for a new breeder shelter,
+   *  respecting minimum distances from other shelters and adoption events.
+   *  @param excludeIds Shelter IDs to ignore (e.g. shelters being merged). */
+  private isValidMillPosition(x: number, y: number, excludeIds?: Set<string>): boolean {
+    // Check distance from other breeder shelters
+    for (const [id, s] of this.breederShelters) {
+      if (excludeIds?.has(id)) continue;
+      const dx = x - s.x;
+      const dy = y - s.y;
+      if (dx * dx + dy * dy < World.MIN_MILL_MILL_DISTANCE * World.MIN_MILL_MILL_DISTANCE) return false;
+    }
+    // Check distance from adoption events
+    for (const ev of this.adoptionEvents.values()) {
+      const minDist = World.MIN_MILL_EVENT_DISTANCE;
+      const dx = x - ev.x;
+      const dy = y - ev.y;
+      if (dx * dx + dy * dy < minDist * minDist) return false;
+    }
+    // Check outside adoption zones
+    for (const zone of this.adoptionZones) {
+      if (Math.abs(x - zone.x) <= zone.radius + 100 && Math.abs(y - zone.y) <= zone.radius + 100) return false;
+    }
+    return true;
+  }
+
+  /** Try to find a valid mill position, starting with the candidate and
+   *  falling back to random positions on the map. Returns the best position found. */
+  private findValidMillPosition(candidateX: number, candidateY: number, excludeIds?: Set<string>): { x: number; y: number } {
+    if (this.isValidMillPosition(candidateX, candidateY, excludeIds)) {
+      return { x: candidateX, y: candidateY };
+    }
+    // Try random positions
+    for (let i = 0; i < 16; i++) {
+      const rx = 200 + Math.random() * (MAP_WIDTH - 400);
+      const ry = 200 + Math.random() * (MAP_HEIGHT - 400);
+      if (this.isValidMillPosition(rx, ry, excludeIds)) {
+        return { x: rx, y: ry };
+      }
+    }
+    // Fall back to candidate if no valid position found
+    return { x: candidateX, y: candidateY };
+  }
+
+  /** When breederShelters is at capacity, merge the two closest non-combat
+   *  shelters into one "mini pet mall" to make room for a new mill.
+   *  Returns true if merge succeeded. */
+  private mergeClosestShelters(): boolean {
+    // Build list of shelter IDs that are NOT in combat
+    const candidates: string[] = [];
+    for (const id of this.breederShelters.keys()) {
+      if (!this.millInCombat.has(id)) candidates.push(id);
+    }
+    if (candidates.length < 2) return false; // Can't merge if fewer than 2 non-combat shelters
+
+    // Find the pair with smallest center-to-center distance
+    let bestDist = Infinity;
+    let bestA = '';
+    let bestB = '';
+    for (let i = 0; i < candidates.length; i++) {
+      const a = this.breederShelters.get(candidates[i])!;
+      for (let j = i + 1; j < candidates.length; j++) {
+        const b = this.breederShelters.get(candidates[j])!;
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestDist) {
+          bestDist = d2;
+          bestA = candidates[i];
+          bestB = candidates[j];
+        }
+      }
+    }
+    if (!bestA || !bestB) return false;
+
+    const a = this.breederShelters.get(bestA)!;
+    const b = this.breederShelters.get(bestB)!;
+
+    // Centroid position, then try to satisfy spacing constraints
+    const cx = (a.x + b.x) / 2;
+    const cy = (a.y + b.y) / 2;
+    const excludeIds = new Set([bestA, bestB]);
+    const pos = this.findValidMillPosition(cx, cy, excludeIds);
+
+    const mergedId = `breeder-shelter-${++this.breederShelterId}`;
+    this.breederShelters.set(mergedId, {
+      x: pos.x,
+      y: pos.y,
+      level: Math.max(a.level, b.level),
+      lastSpawnTick: Math.min(a.lastSpawnTick, b.lastSpawnTick),
+      size: Math.max(a.size, b.size),
+      millCount: (a.millCount ?? 1) + (b.millCount ?? 1),
+    });
+
+    // Clean up references to old shelters
+    this.breederShelters.delete(bestA);
+    this.breederShelters.delete(bestB);
+    this.millInCombat.delete(bestA);
+    this.millInCombat.delete(bestB);
+    // Re-point any active minigame players referencing the old shelters to the merged one
+    for (const [playerId, sid] of this.activeMillByPlayer) {
+      if (sid === bestA || sid === bestB) {
+        this.activeMillByPlayer.set(playerId, mergedId);
+      }
+    }
+    // Re-point pending breeder minigames
+    for (const [playerId, data] of this.pendingBreederMiniGames) {
+      if (data.breederShelterId === bestA || data.breederShelterId === bestB) {
+        data.breederShelterId = mergedId;
+      }
+    }
+
+    log(`Merged breeder shelters ${bestA} + ${bestB} into pet mall ${mergedId} (millCount=${(a.millCount ?? 1) + (b.millCount ?? 1)}) at (${Math.round(pos.x)}, ${Math.round(pos.y)})`);
+    this.pendingAnnouncements.push(`⚠️ Breeder mills have merged into a Pet Mall!`);
+    return true;
   }
 
   tickWorld(fightAllyChoices?: Map<string, 'fight' | 'ally'>, allyRequests?: Map<string, Set<string>>, cpuIds?: Set<string>): void {
@@ -1968,24 +2193,34 @@ export class World {
         
         // At level 4+, convert to a breeder shelter!
         if (newLevel >= World.BREEDER_SHELTER_LEVEL) {
-          // Remove the camp pickup and create a breeder shelter
+          // Remove the camp pickup
           this.pickups.delete(uid);
           this.breederCamps.delete(uid);
           
+          // If at capacity, merge two closest shelters first to make room
+          if (this.breederShelters.size >= World.MAX_BREEDER_SHELTERS) {
+            this.mergeClosestShelters();
+          }
+
+          // Find a valid position for the new mill (respecting spacing)
+          const pos = this.findValidMillPosition(camp.x, camp.y);
+          
           const shelterId = `breeder-shelter-${++this.breederShelterId}`;
           this.breederShelters.set(shelterId, {
-            x: camp.x,
-            y: camp.y,
+            x: pos.x,
+            y: pos.y,
             level: newLevel,
             lastSpawnTick: this.tick,
             size: 50 + (newLevel - World.BREEDER_SHELTER_LEVEL) * 20,
+            millCount: 1,
           });
           
           this.pendingAnnouncements.push(`⚠️ BREEDER MILL FORMED! They're now breeding more strays!`);
-          log(`Breeder mill formed at (${Math.round(camp.x)}, ${Math.round(camp.y)}) - level ${newLevel}`);
+          log(`Breeder mill formed at (${Math.round(pos.x)}, ${Math.round(pos.y)}) - level ${newLevel}`);
         } else {
           // Spawn a new camp next to this one (no limit on camps now!)
-          // Try multiple angles to find a valid position not inside a player shelter
+          // Try multiple angles to find a valid position not inside a player shelter,
+          // and not overlapping breeder shelters or adoption events.
           let newX = 0, newY = 0, validPosition = false;
           for (let attempt = 0; attempt < 8; attempt++) {
             const angle = Math.random() * Math.PI * 2;
@@ -1993,17 +2228,35 @@ export class World {
             newY = clamp(camp.y + Math.sin(angle) * World.BREEDER_GROWTH_RADIUS, 50, MAP_HEIGHT - 50);
             
             // Check if position is inside a player shelter
-            let insideShelter = false;
+            let blocked = false;
             for (const shelter of this.shelters.values()) {
               const playerShelterR = Math.min(shelterVisualRadius(shelter.size), 400) + 50; // Capped for gameplay
               const dx = newX - shelter.x;
               const dy = newY - shelter.y;
               if (dx * dx + dy * dy < playerShelterR * playerShelterR) {
-                insideShelter = true;
+                blocked = true;
                 break;
               }
             }
-            if (!insideShelter) {
+            // Check distance from breeder shelters (mills)
+            if (!blocked) {
+              for (const bs of this.breederShelters.values()) {
+                const dx = newX - bs.x;
+                const dy = newY - bs.y;
+                const minD = World.MIN_MILL_MILL_DISTANCE * 0.5; // Camps can be closer than mills, use half distance
+                if (dx * dx + dy * dy < minD * minD) { blocked = true; break; }
+              }
+            }
+            // Check distance from adoption events
+            if (!blocked) {
+              for (const ev of this.adoptionEvents.values()) {
+                const dx = newX - ev.x;
+                const dy = newY - ev.y;
+                const minD = ev.radius + 50; // Stay outside event radius + small buffer
+                if (dx * dx + dy * dy < minD * minD) { blocked = true; break; }
+              }
+            }
+            if (!blocked) {
               validPosition = true;
               break;
             }
@@ -2052,18 +2305,31 @@ export class World {
         }
       }
       
-      // Spawn wild strays (2x spawn rate compared to normal)
-      const spawnInterval = Math.round(World.BREEDER_SHELTER_SPAWN_INTERVAL / 1.7); // ~1.7x (15% fewer strays than 2x rate)
+      // Spawn wild strays (reduced rate — one every ~10 seconds)
+      const spawnInterval = World.BREEDER_SHELTER_SPAWN_INTERVAL * 2; // ~250 ticks (~10s) — 50% fewer strays
       if (this.tick - shelter.lastSpawnTick >= spawnInterval) {
         shelter.lastSpawnTick = this.tick;
         
-        // Spawn 1-2 wild strays around the shelter
-        const numStrays = 1 + (shelter.level >= 6 ? 1 : 0);
+        // Spawn strays: base 1-2 per spawn, multiplied by millCount to preserve
+        // total stray output when mills are merged into pet malls.
+        const baseStrays = 1 + (shelter.level >= 6 ? 1 : 0);
+        const numStrays = baseStrays * (shelter.millCount ?? 1);
         for (let i = 0; i < numStrays; i++) {
-          const angle = Math.random() * Math.PI * 2;
-          const dist = World.BREEDER_STRAY_MIN_SPAWN_DIST + Math.random() * 300; // 200-500 units from mill
-          const sx = clamp(shelter.x + Math.cos(angle) * dist, 50, MAP_WIDTH - 50);
-          const sy = clamp(shelter.y + Math.sin(angle) * dist, 50, MAP_HEIGHT - 50);
+          // Try up to 5 positions to avoid overlapping existing strays
+          let sx = 0, sy = 0;
+          let placed = false;
+          for (let attempt = 0; attempt < 5; attempt++) {
+            const angle = Math.random() * Math.PI * 2;
+            const d = World.BREEDER_STRAY_MIN_SPAWN_DIST + Math.random() * 300; // 200-500 units from mill
+            sx = clamp(shelter.x + Math.cos(angle) * d, 50, MAP_WIDTH - 50);
+            sy = clamp(shelter.y + Math.sin(angle) * d, 50, MAP_HEIGHT - 50);
+            // Check minimum spacing from existing outdoor strays
+            const buf = this.gridQueryBuf;
+            buf.length = 0;
+            this.petGrid.queryRadius(sx, sy, PET_RADIUS, buf);
+            if (buf.length === 0) { placed = true; break; }
+          }
+          if (!placed) continue; // Skip this stray if no valid position found
           
           // Bias initial velocity AWAY from mill so strays naturally disperse
           const awayAngle = Math.atan2(sy - shelter.y, sx - shelter.x);
@@ -2094,8 +2360,10 @@ export class World {
     for (const [shelterId, breederShelter] of this.breederShelters.entries()) {
       if (this.millInCombat.has(shelterId)) continue;
       const bsr = 40 + breederShelter.size * 0.5;
+      // Scale petCount by millCount so merged pet malls are harder
       const basePetCount = 5 + Math.floor(breederShelter.level);
-      const petCount = Math.min(basePetCount, 20);
+      const scaledPetCount = basePetCount + ((breederShelter.millCount ?? 1) - 1) * 3;
+      const petCount = Math.min(scaledPetCount, 20);
       for (const p of this.players.values()) {
         if (this.eliminatedPlayerIds.has(p.id)) continue;
         if (this.pendingBreederMiniGames.has(p.id)) continue;
@@ -2153,10 +2421,11 @@ export class World {
         
         const owner = this.players.get(playerShelter.ownerId);
         const lossText = petLoss > 0 ? ` (lost ${petLoss} pets)` : '';
+        const structName = (breederShelter.millCount ?? 1) > 1 ? 'pet mall' : 'breeder mill';
         this.pendingAnnouncements.push(
-          `${owner?.displayName ?? 'A shelter'} destroyed a Level ${breederShelter.level} breeder mill!${lossText}`
+          `${owner?.displayName ?? 'A shelter'} destroyed a Level ${breederShelter.level} ${structName}!${lossText}`
         );
-        log(`Player ${owner?.displayName} destroyed level ${breederShelter.level} breeder mill (lost ${petLoss} pets)`);
+        log(`Player ${owner?.displayName} destroyed level ${breederShelter.level} ${structName} (lost ${petLoss} pets)`);
         break; // One combat per breeder shelter per tick
       }
     }
@@ -2435,7 +2704,11 @@ export class World {
         this.breederClaimedBy.delete(data.breederUid);
         continue;
       }
-      const minStayTicks = World.getBreederMinStaySeconds(data.level) * TICK_RATE;
+      // Instant rescue: if bot or ally has tier 3+ shelter, use 1-2s stay instead of 5+level
+      const bestTier = this.getHighestAllyShelterTier(playerId);
+      const canInstantRescue = bestTier >= 3;
+      const minStaySeconds = canInstantRescue ? 1 : World.getBreederMinStaySeconds(data.level);
+      const minStayTicks = minStaySeconds * TICK_RATE;
       if (now - data.arrivalTick < minStayTicks) continue;
       const camp = this.breederCamps.get(data.breederUid);
       const level = camp?.level ?? data.level;
@@ -2466,6 +2739,20 @@ export class World {
       this.breederCamps.delete(data.breederUid);
       this.breederClaimedBy.delete(data.breederUid);
       this.cpuAtBreeder.delete(playerId);
+
+      // Instant rescue: guarantee money back + 20% bonus (same as human instant rescue)
+      if (canInstantRescue) {
+        const instantRescueBonus = Math.floor(cost * 0.2);
+        const result = this.completeBreederMiniGame(playerId, petCount, petCount, level);
+        const guaranteedTokens = cost + instantRescueBonus;
+        const extraTokens = Math.max(0, guaranteedTokens - result.tokenBonus);
+        if (extraTokens > 0) {
+          this.addPlayerMoney(playerId, extraTokens);
+        }
+        log(`CPU ${player.displayName} instant-rescued level ${level} breeder (tier ${bestTier} shelter), ${petCount} pets`);
+        continue;
+      }
+
       this.pendingCpuBreederCompletions.set(playerId, {
         level,
         petCount,
@@ -2589,7 +2876,8 @@ export class World {
       const capacity = isGrounded ? Math.floor(p.size) : Math.min(Math.floor(p.size), VAN_MAX_CAPACITY);
       if (p.petsInside.length >= capacity) continue;
       const sr = effectiveRadius(p);
-      const rescueRadius = Math.max(RESCUE_RADIUS, sr + PET_RADIUS);
+      const lureBonus = this.vanLurePlayers.has(p.id) ? VAN_LURE_BONUS_RADIUS : 0;
+      const rescueRadius = Math.max(RESCUE_RADIUS + lureBonus, sr + PET_RADIUS);
       buf.length = 0;
       this.petGrid.queryRadius(p.x, p.y, rescueRadius, buf);
       // Sort candidates by distance (nearest first) so rescue order matches old behaviour
@@ -2865,6 +3153,7 @@ export class World {
         const money = this.playerMoney.get(p.id) ?? 0;
         const shelterId = this.playerShelterIds.get(p.id);
         const hasVanSpeed = this.vanSpeedUpgrades.has(p.id);
+        const hasLure = this.vanLurePlayers.has(p.id);
         const disconnected = this.disconnectedPlayerIds.has(p.id);
         const team = this.playerTeams.get(p.id);
         return {
@@ -2881,6 +3170,7 @@ export class World {
           money: money > 0 ? money : undefined,
           shelterId: shelterId || undefined,
           vanSpeedUpgrade: hasVanSpeed || undefined,
+          vanLure: hasLure || undefined,
           team: team || undefined,
         };
       }),
@@ -2895,6 +3185,7 @@ export class World {
             y: s.y,
             level: s.level,
             size: s.size,
+            millCount: (s.millCount ?? 1) > 1 ? s.millCount : undefined,
           }))
         : undefined,
       adoptionEvents: this.adoptionEvents.size > 0 ? Array.from(this.adoptionEvents.values()) : undefined,
@@ -2947,8 +3238,14 @@ export class World {
   }
   
   /** Check if a player has a pending breeder mini-game */
-  getPendingBreederMiniGame(playerId: string): { petCount: number; startTick: number; level: number; isMill?: boolean; breederShelterId?: string; startSent?: boolean } | null {
-    return this.pendingBreederMiniGames.get(playerId) ?? null;
+  getPendingBreederMiniGame(playerId: string): { petCount: number; startTick: number; level: number; isMill?: boolean; breederShelterId?: string; startSent?: boolean; millCount?: number } | null {
+    const pending = this.pendingBreederMiniGames.get(playerId);
+    if (!pending) return null;
+    // Include millCount from the breeder shelter if it's a mill
+    const millCount = pending.breederShelterId
+      ? (this.breederShelters.get(pending.breederShelterId)?.millCount ?? 1)
+      : undefined;
+    return { ...pending, millCount: millCount && millCount > 1 ? millCount : undefined };
   }
   
   /** Mark breederStart as sent (prevents resending, but keeps entry for retreat/complete) */
@@ -3155,10 +3452,12 @@ export class World {
     if (isMill && millShelterId) {
       this.millInCombat.delete(millShelterId);
       if (rescuedCount === totalPets) {
+        const mc = this.breederShelters.get(millShelterId)?.millCount ?? 1;
         this.breederShelters.delete(millShelterId);
         // Only announce when a mill is fully shut down
-        this.pendingAnnouncements.push(`${player.displayName} shut down a Level ${level} breeder mill!`);
-        log(`Mill ${millShelterId} shut down by ${player.displayName}`);
+        const structureName = mc > 1 ? 'pet mall' : 'breeder mill';
+        this.pendingAnnouncements.push(`${player.displayName} shut down a Level ${level} ${structureName}!`);
+        log(`Mill ${millShelterId} (millCount=${mc}) shut down by ${player.displayName}`);
       }
       // No announcements for partial rescue or failure on mills
     }
@@ -3320,7 +3619,27 @@ export class World {
       rebuildStartTick: 0,
       visitedMills: [],
       pendingBossEvents: [],
+      caughtCooldownUntil: new Map(),
     };
+
+    // In teams mode, ALL CPU teammates must participate in boss mode.
+    // In other modes, ensure most CPUs participate (80%) for better gameplay.
+    for (const p of this.players.values()) {
+      if (!p.id.startsWith('cpu-')) continue;
+      const profile = this.cpuProfiles.get(p.id);
+      if (!profile) continue;
+      if (profile.bossParticipant) continue; // already participating
+
+      if (this.matchMode === 'teams') {
+        // In teams mode: ALL bots must help — you can't win without them
+        profile.bossParticipant = true;
+      } else {
+        // In other modes: 80% of remaining bots join (up from 40% at generation)
+        if (Math.random() < 0.80) {
+          profile.bossParticipant = true;
+        }
+      }
+    }
 
     this.pendingAnnouncements.push('BOSS MODE: The Breeder Tycoon has arrived with the PetMall! Prepare meals to rescue the pets!');
     log(`Boss Mode started at tick ${this.tick}. PetMall at (${mallX}, ${mallY})`);
@@ -3355,7 +3674,9 @@ export class World {
     this.updateTycoonPatrol();
   }
 
-  /** CPU bots at boss mills auto-purchase ingredients and submit meals. */
+  /** CPU bots at boss mills auto-complete after a short delay (4-6 seconds).
+   *  Instead of purchasing ingredients one by one, CPUs bulk-fill all ingredients
+   *  and submit the meal once the timer expires. */
   private cpuBossAutoPurchase(): void {
     if (!this.bossMode?.active) return;
     const bm = this.bossMode;
@@ -3371,41 +3692,33 @@ export class World {
       const mill = bm.mills[millId];
       if (!mill || mill.completed) continue;
 
-      // Rate-limit: purchase ~1 ingredient every 25-50 ticks (1-2 seconds)
-      const nextPurchase = this.cpuBossNextPurchaseTick.get(p.id) ?? 0;
-      if (this.tick < nextPurchase) continue;
-      this.cpuBossNextPurchaseTick.set(p.id, this.tick + 25 + Math.floor(Math.random() * 25));
+      // Set completion timer when CPU first arrives (4-6 seconds = 100-150 ticks)
+      let completeTick = this.cpuBossNextPurchaseTick.get(p.id) ?? 0;
+      if (completeTick === 0) {
+        completeTick = this.tick + 100 + Math.floor(Math.random() * 50); // 4-6s
+        this.cpuBossNextPurchaseTick.set(p.id, completeTick);
+      }
+      if (this.tick < completeTick) continue;
 
-      // Find the next unpurchased ingredient
-      const playerPurchased = bm.playerMillPurchases.get(p.id) ?? {};
-      let boughtSomething = false;
+      // Timer expired — bulk-fill all ingredients (CPUs get them free for gameplay flow)
+      let playerPurchased = bm.playerMillPurchases.get(p.id);
+      if (!playerPurchased) {
+        playerPurchased = {};
+        bm.playerMillPurchases.set(p.id, playerPurchased);
+      }
       for (const [ingredient, needed] of Object.entries(mill.recipe)) {
-        const have = playerPurchased[ingredient] ?? 0;
-        if (have < needed) {
-          // Attempt purchase
-          const result = this.purchaseBossIngredient(p.id, ingredient, 1);
-          if (result.success) {
-            boughtSomething = true;
-          }
-          break; // one ingredient per tick interval
-        }
+        playerPurchased[ingredient] = needed; // Fill completely
+        // Also update the global mill.purchased for display
+        mill.purchased[ingredient] = (mill.purchased[ingredient] ?? 0) + (needed - (playerPurchased[ingredient] ?? 0));
       }
 
-      // If all ingredients purchased, submit the meal
-      if (!boughtSomething) {
-        // Check if recipe is complete
-        let allDone = true;
-        for (const [ingredient, needed] of Object.entries(mill.recipe)) {
-          const have = playerPurchased[ingredient] ?? 0;
-          if (have < needed) { allDone = false; break; }
-        }
-        if (allDone) {
-          const result = this.submitBossMeal(p.id);
-          if (result.success) {
-            log(`CPU ${p.id} completed boss mill ${millId} (${BOSS_MILL_NAMES[mill.petType]})`);
-          }
-        }
+      // Submit the meal
+      const result = this.submitBossMeal(p.id);
+      if (result.success) {
+        log(`CPU ${p.id} auto-completed boss mill ${millId} (${BOSS_MILL_NAMES[mill.petType]}) in ~${Math.round((this.tick - (completeTick - 100 - 50)) / 25)}s`);
       }
+      // Reset timer so it's set fresh if they go to another mill
+      this.cpuBossNextPurchaseTick.delete(p.id);
     }
   }
 
@@ -3423,6 +3736,19 @@ export class World {
       if (p.id.startsWith('cpu-') || p.id.startsWith('cpu_')) {
         const profile = this.cpuProfiles.get(p.id);
         if (!profile || !profile.bossParticipant) continue;
+      }
+
+      // Skip players on caught cooldown (prevents instant re-entry loop after tycoon catch)
+      const cooldownUntil = bm.caughtCooldownUntil.get(p.id) ?? 0;
+      if (this.tick < cooldownUntil) continue;
+      // Clean up expired cooldowns
+      if (cooldownUntil > 0 && this.tick >= cooldownUntil) bm.caughtCooldownUntil.delete(p.id);
+
+      // Skip bots on voluntary flee re-entry cooldown (prevents enter/exit oscillation)
+      if (p.id.startsWith('cpu-') || p.id.startsWith('cpu_')) {
+        const reentryCooldown = this.bossMillReentryCooldown.get(p.id) ?? 0;
+        if (this.tick < reentryCooldown) continue;
+        if (reentryCooldown > 0 && this.tick >= reentryCooldown) this.bossMillReentryCooldown.delete(p.id);
       }
 
       // Find the nearest non-completed mill within range for this player
@@ -3473,6 +3799,7 @@ export class World {
         // Player moved to a different mill - exit old, enter new
         bm.playerAtMills.set(p.id, nearMillId);
         bm.playerMillPurchases.set(p.id, {});
+        this.cpuBossNextPurchaseTick.delete(p.id); // Reset completion timer for new mill
         bm.pendingBossEvents.push({ type: 'bossMillExit', playerId: p.id, millId: prevMillId });
         bm.pendingBossEvents.push({
           type: 'bossMillEnter',
@@ -3485,6 +3812,7 @@ export class World {
         // Player left the mill
         bm.playerAtMills.delete(p.id);
         bm.playerMillPurchases.delete(p.id);
+        this.cpuBossNextPurchaseTick.delete(p.id); // Reset completion timer
         bm.pendingBossEvents.push({ type: 'bossMillExit', playerId: p.id, millId: prevMillId });
         log(`Player ${p.id} exited boss mill ${prevMillId}`);
       }
@@ -3630,9 +3958,10 @@ export class World {
         });
       }
 
-      // Force player out of mill
+      // Force player out of mill and apply re-entry cooldown (3 seconds)
       bm.playerAtMills.delete(playerId);
       bm.playerMillPurchases.delete(playerId);
+      bm.caughtCooldownUntil.set(playerId, this.tick + TICK_RATE * 3);
     }
     
     this.pendingAnnouncements.push('Caught by the Breeder Tycoon! You lost half your prepared ingredients!');
@@ -3936,6 +4265,7 @@ export class World {
       shelterIdSeq: this.shelterIdSeq,
       playerShelterIds: Array.from(this.playerShelterIds.entries()),
       vanSpeedUpgrades: Array.from(this.vanSpeedUpgrades),
+      vanLurePlayers: Array.from(this.vanLurePlayers),
       lastShelterAdoptTick: Array.from(this.lastShelterAdoptTick.entries()),
       totalMatchAdoptions: this.totalMatchAdoptions,
       lastGlobalAdoptionTick: this.lastGlobalAdoptionTick,
@@ -3986,7 +4316,7 @@ export class World {
       playerColors: [string, string][]; playerMoney: [string, number][];
       eliminatedPlayerIds: string[]; lastAllyPairs: string[]; combatOverlapTicks: [string, number][];
       shelters: [string, ShelterState][]; shelterIdSeq: number; playerShelterIds: [string, string][];
-      vanSpeedUpgrades: string[]; lastShelterAdoptTick: [string, number][];
+      vanSpeedUpgrades: string[]; vanLurePlayers?: string[]; lastShelterAdoptTick: [string, number][];
       totalMatchAdoptions: number; lastGlobalAdoptionTick: number; scarcityLevel: number;
       triggeredEvents: number[]; satelliteZonesSpawned: boolean; matchProcessed: boolean;
       breederSpawnCount: number; breederCurrentLevel: number; lastBreederWaveTick: number;
@@ -3996,7 +4326,7 @@ export class World {
       pendingCpuBreederCompletions: [string, { level: number; petCount: number; completeAtTick: number }][];
       breederClaimedBy: [string, string][];
       breederCamps: [string, { x: number; y: number; spawnTick: number; level: number }][];
-      breederShelters: [string, { x: number; y: number; level: number; lastSpawnTick: number; size: number }][];
+      breederShelters: [string, { x: number; y: number; level: number; lastSpawnTick: number; size: number; millCount?: number }][];
       breederShelterId: number; wildStrayIds: string[]; cpuCanShutdownBreeders: boolean;
       pendingAnnouncements: string[]; adoptionEvents: [string, AdoptionEvent][];
       adoptionEventIdSeq: number; nextAdoptionEventSpawnTick: number;
@@ -4041,6 +4371,7 @@ export class World {
     w.shelterIdSeq = state.shelterIdSeq;
     w.playerShelterIds = new Map(state.playerShelterIds);
     w.vanSpeedUpgrades = new Set(state.vanSpeedUpgrades);
+    w.vanLurePlayers = new Set(state.vanLurePlayers ?? []);
     w.lastShelterAdoptTick = new Map(state.lastShelterAdoptTick);
     w.totalMatchAdoptions = state.totalMatchAdoptions;
     w.lastGlobalAdoptionTick = state.lastGlobalAdoptionTick;
@@ -4058,7 +4389,10 @@ export class World {
     w.pendingCpuBreederCompletions = new Map(state.pendingCpuBreederCompletions);
     w.breederClaimedBy = new Map(state.breederClaimedBy);
     w.breederCamps = new Map(state.breederCamps);
-    w.breederShelters = new Map(state.breederShelters);
+    // Normalize millCount for backward compat with old saves that don't have it
+    w.breederShelters = new Map(
+      state.breederShelters.map(([id, s]) => [id, { ...s, millCount: s.millCount ?? 1 }] as [string, typeof s & { millCount: number }])
+    );
     w.breederShelterId = state.breederShelterId;
     w.wildStrayIds = new Set(state.wildStrayIds);
     w.cpuCanShutdownBreeders = state.cpuCanShutdownBreeders;
@@ -4067,7 +4401,14 @@ export class World {
     w.adoptionEventIdSeq = state.adoptionEventIdSeq;
     w.nextAdoptionEventSpawnTick = state.nextAdoptionEventSpawnTick;
     w.matchMode = (state as { matchMode?: 'ffa' | 'solo' | 'teams' }).matchMode ?? 'ffa';
-    w.bossMode = (state as { bossMode?: typeof w.bossMode }).bossMode ?? null;
+    const rawBoss = (state as { bossMode?: any }).bossMode ?? null;
+    if (rawBoss) {
+      // Rehydrate Maps that were serialized as plain objects/arrays
+      rawBoss.playerAtMills = rawBoss.playerAtMills instanceof Map ? rawBoss.playerAtMills : new Map(Object.entries(rawBoss.playerAtMills ?? {}));
+      rawBoss.playerMillPurchases = rawBoss.playerMillPurchases instanceof Map ? rawBoss.playerMillPurchases : new Map(Object.entries(rawBoss.playerMillPurchases ?? {}));
+      rawBoss.caughtCooldownUntil = rawBoss.caughtCooldownUntil instanceof Map ? rawBoss.caughtCooldownUntil : new Map(Object.entries(rawBoss.caughtCooldownUntil ?? {}));
+    }
+    w.bossMode = rawBoss;
     if (state.playerTeams) w.playerTeams = new Map(state.playerTeams);
     if (state.teamScores) w.teamScores = new Map(state.teamScores);
     w.winningTeam = state.winningTeam ?? null;

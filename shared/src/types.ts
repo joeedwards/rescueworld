@@ -47,6 +47,8 @@ export interface PlayerState {
   shelterId?: string;
   /** True if player has purchased permanent van speed upgrade. */
   vanSpeedUpgrade?: boolean;
+  /** True if player has Van Lure (extended pickup radius). */
+  vanLure?: boolean;
   /** Team assignment in Teams mode ('red' or 'blue'). Undefined in FFA/Solo. */
   team?: 'red' | 'blue';
 }
@@ -115,13 +117,16 @@ export interface ShelterState {
   tier: number;
 }
 
-/** Breeder shelter - formed when breeders grow too large, spawns wild strays */
+/** Breeder shelter - formed when breeders grow too large, spawns wild strays.
+ *  When multiple mills merge into a "mini pet mall", millCount > 1. */
 export interface BreederShelterState {
   id: string;
   x: number;
   y: number;
   level: number;
   size: number;
+  /** Number of mills merged into this entity (default 1). */
+  millCount?: number;
 }
 
 /** Adoption event - timed event with specific pet requirements */

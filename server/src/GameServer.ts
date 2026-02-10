@@ -13,7 +13,7 @@ import { registerServer, appendReplay, getNextGuestName } from './registry.js';
 import { withdrawForMatch, withdrawForMatchSelective, depositAfterMatch, getInventory, type Inventory, type ItemSelection } from './inventory.js';
 import { recordMatchWin, recordMatchLoss, updateReputationOnQuit, ensureGuestUser, ensureBotUser } from './leaderboard.js';
 import { saveSavedMatch, getSavedMatch, deleteSavedMatch, insertMatchHistory, incrementGameCount, saveFfaMatch, getAllSavedFfaMatches, deleteSavedFfaMatch, purgeSavedBotMatches, getFriendsOf } from './referrals.js';
-import { awardKarmaPoints } from './karmaService.js';
+import { awardKarmaPoints, hasVanLure } from './karmaService.js';
 
 /** Timestamped log function for server output */
 function log(message: string): void {
@@ -363,7 +363,7 @@ export function getRealtimeStats(): {
   return { onlinePlayers, ffaWaiting, playingSolo, playingFfa, playingTeams };
 }
 
-/** Get all live (non-solo, playing) matches for spectator listing */
+/** Get all live (non-solo) matches for spectator listing and lobby joining */
 export function getLiveMatches(): Array<{
   matchId: string;
   mode: string;
@@ -372,6 +372,7 @@ export function getLiveMatches(): Array<{
   spectatorCount: number;
   durationMs: number;
   isBotMatch: boolean;
+  waiting?: boolean;
 }> {
   const result: Array<{
     matchId: string;
@@ -381,9 +382,28 @@ export function getLiveMatches(): Array<{
     spectatorCount: number;
     durationMs: number;
     isBotMatch: boolean;
+    waiting?: boolean;
   }> = [];
   for (const match of matches.values()) {
     if (match.mode === 'solo') continue;
+
+    // Include waiting matches (lobby/countdown) so other players can join
+    if (match.phase === 'lobby' || match.phase === 'countdown') {
+      const humanCount = [...match.players.keys()].filter(id => !id.startsWith('cpu-')).length;
+      if (humanCount === 0) continue; // Skip empty lobbies
+      result.push({
+        matchId: match.id,
+        mode: match.mode,
+        playerCount: humanCount,
+        botCount: match.cpuIds.size,
+        spectatorCount: 0,
+        durationMs: 0,
+        isBotMatch: !!match.isBotMatch,
+        waiting: true,
+      });
+      continue;
+    }
+
     if (match.phase !== 'playing') continue;
     if (match.frozen) continue; // Skip frozen/paused matches (no active players)
     if (match.world.isMatchOver() || match.world.isStrayLoss()) continue;
@@ -1089,6 +1109,12 @@ wss.on('connection', async (ws) => {
     
     log(`player joined match id=${match.id} playerId=${effectivePlayerId} displayName=${name} startingRT=${startingRT}`);
     match.world.addPlayer(effectivePlayerId, name, startingRT, startingPorts, startingShelterTier3Boosts, 0);
+    
+    // Apply permanent Van Lure boost if the player owns it
+    if (playerUserId && hasVanLure(playerUserId)) {
+      match.world.setVanLure(effectivePlayerId, true);
+    }
+    
     match.players.set(effectivePlayerId, ws);
     playerToMatch.set(effectivePlayerId, match.id);
     currentMatchId = match.id;
@@ -1221,6 +1247,7 @@ wss.on('connection', async (ws) => {
           const mode = msg.mode as 'ffa' | 'solo' | 'teams';
           const name = typeof msg.displayName === 'string' && msg.displayName ? msg.displayName : null;
           const rejoinMatchId = typeof msg.rejoinMatchId === 'string' ? msg.rejoinMatchId : null;
+          const joinMatchId = typeof msg.joinMatchId === 'string' ? msg.joinMatchId : null;
           
           // Check if client sent userId (registered user or guest with guest_id)
           // NOTE: Don't withdraw inventory here! We need to validate the match first.
@@ -1422,6 +1449,23 @@ wss.on('connection', async (ws) => {
                 }
               }
               
+              // Join a specific waiting lobby by matchId (from Live Matches "Join" button)
+              if (joinMatchId) {
+                const targetMatch = matches.get(joinMatchId);
+                if (targetMatch && targetMatch.mode === 'ffa' && (targetMatch.phase === 'lobby' || targetMatch.phase === 'countdown')) {
+                  addPlayerToMatch(targetMatch, displayNameToUse);
+                  if (targetMatch.players.size >= 2 && targetMatch.phase === 'lobby') {
+                    ensureCpusForMatch(targetMatch);
+                    targetMatch.phase = 'countdown';
+                    targetMatch.countdownEndAt = Date.now() + FFA_COUNTDOWN_MS;
+                    targetMatch.readySet.clear();
+                  }
+                  log(`Player ${displayNameToUse} joined FFA lobby ${targetMatch.id} via joinMatchId`);
+                  return;
+                }
+                // Target match not valid — fall through to normal lobby logic
+              }
+
               const clientBotsEnabled = !!msg.botsEnabled;
               
               // Check if player has bots enabled but there's a no-bots lobby with waiting players
@@ -1529,9 +1573,33 @@ wss.on('connection', async (ws) => {
                 }
               }
               
-              const teamsBotsEnabled = !!msg.botsEnabled;
               // Team selection: player picks 'red' or 'blue' (default 'red')
               const chosenTeam: 'red' | 'blue' = msg.team === 'blue' ? 'blue' : 'red';
+
+              // Join a specific waiting lobby by matchId (from Live Matches "Join" button)
+              if (joinMatchId) {
+                const targetMatch = matches.get(joinMatchId);
+                if (targetMatch && targetMatch.mode === 'teams' && (targetMatch.phase === 'lobby' || targetMatch.phase === 'countdown')) {
+                  addPlayerToMatch(targetMatch, displayNameToUse);
+                  // Assign team after player is added
+                  if (targetMatch.playerTeams) {
+                    targetMatch.playerTeams.set(effectivePlayerId, chosenTeam);
+                    targetMatch.world.setPlayerTeam(effectivePlayerId, chosenTeam);
+                    log(`Player ${displayNameToUse} joined team ${chosenTeam} in match ${targetMatch.id} via joinMatchId`);
+                  }
+                  if (targetMatch.players.size >= 2 && targetMatch.phase === 'lobby') {
+                    ensureCpusForMatch(targetMatch);
+                    targetMatch.phase = 'countdown';
+                    targetMatch.countdownEndAt = Date.now() + FFA_COUNTDOWN_MS;
+                    targetMatch.readySet.clear();
+                  }
+                  log(`Player ${displayNameToUse} joined Teams lobby ${targetMatch.id} via joinMatchId`);
+                  return;
+                }
+                // Target match not valid — fall through to normal lobby logic
+              }
+
+              const teamsBotsEnabled = !!msg.botsEnabled;
               
               // Check if player has bots enabled but there's a no-bots lobby with waiting players
               if (teamsBotsEnabled) {
@@ -2268,6 +2336,7 @@ setInterval(() => {
               isMill: isMill || undefined,
               timeLimitSeconds: timeLimitSeconds ?? undefined,
               addPetIntervalSeconds: isMill ? 10 : undefined,
+              millCount: pending.millCount ?? undefined,
             }));
             if (isMill) {
               if (!match.activeMillGames) match.activeMillGames = new Map();

@@ -211,6 +211,13 @@ function initSqlite(): void {
     // Column already exists, ignore
   }
 
+  // Migration: Van Lure permanent boost (purchased with Karma Points)
+  try {
+    sqlite.exec(`ALTER TABLE player_stats ADD COLUMN has_van_lure INTEGER NOT NULL DEFAULT 0`);
+  } catch {
+    // Column already exists, ignore
+  }
+
   // Karma transactions table for audit trail (cross-game integration)
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS karma_transactions (
