@@ -256,11 +256,10 @@ export class World {
   /** Boss mill re-entry cooldown: tick when bot can re-enter a mill (prevents oscillation) */
   private bossMillReentryCooldown = new Map<string, number>();
   
-  // Breeder wave spawning - about every minute (45-75s), spawn all 5 breeders of current level at once
+  // Breeder wave spawning - about every minute (45-75s), spawn 2-3 breeders of current level at once
   // Note: TICK_RATE is 25 ticks/second
   private breederSpawnCount = 0; // Total spawns at current level
   private breederCurrentLevel = 1; // Current breeder level
-  private static readonly BREEDERS_PER_LEVEL = 5; // 5 breeders per wave
   private static readonly BREEDER_WAVE_MIN_TICKS = 1125; // Minimum 45 seconds between waves (45 * 25)
   private static readonly BREEDER_WAVE_MAX_TICKS = 1875; // Maximum 75 seconds between waves (75 * 25)
   private static readonly BREEDER_FIRST_WAVE_DELAY_TICKS = 250; // First wave after 10 seconds (10 * 25)
@@ -1138,6 +1137,24 @@ export class World {
         }
       }
     }
+    
+    // Keep CPU vans clear of breeder shelters (mills) so they don't path through them.
+    if (!isFull && !touchingZone) {
+      for (const breederShelter of this.breederShelters.values()) {
+        const bsr = 40 + breederShelter.size * 0.5;
+        const dangerRadius = bsr + 80;
+        const d = dist(p.x, p.y, breederShelter.x, breederShelter.y);
+        if (d < dangerRadius) {
+          const dx = p.x - breederShelter.x;
+          const dy = p.y - breederShelter.y;
+          const len = Math.hypot(dx, dy) || 1;
+          const fleeX = clamp(p.x + (dx / len) * 220, 50, MAP_WIDTH - 50);
+          const fleeY = clamp(p.y + (dy / len) * 220, 50, MAP_HEIGHT - 50);
+          this.setCpuTarget(p.id, { x: fleeX, y: fleeY, type: 'wander' });
+          return this.directionToward(p.x, p.y, fleeX, fleeY);
+        }
+      }
+    }
 
     // Stop to adopt if shelter touches zone and has pets
     if (touchingZone && p.petsInside.length > 0) {
@@ -1277,6 +1294,8 @@ export class World {
       if (u.type === PICKUP_TYPE_BREEDER && !this.cpuCanShutdownBreeders) continue;
       // Skip breeder camps that are already claimed by another player (human or CPU physically at breeder)
       if (u.type === PICKUP_TYPE_BREEDER) {
+        // CPU must have a built shelter before it can target breeders.
+        if (!this.hasShelter(p.id)) continue;
         // Check if breeder is claimed by someone physically at it
         const claim = this.breederClaimedBy.get(u.id);
         if (claim !== undefined && claim !== p.id) continue;
@@ -2120,7 +2139,7 @@ export class World {
       }
     }
     
-    // Breeder wave spawning: about every minute (45-75s), spawn all 5 breeders of current level at random locations
+    // Breeder wave spawning: about every minute (45-75s), spawn 2-3 breeders of current level at random locations
     const ticksSinceStart = now - this.matchStartTick;
     const ticksSinceLastWave = now - this.lastBreederWaveTick;
     
@@ -2151,9 +2170,10 @@ export class World {
       this.nextBreederWaveInterval = World.BREEDER_WAVE_MIN_TICKS + 
         Math.floor(Math.random() * (World.BREEDER_WAVE_MAX_TICKS - World.BREEDER_WAVE_MIN_TICKS));
       
-      // Spawn all 5 breeders at random locations
+      // Spawn 2-3 breeders at random locations
+      const campsThisWave = 2 + Math.floor(Math.random() * 2);
       let spawnedCount = 0;
-      for (let i = 0; i < World.BREEDERS_PER_LEVEL; i++) {
+      for (let i = 0; i < campsThisWave; i++) {
         const pos = this.randomPosOutsideAdoptionZone();
         if (pos) {
           const uid = `pickup-${++this.pickupIdSeq}`;
@@ -2369,6 +2389,7 @@ export class World {
         if (this.pendingBreederMiniGames.has(p.id)) continue;
         if (this.cpuAtBreeder.has(p.id) || this.pendingCpuBreederCompletions.has(p.id)) continue;
         if (p.id.startsWith('cpu-')) continue; // CPUs don't start mill minigame from van (they use camps)
+        if (!this.hasShelter(p.id)) continue; // Shelter required before stopping breeder mills
         // Skip if player is on retreat cooldown (just retreated from a camp/mill)
         const millRetreatEnd = this.retreatCooldownUntilTick.get(p.id) ?? 0;
         if (this.tick < millRetreatEnd) continue;
@@ -2786,6 +2807,7 @@ export class World {
             const cpuRt = this.playerMoney.get(p.id) ?? 0;
             const minRt = World.minRtForBreederLevel(level);
             if (cpuRt < minRt) continue;
+            if (!this.hasShelter(p.id)) continue; // Shelter required before stopping breeders
             
             // Check if any human player is already in a minigame for this specific breeder
             let breederAlreadyBeingAttacked = false;
@@ -2803,6 +2825,7 @@ export class World {
           }
           // Human players: don't allow if already attempting a breeder
           if (this.pendingBreederMiniGames.has(p.id)) continue;
+          if (!this.hasShelter(p.id)) continue; // Shelter required before stopping breeders
           // Skip if player is on retreat cooldown (just retreated from a camp/mill)
           const retreatEnd = this.retreatCooldownUntilTick.get(p.id) ?? 0;
           if (this.tick < retreatEnd) continue;

@@ -373,6 +373,7 @@ export function getLiveMatches(): Array<{
   durationMs: number;
   isBotMatch: boolean;
   waiting?: boolean;
+  canHotJoin?: boolean;
 }> {
   const result: Array<{
     matchId: string;
@@ -383,6 +384,7 @@ export function getLiveMatches(): Array<{
     durationMs: number;
     isBotMatch: boolean;
     waiting?: boolean;
+    canHotJoin?: boolean;
   }> = [];
   for (const match of matches.values()) {
     if (match.mode === 'solo') continue;
@@ -416,6 +418,7 @@ export function getLiveMatches(): Array<{
       spectatorCount: match.observers.size,
       durationMs: match.world.getMatchDurationMs(),
       isBotMatch: !!match.isBotMatch,
+      canHotJoin: getMatchHumanCount(match) < MAX_FFA_PLAYERS,
     });
   }
   return result;
@@ -620,6 +623,26 @@ function addBotToTeam(match: Match, team: 'red' | 'blue'): void {
       match.world.setPlayerTeam(cid, team);
     }
     log(`Bot ${cid} added to team ${team} in match ${match.id}`);
+  }
+}
+
+/** Count human players in a match, including disconnected players still in-world. */
+function getMatchHumanCount(match: Match): number {
+  let count = 0;
+  for (const playerId of match.playerUserIds.keys()) {
+    if (!playerId.startsWith('cpu-')) count += 1;
+  }
+  return count;
+}
+
+/** Remove a bot player from a match to free a slot for hot-join. */
+function removeBotFromMatch(match: Match, botId: string): void {
+  if (!match.cpuIds.has(botId)) return;
+  match.world.removePlayer(botId);
+  match.cpuIds.delete(botId);
+  if (match.playerTeams) {
+    match.playerTeams.delete(botId);
+    match.world.formTeamAlliances();
   }
 }
 
@@ -1452,15 +1475,42 @@ wss.on('connection', async (ws) => {
               // Join a specific waiting lobby by matchId (from Live Matches "Join" button)
               if (joinMatchId) {
                 const targetMatch = matches.get(joinMatchId);
-                if (targetMatch && targetMatch.mode === 'ffa' && (targetMatch.phase === 'lobby' || targetMatch.phase === 'countdown')) {
-                  addPlayerToMatch(targetMatch, displayNameToUse);
-                  if (targetMatch.players.size >= 2 && targetMatch.phase === 'lobby') {
-                    ensureCpusForMatch(targetMatch);
-                    targetMatch.phase = 'countdown';
-                    targetMatch.countdownEndAt = Date.now() + FFA_COUNTDOWN_MS;
-                    targetMatch.readySet.clear();
+                if (targetMatch && targetMatch.mode === 'ffa') {
+                  if (targetMatch.phase === 'lobby' || targetMatch.phase === 'countdown') {
+                    addPlayerToMatch(targetMatch, displayNameToUse);
+                    if (targetMatch.players.size >= 2 && targetMatch.phase === 'lobby') {
+                      ensureCpusForMatch(targetMatch);
+                      targetMatch.phase = 'countdown';
+                      targetMatch.countdownEndAt = Date.now() + FFA_COUNTDOWN_MS;
+                      targetMatch.readySet.clear();
+                    }
+                    log(`Player ${displayNameToUse} joined FFA lobby ${targetMatch.id} via joinMatchId`);
+                    return;
                   }
-                  log(`Player ${displayNameToUse} joined FFA lobby ${targetMatch.id} via joinMatchId`);
+
+                  if (
+                    targetMatch.phase === 'playing' &&
+                    !targetMatch.frozen &&
+                    !targetMatch.world.isMatchOver() &&
+                    !targetMatch.world.isStrayLoss()
+                  ) {
+                    const humanCount = getMatchHumanCount(targetMatch);
+                    if (humanCount >= MAX_FFA_PLAYERS) {
+                      ws.send(JSON.stringify({ type: 'error', message: `Match is full (${MAX_FFA_PLAYERS} real players).` }));
+                      return;
+                    }
+
+                    const botToReplace = targetMatch.cpuIds.values().next().value as string | undefined;
+                    if (botToReplace) {
+                      removeBotFromMatch(targetMatch, botToReplace);
+                    }
+
+                    addPlayerToMatch(targetMatch, displayNameToUse);
+                    log(`Player ${displayNameToUse} hot-joined FFA match ${targetMatch.id}${botToReplace ? ` replacing ${botToReplace}` : ''}`);
+                    return;
+                  }
+
+                  ws.send(JSON.stringify({ type: 'error', message: 'Match is not available for joining.' }));
                   return;
                 }
                 // Target match not valid — fall through to normal lobby logic
@@ -1579,21 +1629,56 @@ wss.on('connection', async (ws) => {
               // Join a specific waiting lobby by matchId (from Live Matches "Join" button)
               if (joinMatchId) {
                 const targetMatch = matches.get(joinMatchId);
-                if (targetMatch && targetMatch.mode === 'teams' && (targetMatch.phase === 'lobby' || targetMatch.phase === 'countdown')) {
-                  addPlayerToMatch(targetMatch, displayNameToUse);
-                  // Assign team after player is added
-                  if (targetMatch.playerTeams) {
-                    targetMatch.playerTeams.set(effectivePlayerId, chosenTeam);
-                    targetMatch.world.setPlayerTeam(effectivePlayerId, chosenTeam);
-                    log(`Player ${displayNameToUse} joined team ${chosenTeam} in match ${targetMatch.id} via joinMatchId`);
+                if (targetMatch && targetMatch.mode === 'teams') {
+                  if (targetMatch.phase === 'lobby' || targetMatch.phase === 'countdown') {
+                    addPlayerToMatch(targetMatch, displayNameToUse);
+                    // Assign team after player is added
+                    if (targetMatch.playerTeams) {
+                      targetMatch.playerTeams.set(effectivePlayerId, chosenTeam);
+                      targetMatch.world.setPlayerTeam(effectivePlayerId, chosenTeam);
+                      log(`Player ${displayNameToUse} joined team ${chosenTeam} in match ${targetMatch.id} via joinMatchId`);
+                    }
+                    if (targetMatch.players.size >= 2 && targetMatch.phase === 'lobby') {
+                      ensureCpusForMatch(targetMatch);
+                      targetMatch.phase = 'countdown';
+                      targetMatch.countdownEndAt = Date.now() + FFA_COUNTDOWN_MS;
+                      targetMatch.readySet.clear();
+                    }
+                    log(`Player ${displayNameToUse} joined Teams lobby ${targetMatch.id} via joinMatchId`);
+                    return;
                   }
-                  if (targetMatch.players.size >= 2 && targetMatch.phase === 'lobby') {
-                    ensureCpusForMatch(targetMatch);
-                    targetMatch.phase = 'countdown';
-                    targetMatch.countdownEndAt = Date.now() + FFA_COUNTDOWN_MS;
-                    targetMatch.readySet.clear();
+
+                  if (
+                    targetMatch.phase === 'playing' &&
+                    !targetMatch.frozen &&
+                    !targetMatch.world.isMatchOver() &&
+                    !targetMatch.world.isStrayLoss()
+                  ) {
+                    const humanCount = getMatchHumanCount(targetMatch);
+                    if (humanCount >= MAX_FFA_PLAYERS) {
+                      ws.send(JSON.stringify({ type: 'error', message: `Match is full (${MAX_FFA_PLAYERS} real players).` }));
+                      return;
+                    }
+
+                    let hotJoinTeam = chosenTeam;
+                    const botToReplace = targetMatch.cpuIds.values().next().value as string | undefined;
+                    if (botToReplace) {
+                      const botTeam = targetMatch.playerTeams?.get(botToReplace);
+                      removeBotFromMatch(targetMatch, botToReplace);
+                      if (botTeam) hotJoinTeam = botTeam;
+                    }
+
+                    addPlayerToMatch(targetMatch, displayNameToUse);
+                    if (targetMatch.playerTeams) {
+                      targetMatch.playerTeams.set(effectivePlayerId, hotJoinTeam);
+                      targetMatch.world.setPlayerTeam(effectivePlayerId, hotJoinTeam);
+                      targetMatch.world.formTeamAlliances();
+                    }
+                    log(`Player ${displayNameToUse} hot-joined Teams match ${targetMatch.id} on ${hotJoinTeam}${botToReplace ? ` replacing ${botToReplace}` : ''}`);
+                    return;
                   }
-                  log(`Player ${displayNameToUse} joined Teams lobby ${targetMatch.id} via joinMatchId`);
+
+                  ws.send(JSON.stringify({ type: 'error', message: 'Match is not available for joining.' }));
                   return;
                 }
                 // Target match not valid — fall through to normal lobby logic

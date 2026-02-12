@@ -8,7 +8,7 @@ Each player starts the same size. As you adopt pets, you earn money and can buy 
 
 When your shelter gets large enough to form its own adoption center, you become grounded (can’t move) and must rely on gravity to pull in strays and adopt out.
 
-When you touch another shelter, you can ally or fight. At the end of the 5‑minute match, the largest shelter wins a bonus and the top 3 earn rewards.
+When you touch another shelter, you can ally. At the end of the match, the largest shelter wins a bonus and the top 3 earn rewards.
 
 ## Architecture
 

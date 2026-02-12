@@ -1150,6 +1150,7 @@ interface LiveMatch {
   durationMs: number;
   isBotMatch: boolean;
   waiting?: boolean;
+  canHotJoin?: boolean;
   fetchedAt: number;
 }
 
@@ -1217,13 +1218,19 @@ function updateLiveMatchesDisplay(): void {
     </div>`;
     }
 
-    // Playing match: show clock and "Watch" button
+    // Playing match: show clock and watch/join actions
     let currentDurationMs = m.durationMs;
     if (m.fetchedAt) {
       currentDurationMs += now - m.fetchedAt;
     }
     const timeStr = formatMatchDuration(currentDurationMs);
     const spectatorText = m.spectatorCount > 0 ? ` | ${m.spectatorCount} watching` : '';
+    const actionsHtml = m.canHotJoin
+      ? `<div style="display:flex;gap:6px;">
+      <button type="button" class="live-match-join" data-match-id="${m.matchId}" data-match-mode="${m.mode}">Join</button>
+      <button type="button" class="live-match-watch" data-match-id="${m.matchId}">Watch</button>
+    </div>`
+      : `<button type="button" class="live-match-watch" data-match-id="${m.matchId}">Watch</button>`;
 
     return `<div class="live-match-item" data-match-id="${m.matchId}">
       <div class="live-match-info">
@@ -1232,7 +1239,7 @@ function updateLiveMatchesDisplay(): void {
         <span class="live-match-players">${countText}${spectatorText}</span>
       </div>
       <span class="live-match-time">${timeStr}</span>
-      <button type="button" class="live-match-watch" data-match-id="${m.matchId}">Watch</button>
+      ${actionsHtml}
     </div>`;
   }).join('');
 
@@ -1249,7 +1256,7 @@ function updateLiveMatchesDisplay(): void {
     });
   });
 
-  // Add click handlers for Join buttons (waiting matches)
+  // Add click handlers for Join buttons (waiting + hot-joinable playing matches)
   list.querySelectorAll('.live-match-join').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1541,13 +1548,24 @@ const announcementQueue: string[] = [];
 let announcementEl: HTMLElement | null = null;
 let announcementAnimating = false;
 
+function isAdoptionEventAnnouncement(m: string): boolean {
+  return m.includes(' - rescue ') && m.includes('pets!');
+}
+
 function showAnnouncement(messages: string[]): void {
   // Limit queue size to prevent announcements from getting too stale
-  // If queue is already backed up, drop older announcements
   const MAX_QUEUE_SIZE = 3;
-  announcementQueue.push(...messages);
+  const adoptionEventMsgs = messages.filter(isAdoptionEventAnnouncement);
+  const otherMsgs = messages.filter(m => !isAdoptionEventAnnouncement(m));
+  // Prioritize adoption events — show them immediately, not delayed behind breeder/warning announcements
+  announcementQueue.unshift(...adoptionEventMsgs);
+  announcementQueue.push(...otherMsgs);
   while (announcementQueue.length > MAX_QUEUE_SIZE) {
-    announcementQueue.shift(); // Drop oldest
+    announcementQueue.pop(); // Drop from end (keep prioritized items at front)
+  }
+  // When an adoption event starts, show a toast encouraging players to rush there
+  if (adoptionEventMsgs.length > 0) {
+    showToast('Bring as many strays as you can for big rewards!', 'success');
   }
   processAnnouncementQueue();
 }
