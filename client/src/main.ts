@@ -274,8 +274,10 @@ let highLatencySince = 0;
 let pingIntervalId: ReturnType<typeof setInterval> | null = null;
 let serverClockNextMidnightUtc: string | null = null;
 let serverClockIntervalId: ReturnType<typeof setInterval> | null = null;
+let lastNoShelterBreederToastAt = 0;
 const RTT_HIGH_MS = 200;
 const RTT_HIGH_DURATION_MS = 5000;
+const NO_SHELTER_TOAST_COOLDOWN_MS = 5000;
 
 // --- Render ---
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -3433,6 +3435,44 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
       updateStrayTiles(snap.pets);
       const me = snap.players.find((q) => q.id === myPlayerId);
       if (me) {
+        if (!me.shelterId && !breederGame.active && !breederWarningVisible) {
+          const nowMs = Date.now();
+          if (nowMs - lastNoShelterBreederToastAt >= NO_SHELTER_TOAST_COOLDOWN_MS) {
+            let nearBreederWithoutShelter = false;
+
+            // Mill interaction range (matches server logic): VAN_FIXED_RADIUS + (40 + size * 0.5)
+            for (const shelter of snap.breederShelters ?? []) {
+              const bsr = 40 + (shelter.size ?? 0) * 0.5;
+              const combatR = VAN_FIXED_RADIUS + bsr;
+              const dx = me.x - shelter.x;
+              const dy = me.y - shelter.y;
+              if ((dx * dx + dy * dy) <= combatR * combatR) {
+                nearBreederWithoutShelter = true;
+                break;
+              }
+            }
+
+            // Breeder camp pickup range (matches server pickup collision): VAN_FIXED_RADIUS + GROWTH_ORB_RADIUS
+            if (!nearBreederWithoutShelter) {
+              const pickupR = VAN_FIXED_RADIUS + GROWTH_ORB_RADIUS;
+              for (const pickup of snap.pickups ?? []) {
+                if (pickup.type !== PICKUP_TYPE_BREEDER) continue;
+                const dx = me.x - pickup.x;
+                const dy = me.y - pickup.y;
+                if ((dx * dx + dy * dy) <= pickupR * pickupR) {
+                  nearBreederWithoutShelter = true;
+                  break;
+                }
+              }
+            }
+
+            if (nearBreederWithoutShelter) {
+              showToast('Build a shelter first', 'info');
+              lastNoShelterBreederToastAt = nowMs;
+            }
+          }
+        }
+
         // Only show +1 Size popup if:
         // - Size increased (me.size > lastKnownSize)
         // - Van doesn't have a shelter (size growth goes to van)
