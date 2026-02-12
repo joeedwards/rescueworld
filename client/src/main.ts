@@ -1052,7 +1052,7 @@ function setActiveMultiplayerMatches(matches: ActiveMultiplayerMatch[]): void {
 /** Add a match to the active matches list (when exiting to lobby) */
 function addActiveMultiplayerMatch(match: Omit<ActiveMultiplayerMatch, 'fetchedAt'>): void {
   const existing = activeMultiplayerMatches.filter(m => m.matchId !== match.matchId);
-  existing.push({ ...match, fetchedAt: Date.now() });
+  existing.unshift({ ...match, fetchedAt: Date.now() });
   setActiveMultiplayerMatches(existing);
 }
 
@@ -1185,15 +1185,22 @@ function updateLiveMatchesDisplay(): void {
     return;
   }
 
-  // Sort: waiting matches first, then playing matches
+  const myMatchIds = new Set(activeMultiplayerMatches.map(m => m.matchId));
+
+  // Sort: waiting matches first, then playing matches; within each phase, my matches first
   const sorted = [...liveMatches].sort((a, b) => {
     if (a.waiting && !b.waiting) return -1;
     if (!a.waiting && b.waiting) return 1;
+    const aMine = myMatchIds.has(a.matchId);
+    const bMine = myMatchIds.has(b.matchId);
+    if (aMine && !bMine) return -1;
+    if (!aMine && bMine) return 1;
     return 0;
   });
 
   const now = Date.now();
   const html = sorted.map(m => {
+    const isMyMatch = myMatchIds.has(m.matchId);
     const modeLabel = m.mode.toUpperCase();
     const playerInfo = m.playerCount > 0
       ? `${m.playerCount} player${m.playerCount > 1 ? 's' : ''}`
@@ -1202,19 +1209,23 @@ function updateLiveMatchesDisplay(): void {
       ? `${m.botCount} bot${m.botCount > 1 ? 's' : ''}`
       : '';
     const sep = playerInfo && botInfo ? ', ' : '';
-    const countText = `${playerInfo}${sep}${botInfo}`;
-    const botBadge = m.isBotMatch ? '<span class="live-match-bot-badge">BOT</span> ' : '';
+    const normalCountText = `${playerInfo}${sep}${botInfo}`;
+    const countText = isMyMatch
+      ? (botInfo ? `you, ${botInfo}` : 'you')
+      : normalCountText;
 
     if (m.waiting) {
       // Waiting match: show "waiting for players.." and "Join" button
+      const waitingActionHtml = isMyMatch
+        ? ''
+        : `<button type="button" class="live-match-join" data-match-id="${m.matchId}" data-match-mode="${m.mode}">Join</button>`;
       return `<div class="live-match-item" data-match-id="${m.matchId}">
       <div class="live-match-info">
         <span class="live-match-mode">${modeLabel}</span>
-        ${botBadge}
         <span class="live-match-players">${countText}</span>
       </div>
       <span class="live-match-time live-match-waiting">waiting for players..</span>
-      <button type="button" class="live-match-join" data-match-id="${m.matchId}" data-match-mode="${m.mode}">Join</button>
+      ${waitingActionHtml}
     </div>`;
     }
 
@@ -1225,17 +1236,18 @@ function updateLiveMatchesDisplay(): void {
     }
     const timeStr = formatMatchDuration(currentDurationMs);
     const spectatorText = m.spectatorCount > 0 ? ` | ${m.spectatorCount} watching` : '';
-    const actionsHtml = m.canHotJoin
-      ? `<div style="display:flex;gap:6px;">
+    const actionsHtml = isMyMatch
+      ? ''
+      : m.canHotJoin
+        ? `<div style="display:flex;gap:6px;">
       <button type="button" class="live-match-join" data-match-id="${m.matchId}" data-match-mode="${m.mode}">Join</button>
       <button type="button" class="live-match-watch" data-match-id="${m.matchId}">Watch</button>
     </div>`
-      : `<button type="button" class="live-match-watch" data-match-id="${m.matchId}">Watch</button>`;
+        : `<button type="button" class="live-match-watch" data-match-id="${m.matchId}">Watch</button>`;
 
     return `<div class="live-match-item" data-match-id="${m.matchId}">
       <div class="live-match-info">
         <span class="live-match-mode">${modeLabel}</span>
-        ${botBadge}
         <span class="live-match-players">${countText}${spectatorText}</span>
       </div>
       <span class="live-match-time">${timeStr}</span>
