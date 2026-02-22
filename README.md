@@ -60,12 +60,67 @@ Open http://localhost:3000.
 
 
 
+## Flutter client (mobile + web)
+
+A Flutter port now lives in `flutter_client/` and connects to the same backend signaling/game sockets.
+
+### Prereqs
+
+- Flutter SDK installed (`flutter --version`)
+- Existing Node/server setup from this README
+
+### Run backend (required)
+
+From repo root:
+
+```bash
+npm run dev:server
+```
+
+### Run Flutter web client
+
+In another terminal (from repo root):
+
+```bash
+npm run dev:flutter:web
+```
+
+Then open `http://localhost:3001`.
+
+The Flutter client uses:
+- `SIGNALING_WS_URL` compile-time define when provided, otherwise:
+  - web: current host `/ws-signaling`
+  - mobile/desktop: `ws://localhost:4000`
+
+Example custom signaling URL:
+
+```bash
+cd flutter_client
+flutter run -d chrome --dart-define=SIGNALING_WS_URL=ws://localhost:4000
+```
+
+### Run Flutter mobile
+
+```bash
+npm run dev:flutter:android
+npm run dev:flutter:ios
+```
+
+### Flutter tests and analysis
+
+```bash
+cd flutter_client
+flutter test
+flutter analyze
+```
+
 ## Build all
 
 ```bash
 npm run build -w shared
 npm run build -w server
 npm run build -w client
+npm run build:flutter:web
 ```
 
 ## Production deployment (nginx)

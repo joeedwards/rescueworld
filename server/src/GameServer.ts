@@ -409,7 +409,8 @@ export function getLiveMatches(): Array<{
     if (match.phase !== 'playing') continue;
     if (match.frozen) continue; // Skip frozen/paused matches (no active players)
     if (match.world.isMatchOver() || match.world.isStrayLoss()) continue;
-    const humanCount = [...match.players.keys()].filter(id => !id.startsWith('cpu-')).length;
+    // Use getMatchHumanCount (playerUserIds) so disconnected humans still count
+    const humanCount = getMatchHumanCount(match);
     result.push({
       matchId: match.id,
       mode: match.mode,

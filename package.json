@@ -10,9 +10,13 @@
     "build": "npm run build --workspaces --if-present",
     "build:client": "npm run build -w client",
     "build:server": "npm run build -w server",
+    "build:flutter:web": "cd flutter_client && flutter build web",
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "npm run build -w shared && npm run dev -w server",
     "dev:client": "npm run dev -w client",
+    "dev:flutter:web": "cd flutter_client && flutter run -d web-server --web-port=3001",
+    "dev:flutter:android": "cd flutter_client && flutter run -d android",
+    "dev:flutter:ios": "cd flutter_client && flutter run -d ios",
     "start": "npm run start -w server"
   },
   "devDependencies": {

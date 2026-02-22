@@ -256,6 +256,8 @@ let lastProcessedInputSeq = -1;
 let lastKnownSize = 0;
 let lastTotalAdoptions = 0;
 let lastPetsInsideLength = 0;
+let lastStrayCollectedAt = 0;
+const STRAY_COLLECTED_COOLDOWN_MS = 80; // Throttle pickup sounds to avoid audio spam
 let lastShelterPortCharges = 0; // Track shelter port charges for toast notifications
 /** Van's pet IDs from previous snapshot (to detect which pets were just adopted) */
 let lastPetsInsideIds: string[] = [];
@@ -3528,7 +3530,13 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           }
         }
         lastTotalAdoptions = me.totalAdoptions;
-        if (me.petsInside.length > lastPetsInsideLength) playStrayCollected();
+        if (me.petsInside.length > lastPetsInsideLength) {
+          const nowMs = Date.now();
+          if (nowMs - lastStrayCollectedAt >= STRAY_COLLECTED_COOLDOWN_MS) {
+            playStrayCollected();
+            lastStrayCollectedAt = nowMs;
+          }
+        }
         lastPetsInsideLength = me.petsInside.length;
         // Track van and shelter pet IDs + pet types for adoption animations
         // Only track types for pets in own van/shelter — not all 2000+ strays
@@ -6014,7 +6022,9 @@ function updateStrayTiles(pets: PetState[]): void {
   }
   wanderingStrays = newWandering;
 
-  // Re-render only changed tiles
+  // Re-render only changed tiles (cap redraws per call to spread load across snapshots)
+  const MAX_TILE_REDRAWS_PER_SNAPSHOT = 8; // Limit expensive canvas redraws per snapshot
+  let tileRedraws = 0;
   for (let i = 0; i < STRAY_TILE_COUNT; i++) {
     const bin = tileBins[i];
     // Build a lightweight hash from sorted pet IDs to detect changes
@@ -6028,6 +6038,10 @@ function updateStrayTiles(pets: PetState[]): void {
       }
     }
     if (hash === strayTileHashes[i]) continue; // unchanged
+
+    // Throttle: defer remaining dirty tiles to the next snapshot
+    if (tileRedraws >= MAX_TILE_REDRAWS_PER_SNAPSHOT) continue;
+    tileRedraws++;
     strayTileHashes[i] = hash;
 
     if (bin.length === 0) {
@@ -6440,13 +6454,23 @@ function render(dt: number): void {
   }
 
   // 2. Draw wandering strays individually (with viewport culling + LOD)
+  // When many wandering strays are on screen, cap full-sprite draws and force the rest to LOD dots
+  const MAX_SPRITE_DRAWS = 100; // Beyond this, remaining visible strays render as cheap dots
+  let spriteDrawCount = 0;
   beginStrayBatch();
   for (const pet of wanderingStrays) {
     // Cull BEFORE interpolation using raw snapshot position
     if (pet.x < strayL || pet.x > strayR || pet.y < strayT || pet.y > strayB) continue;
     const p = getInterpolatedPet(pet.id) ?? pet;
     if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
-    drawStray(p.x, p.y, pet.petType ?? PET_TYPE_CAT);
+    if (spriteDrawCount < MAX_SPRITE_DRAWS) {
+      drawStray(p.x, p.y, pet.petType ?? PET_TYPE_CAT);
+      spriteDrawCount++;
+    } else {
+      // Over budget: draw as cheap LOD dot regardless of distance
+      ctx.fillStyle = strayDotColors[pet.petType ?? PET_TYPE_CAT] ?? '#d4a574';
+      ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+    }
   }
   endStrayBatch();
 

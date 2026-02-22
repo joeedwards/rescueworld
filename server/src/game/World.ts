@@ -248,7 +248,7 @@ export class World {
   // CPU AI target persistence to prevent diagonal jitter
   /** Per-bot skill profiles – generated at spawn, never stored. */
   private cpuProfiles = new Map<string, BotProfile>();
-  private cpuTargets = new Map<string, { x: number; y: number; type: 'stray' | 'pickup' | 'zone' | 'wander'; breederClaimId?: string }>();
+  private cpuTargets = new Map<string, { x: number; y: number; type: 'stray' | 'pickup' | 'zone' | 'wander' | 'mill'; breederClaimId?: string; millId?: string }>();
   /** CPU retarget cooldown: tick when bot can pick a new target (simulates reaction time) */
   private cpuRetargetCooldown = new Map<string, number>();
   /** CPU hesitation: tick until which bot stands still (simulates thinking) */
@@ -271,6 +271,10 @@ export class World {
   private cpuAtBreeder = new Map<string, { breederUid: string; level: number; arrivalTick: number }>();
   /** Delayed CPU breeder completions: resolved at completeAtTick with RT-based win/loss */
   private pendingCpuBreederCompletions = new Map<string, { level: number; petCount: number; completeAtTick: number }>();
+  /** CPU at breeder mill: must stay min time before starting simulated mill rescue */
+  private cpuAtMill = new Map<string, { millId: string; level: number; petCount: number; arrivalTick: number }>();
+  /** Delayed CPU mill completions: resolved at completeAtTick with RT-based win/loss */
+  private pendingCpuMillCompletions = new Map<string, { millId: string; level: number; petCount: number; completeAtTick: number }>();
   /** Only one van can engage a breeder: breederUid -> playerId */
   private breederClaimedBy = new Map<string, string>();
   /** Cooldown preventing CPU from targeting breeders after abandoning one: cpuId -> tick when they can target again */
@@ -1079,7 +1083,7 @@ export class World {
   }
 
   /** Set CPU target and release any previous breeder claim if changing targets */
-  private setCpuTarget(playerId: string, target: { x: number; y: number; type: 'stray' | 'pickup' | 'zone' | 'wander'; breederClaimId?: string }): void {
+  private setCpuTarget(playerId: string, target: { x: number; y: number; type: 'stray' | 'pickup' | 'zone' | 'wander' | 'mill'; breederClaimId?: string; millId?: string }): void {
     const oldTarget = this.cpuTargets.get(playerId);
     // Release old breeder claim if we're switching to a different target
     if (oldTarget?.breederClaimId && oldTarget.breederClaimId !== target.breederClaimId) {
@@ -1239,8 +1243,15 @@ export class World {
             }
           }
         } else if (currentTarget.type === 'wander') {
-          // Wander targets are always valid until reached
           targetValid = true;
+        } else if (currentTarget.type === 'mill' && currentTarget.millId) {
+          const mill = this.breederShelters.get(currentTarget.millId);
+          const inCombat = this.millInCombat.has(currentTarget.millId);
+          const cpuAtOrPending = this.cpuAtMill.has(p.id) || this.pendingCpuMillCompletions.has(p.id);
+          targetValid = !!mill && !inCombat && !cpuAtOrPending;
+          if (mill && (this.cpuAtBreeder.has(p.id) || this.pendingCpuBreederCompletions.has(p.id))) targetValid = false;
+          const minRt = World.minRtForBreederLevel(mill?.level ?? 1);
+          if (mill && (this.playerMoney.get(p.id) ?? 0) < minRt) targetValid = false;
         }
         
         if (targetValid) {
@@ -1319,6 +1330,21 @@ export class World {
       const level = u.type === PICKUP_TYPE_BREEDER ? (this.breederCamps.get(u.id)?.level ?? 1) : undefined;
       pickupCandidates.push({ x: u.x, y: u.y, d, type: u.type, id: u.id, level });
     }
+
+    // Mill candidates: breeder shelters not in combat, CPU has shelter + enough RT
+    const millCandidates: { x: number; y: number; d: number; millId: string; level: number }[] = [];
+    if (this.cpuCanShutdownBreeders && this.hasShelter(p.id) && canTargetBreeders) {
+      for (const [millId, mill] of this.breederShelters.entries()) {
+        if (this.millInCombat.has(millId)) continue;
+        if (this.cpuAtMill.has(p.id) || this.pendingCpuMillCompletions.has(p.id)) break;
+        const minRt = World.minRtForBreederLevel(mill.level);
+        if (cpuRt < minRt) continue;
+        const d = dist(p.x, p.y, mill.x, mill.y);
+        millCandidates.push({ x: mill.x, y: mill.y, d, millId, level: mill.level });
+      }
+      millCandidates.sort((a, b) => a.d - b.d);
+    }
+
     pickupCandidates.sort((a, b) => a.d - b.d);
 
     // Pick target with skill-based randomness from profile
@@ -1338,19 +1364,21 @@ export class World {
       return arr[idx] ?? null;
     };
 
-    // PRIORITY: Attack breeders aggressively when allowed
-    if (this.cpuCanShutdownBreeders) {
+    // PRIORITY: Attack breeders and mills aggressively when allowed
+    if (this.cpuCanShutdownBreeders && this.hasShelter(p.id)) {
       const breederCandidates = pickupCandidates.filter(c => c.type === PICKUP_TYPE_BREEDER);
-      if (breederCandidates.length > 0) {
-        // Always prioritize if 2+ breeders, or 60% chance with 1 breeder
-        if (breederCandidates.length >= 2 || Math.random() < 0.6) {
-          const target = breederCandidates[0]; // Nearest UNCLAIMED breeder
-          // Note: Don't set breederClaimedBy here - that blocks human players
-          // The breederClaimId in cpuTargets is enough to prevent other CPUs from targeting
-          // Actual claim happens when CPU physically arrives at the breeder
-          this.setCpuTarget(p.id, { x: target.x, y: target.y, type: 'pickup', breederClaimId: target.id });
-          return this.directionToward(p.x, p.y, target.x, target.y);
-        }
+      const millTarget = millCandidates[0];
+      const breederTarget = breederCandidates[0];
+      // Prefer nearest of mill vs breeder (60% chance to prioritize when we have both)
+      const preferMill = millTarget && (!breederTarget || millTarget.d <= breederTarget.d || Math.random() < 0.5);
+      if (preferMill && millTarget) {
+        this.setCpuTarget(p.id, { x: millTarget.x, y: millTarget.y, type: 'mill', millId: millTarget.millId });
+        return this.directionToward(p.x, p.y, millTarget.x, millTarget.y);
+      }
+      if (breederCandidates.length > 0 && (breederCandidates.length >= 2 || Math.random() < 0.6)) {
+        const target = breederCandidates[0];
+        this.setCpuTarget(p.id, { x: target.x, y: target.y, type: 'pickup', breederClaimId: target.id });
+        return this.directionToward(p.x, p.y, target.x, target.y);
       }
     }
 
@@ -1564,6 +1592,8 @@ export class World {
     this.pendingBreederMiniGames.clear();
     this.cpuAtBreeder.clear();
     this.pendingCpuBreederCompletions.clear();
+    this.cpuAtMill.clear();
+    this.pendingCpuMillCompletions.clear();
     this.breederClaimedBy.clear();
     this.cpuBreederCooldown.clear();
     this.retreatCooldownUntilTick.clear();
@@ -1801,11 +1831,13 @@ export class World {
   /** Time CPU waits after "starting" breeder before completion (instant result, just 1 second pause). */
   private static readonly CPU_BREEDER_COMPLETION_SECONDS = 1;
 
-  /** True if player is in any breeder state (mini-game or CPU at/during breeder) - van must not move. */
+  /** True if player is in any breeder state (mini-game or CPU at/during breeder/mill) - van must not move. */
   private isPlayerInBreederState(playerId: string): boolean {
     return this.pendingBreederMiniGames.has(playerId)
       || this.cpuAtBreeder.has(playerId)
-      || this.pendingCpuBreederCompletions.has(playerId);
+      || this.pendingCpuBreederCompletions.has(playerId)
+      || this.cpuAtMill.has(playerId)
+      || this.pendingCpuMillCompletions.has(playerId);
   }
 
   /** Estimated RT cost to complete breeder (petCount meals × ingredients × avg cost). */
@@ -1945,6 +1977,17 @@ export class World {
     for (const [playerId, data] of this.pendingBreederMiniGames) {
       if (data.breederShelterId === bestA || data.breederShelterId === bestB) {
         data.breederShelterId = mergedId;
+      }
+    }
+    // Re-point CPU mill state (merge only affects non-combat mills, so cpuAtMill/pendingCpuMillCompletions typically empty)
+    for (const [playerId, data] of this.cpuAtMill) {
+      if (data.millId === bestA || data.millId === bestB) {
+        data.millId = mergedId;
+      }
+    }
+    for (const [playerId, data] of this.pendingCpuMillCompletions) {
+      if (data.millId === bestA || data.millId === bestB) {
+        data.millId = mergedId;
       }
     }
 
@@ -2388,7 +2431,7 @@ export class World {
         if (this.eliminatedPlayerIds.has(p.id)) continue;
         if (this.pendingBreederMiniGames.has(p.id)) continue;
         if (this.cpuAtBreeder.has(p.id) || this.pendingCpuBreederCompletions.has(p.id)) continue;
-        if (p.id.startsWith('cpu-')) continue; // CPUs don't start mill minigame from van (they use camps)
+        if (this.cpuAtMill.has(p.id) || this.pendingCpuMillCompletions.has(p.id)) continue;
         if (!this.hasShelter(p.id)) continue; // Shelter required before stopping breeder mills
         // Skip if player is on retreat cooldown (just retreated from a camp/mill)
         const millRetreatEnd = this.retreatCooldownUntilTick.get(p.id) ?? 0;
@@ -2398,15 +2441,20 @@ export class World {
         if (d2 > combatR * combatR) continue;
         this.millInCombat.add(shelterId);
         this.activeMillByPlayer.set(p.id, shelterId);
-        this.pendingBreederMiniGames.set(p.id, {
-          petCount,
-          startTick: now,
-          level: breederShelter.level,
-          isMill: true,
-          breederShelterId: shelterId,
-        });
-        // Don't announce start - only announce win/lose
-        log(`Player ${p.displayName} started mill mini-game vs ${shelterId} (lv${breederShelter.level})`);
+        if (p.id.startsWith('cpu-')) {
+          // CPUs engage mills via cpuAtMill (instant rescue if tier 3+, else delayed)
+          this.cpuAtMill.set(p.id, { millId: shelterId, level: breederShelter.level, petCount, arrivalTick: now });
+          log(`CPU ${p.displayName} engaged mill vs ${shelterId} (lv${breederShelter.level})`);
+        } else {
+          this.pendingBreederMiniGames.set(p.id, {
+            petCount,
+            startTick: now,
+            level: breederShelter.level,
+            isMill: true,
+            breederShelterId: shelterId,
+          });
+          log(`Player ${p.displayName} started mill mini-game vs ${shelterId} (lv${breederShelter.level})`);
+        }
         break; // one van per mill
       }
     }
@@ -2622,6 +2670,10 @@ export class World {
         if (d < 1) continue;
         const dx = (shelter.x - pet.x) / d;
         const dy = (shelter.y - pet.y) / d;
+        // Set velocity so the client classifies these as "wandering" (interpolated per-frame)
+        // instead of "static" (tile-binned), avoiding expensive tile churn every snapshot.
+        pet.vx = dx * pullPerTick;
+        pet.vy = dy * pullPerTick;
         pet.x += dx * pullPerTick;
         pet.y += dy * pullPerTick;
       }
@@ -2781,6 +2833,82 @@ export class World {
       });
       // Don't announce start - only announce win/lose
       log(`CPU ${player.displayName} started level ${level} breeder (resolves in ${World.CPU_BREEDER_COMPLETION_SECONDS}s)`);
+    }
+
+    // Resolve delayed CPU mill completions
+    for (const [playerId, data] of Array.from(this.pendingCpuMillCompletions.entries())) {
+      if (now < data.completeAtTick) continue;
+      this.pendingCpuMillCompletions.delete(playerId);
+      const cost = World.estimatedBreederRtCost(data.level, data.petCount);
+      const currentRt = this.playerMoney.get(playerId) ?? 0;
+      const rescuedCount = currentRt >= cost ? data.petCount : 0;
+      if (rescuedCount > 0) {
+        this.playerMoney.set(playerId, currentRt - cost);
+      }
+      // activeMillByPlayer is still set from when CPU engaged; completeBreederMiniGame will clear it
+      this.completeBreederMiniGame(playerId, rescuedCount, data.petCount, data.level);
+    }
+
+    // Advance CPU-at-mill: remove if out of range or mill gone; if stayed min time, instant rescue (tier 3+) or delayed completion
+    for (const [playerId, data] of Array.from(this.cpuAtMill.entries())) {
+      const mill = this.breederShelters.get(data.millId);
+      const player = this.players.get(playerId);
+      if (!mill || !player) {
+        this.cpuAtMill.delete(playerId);
+        if (data.millId) {
+          this.millInCombat.delete(data.millId);
+          this.activeMillByPlayer.delete(playerId);
+        }
+        continue;
+      }
+      const combatR = VAN_FIXED_RADIUS + 40 + mill.size * 0.5;
+      if (distSq(player.x, player.y, mill.x, mill.y) > combatR * combatR) {
+        this.cpuAtMill.delete(playerId);
+        this.millInCombat.delete(data.millId);
+        this.activeMillByPlayer.delete(playerId);
+        continue;
+      }
+      const bestTier = this.getHighestAllyShelterTier(playerId);
+      const canInstantRescue = bestTier >= 3;
+      const minStaySeconds = canInstantRescue ? 1 : World.getBreederMinStaySeconds(data.level);
+      const minStayTicks = minStaySeconds * TICK_RATE;
+      if (now - data.arrivalTick < minStayTicks) continue;
+
+      const cost = World.estimatedBreederRtCost(data.level, data.petCount);
+      const currentRt = this.playerMoney.get(playerId) ?? 0;
+      if (currentRt < cost) {
+        this.cpuAtMill.delete(playerId);
+        this.millInCombat.delete(data.millId);
+        this.activeMillByPlayer.delete(playerId);
+        this.cpuBreederCooldown.set(playerId, now + TICK_RATE * 30);
+        const cpuTarget = this.cpuTargets.get(playerId);
+        if (cpuTarget?.breederClaimId) {
+          this.cpuTargets.delete(playerId);
+        }
+        log(`CPU ${player.displayName} can't afford mill lv${data.level} (need ${cost} RT, have ${currentRt})`);
+        continue;
+      }
+
+      this.cpuAtMill.delete(playerId);
+      if (canInstantRescue) {
+        this.playerMoney.set(playerId, currentRt - cost);
+        const instantRescueBonus = Math.floor(cost * 0.2);
+        const result = this.completeBreederMiniGame(playerId, data.petCount, data.petCount, data.level);
+        const guaranteedTokens = cost + instantRescueBonus;
+        const extraTokens = Math.max(0, guaranteedTokens - result.tokenBonus);
+        if (extraTokens > 0) {
+          this.addPlayerMoney(playerId, extraTokens);
+        }
+        log(`CPU ${player.displayName} instant-rescued mill lv${data.level} (tier ${bestTier} shelter), ${data.petCount} pets`);
+      } else {
+        this.pendingCpuMillCompletions.set(playerId, {
+          millId: data.millId,
+          level: data.level,
+          petCount: data.petCount,
+          completeAtTick: now + World.CPU_BREEDER_COMPLETION_SECONDS * TICK_RATE,
+        });
+        log(`CPU ${player.displayName} started mill lv${data.level} (resolves in ${World.CPU_BREEDER_COMPLETION_SECONDS}s)`);
+      }
     }
 
     for (const p of this.players.values()) {
@@ -4304,6 +4432,8 @@ export class World {
       pendingBreederMiniGames: Array.from(this.pendingBreederMiniGames.entries()),
       cpuAtBreeder: Array.from(this.cpuAtBreeder.entries()),
       pendingCpuBreederCompletions: Array.from(this.pendingCpuBreederCompletions.entries()),
+      cpuAtMill: Array.from(this.cpuAtMill.entries()),
+      pendingCpuMillCompletions: Array.from(this.pendingCpuMillCompletions.entries()),
       breederClaimedBy: Array.from(this.breederClaimedBy.entries()),
       breederCamps: Array.from(this.breederCamps.entries()),
       breederShelters: Array.from(this.breederShelters.entries()),
@@ -4347,6 +4477,8 @@ export class World {
       pendingBreederMiniGames: [string, { petCount: number; startTick: number; level: number; isMill?: boolean; breederShelterId?: string; breederUid?: string; campData?: { x: number; y: number; spawnTick: number }; startSent?: boolean }][];
       cpuAtBreeder: [string, { breederUid: string; level: number; arrivalTick: number }][];
       pendingCpuBreederCompletions: [string, { level: number; petCount: number; completeAtTick: number }][];
+      cpuAtMill?: [string, { millId: string; level: number; petCount: number; arrivalTick: number }][];
+      pendingCpuMillCompletions?: [string, { millId: string; level: number; petCount: number; completeAtTick: number }][];
       breederClaimedBy: [string, string][];
       breederCamps: [string, { x: number; y: number; spawnTick: number; level: number }][];
       breederShelters: [string, { x: number; y: number; level: number; lastSpawnTick: number; size: number; millCount?: number }][];
@@ -4410,6 +4542,8 @@ export class World {
     w.pendingBreederMiniGames = new Map(state.pendingBreederMiniGames);
     w.cpuAtBreeder = new Map(state.cpuAtBreeder);
     w.pendingCpuBreederCompletions = new Map(state.pendingCpuBreederCompletions);
+    w.cpuAtMill = new Map(state.cpuAtMill ?? []);
+    w.pendingCpuMillCompletions = new Map(state.pendingCpuMillCompletions ?? []);
     w.breederClaimedBy = new Map(state.breederClaimedBy);
     w.breederCamps = new Map(state.breederCamps);
     // Normalize millCount for backward compat with old saves that don't have it
