@@ -150,10 +150,10 @@ function shelterRadius(size: number): number {
 
 /** Calculate shelter tier from size (1-5, capped at 5 for visual purposes) */
 function calculateShelterTier(size: number): number {
-  if (size < 100) return 1;
-  if (size < 250) return 2;
-  if (size < 500) return 3;
-  if (size < 1000) return 4;
+  if (size < 50) return 1;
+  if (size < 120) return 2;
+  if (size < 250) return 3;
+  if (size < 500) return 4;
   return 5; // Max tier
 }
 
@@ -260,6 +260,7 @@ export class World {
   // Note: TICK_RATE is 25 ticks/second
   private breederSpawnCount = 0; // Total spawns at current level
   private breederCurrentLevel = 1; // Current breeder level
+  private breederWaveCount = 0; // Total breeder waves spawned this match
   private static readonly BREEDER_WAVE_MIN_TICKS = 1125; // Minimum 45 seconds between waves (45 * 25)
   private static readonly BREEDER_WAVE_MAX_TICKS = 1875; // Maximum 75 seconds between waves (75 * 25)
   private static readonly BREEDER_FIRST_WAVE_DELAY_TICKS = 250; // First wave after 10 seconds (10 * 25)
@@ -1558,6 +1559,7 @@ export class World {
     // Reset breeder spawn tracking
     this.breederSpawnCount = 0;
     this.breederCurrentLevel = 1;
+    this.breederWaveCount = 0;
     this.lastBreederWaveTick = 0;
     this.nextBreederWaveInterval = 0;
     this.breederWaveSpawned = false;
@@ -1811,16 +1813,16 @@ export class World {
   /** Estimated RT cost to complete breeder (petCount meals × ingredients × avg cost). */
   private static estimatedBreederRtCost(level: number, petCount: number): number {
     let ingredientCount = 1;
-    let avgCost = 10;
+    let avgCost = 11;
     if (level >= 10) {
       ingredientCount = 4;
-      avgCost = 13;
+      avgCost = 16;
     } else if (level >= 6) {
       ingredientCount = 3;
-      avgCost = 11;
+      avgCost = 13;
     } else if (level >= 3) {
       ingredientCount = 2;
-      avgCost = 10;
+      avgCost = 12;
     }
     return petCount * ingredientCount * avgCost;
   }
@@ -1828,11 +1830,11 @@ export class World {
   /** Minimum RT required to attempt a breeder of given level (used for early CPU checks). */
   private static minRtForBreederLevel(level: number): number {
     // Conservative estimate: assume average pet count and add buffer
-    // Level 1-2: ~45 RT, Level 3-5: ~80 RT, Level 6-9: ~120 RT, Level 10+: ~200 RT
-    if (level >= 10) return 200;
-    if (level >= 6) return 120;
-    if (level >= 3) return 80;
-    return 45; // Level 1-2 minimum
+    // Level 1-2: ~55 RT, Level 3-5: ~110 RT, Level 6-9: ~160 RT, Level 10+: ~260 RT
+    if (level >= 10) return 260;
+    if (level >= 6) return 160;
+    if (level >= 3) return 110;
+    return 55; // Level 1-2 minimum
   }
 
   // ---- Mill spacing & merge helpers ----
@@ -2156,10 +2158,15 @@ export class World {
     
     // Don't spawn new waves if victory conditions are met
     if ((isFirstWave || isNextWave) && !victoryConditionsMet) {
-      // Advance level if this isn't the first wave (cap at MAX_BREEDER_LEVEL)
-      if (isNextWave) {
-        this.breederCurrentLevel = Math.min(this.breederCurrentLevel + 1, World.MAX_BREEDER_LEVEL);
-        this.breederSpawnCount = 0;
+      // First wave starts at level 1. After that, level advances every 2 waves.
+      if (isFirstWave) {
+        this.breederWaveCount = 1;
+      } else {
+        this.breederWaveCount++;
+        if (this.breederWaveCount % 2 === 1) {
+          this.breederCurrentLevel = Math.min(this.breederCurrentLevel + 1, World.MAX_BREEDER_LEVEL);
+          this.breederSpawnCount = 0;
+        }
       }
       
       const level = this.breederCurrentLevel;
@@ -2381,9 +2388,9 @@ export class World {
       if (this.millInCombat.has(shelterId)) continue;
       const bsr = 40 + breederShelter.size * 0.5;
       // Scale petCount by millCount so merged pet malls are harder
-      const basePetCount = 5 + Math.floor(breederShelter.level);
+      const basePetCount = 4 + Math.floor(breederShelter.level / 2);
       const scaledPetCount = basePetCount + ((breederShelter.millCount ?? 1) - 1) * 3;
-      const petCount = Math.min(scaledPetCount, 20);
+      const petCount = Math.min(scaledPetCount, 12);
       for (const p of this.players.values()) {
         if (this.eliminatedPlayerIds.has(p.id)) continue;
         if (this.pendingBreederMiniGames.has(p.id)) continue;
@@ -2733,9 +2740,9 @@ export class World {
       if (now - data.arrivalTick < minStayTicks) continue;
       const camp = this.breederCamps.get(data.breederUid);
       const level = camp?.level ?? data.level;
-      const basePets = 3 + Math.floor(Math.random() * 3);
-      const levelBonus = Math.floor((level - 1) / 2);
-      const petCount = Math.min(basePets + levelBonus, 15); // Cap 15 for high-level breeders
+      const basePets = 2 + Math.floor(Math.random() * 2); // 2-3 base
+      const levelBonus = Math.floor((level - 1) / 3); // +1 pet every 3 levels
+      const petCount = Math.min(basePets + levelBonus, 10); // Cap 10 for high-level breeders
       
       // Check if CPU has enough RT to attempt - if not, they can't start
       const cost = World.estimatedBreederRtCost(level, petCount);
@@ -2854,9 +2861,9 @@ export class World {
           const camp = this.breederCamps.get(uid);
           const level = camp?.level ?? 1;
           // Higher level = more pets to rescue
-          const basePets = 3 + Math.floor(Math.random() * 3); // 3-5 base
-          const levelBonus = Math.floor((level - 1) / 2); // +1 pet every 2 levels
-          const petCount = Math.min(basePets + levelBonus, 15); // Cap 15 for high-level breeders
+          const basePets = 2 + Math.floor(Math.random() * 2); // 2-3 base
+          const levelBonus = Math.floor((level - 1) / 3); // +1 pet every 3 levels
+          const petCount = Math.min(basePets + levelBonus, 10); // Cap 10 for high-level breeders
           
           // Store camp data for potential retreat/restoration
           const campData = camp ? { x: camp.x, y: camp.y, spawnTick: camp.spawnTick } : undefined;
@@ -4298,6 +4305,7 @@ export class World {
       matchProcessed: this.matchProcessed,
       breederSpawnCount: this.breederSpawnCount,
       breederCurrentLevel: this.breederCurrentLevel,
+      breederWaveCount: this.breederWaveCount,
       lastBreederWaveTick: this.lastBreederWaveTick,
       nextBreederWaveInterval: this.nextBreederWaveInterval,
       breederWaveSpawned: this.breederWaveSpawned,
@@ -4343,6 +4351,7 @@ export class World {
       totalMatchAdoptions: number; lastGlobalAdoptionTick: number; scarcityLevel: number;
       triggeredEvents: number[]; satelliteZonesSpawned: boolean; matchProcessed: boolean;
       breederSpawnCount: number; breederCurrentLevel: number; lastBreederWaveTick: number;
+      breederWaveCount?: number;
       nextBreederWaveInterval: number; breederWaveSpawned: boolean;
       pendingBreederMiniGames: [string, { petCount: number; startTick: number; level: number; isMill?: boolean; breederShelterId?: string; breederUid?: string; campData?: { x: number; y: number; spawnTick: number }; startSent?: boolean }][];
       cpuAtBreeder: [string, { breederUid: string; level: number; arrivalTick: number }][];
@@ -4404,6 +4413,7 @@ export class World {
     w.matchProcessed = state.matchProcessed;
     w.breederSpawnCount = state.breederSpawnCount;
     w.breederCurrentLevel = state.breederCurrentLevel;
+    w.breederWaveCount = state.breederWaveCount ?? 0;
     w.lastBreederWaveTick = state.lastBreederWaveTick;
     w.nextBreederWaveInterval = state.nextBreederWaveInterval;
     w.breederWaveSpawned = state.breederWaveSpawned;

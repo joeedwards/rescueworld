@@ -516,7 +516,7 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
     off += 4;
     const totalAdoptions = view.getUint32(off, true);
     off += 4;
-    const tier = off < view.byteLength ? view.getUint8(off++) : (shelterSize < 100 ? 1 : shelterSize < 250 ? 2 : shelterSize < 500 ? 3 : shelterSize < 1000 ? 4 : 5);
+    const tier = off < view.byteLength ? view.getUint8(off++) : (shelterSize < 50 ? 1 : shelterSize < 120 ? 2 : shelterSize < 250 ? 3 : shelterSize < 500 ? 4 : 5);
     shelters.push({ id, ownerId, x, y, hasAdoptionCenter, hasGravity, hasAdvertising, petsInside, size: shelterSize, totalAdoptions, tier });
   }
   const numBreederShelters = off < view.byteLength ? view.getUint8(off++) : 0;
