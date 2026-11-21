@@ -1,11 +1,12 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.VAN_MAX_CAPACITY = exports.VAN_BASE_SIZE = exports.SHELTER_BUILD_COST = exports.MAX_RT_PER_MATCH = exports.TOKENS_PER_ADOPTION = exports.EVENT_MILESTONES = exports.SATELLITE_ZONE_MILESTONE = exports.SCARCITY_TRIGGER_TICKS = exports.ADOPTION_MILESTONE_WIN = exports.PICKUP_SPAWN_TICKS = exports.SPEED_BOOST_MULTIPLIER = exports.SPEED_BOOST_DURATION_TICKS = exports.GROWTH_ORB_VALUE = exports.GROWTH_ORB_RADIUS = exports.STRAY_SPAWN_COUNT = exports.STRAY_SPAWN_TICKS = exports.MAX_FFA_PLAYERS = exports.MAX_PLAYERS_PER_SHARD = exports.SESSION_DURATION_MS = exports.INITIAL_SHELTER_SIZE = exports.EARLY_GAME_PROTECTION_TICKS = exports.EARLY_GAME_PROTECTION_ADOPTIONS = exports.EARLY_GAME_PROTECTION_SIZE = exports.COMBAT_MAX_VARIANCE = exports.COMBAT_STRAY_VARIANCE = exports.COMBAT_STRENGTH_WEIGHT = exports.COMBAT_PET_WEIGHT = exports.COMBAT_TRANSFER_SIZE_RATIO_DIVISOR = exports.COMBAT_TRANSFER_PER_WIN = exports.COMBAT_GRACE_TICKS = exports.COMBAT_MIN_SIZE = exports.GROWTH_PER_ADOPTION = exports.ADOPTION_TICKS_GROUNDED = exports.ADOPTION_FAST_PET_THRESHOLD = exports.ADOPTION_TICKS_INTERVAL_FAST = exports.ADOPTION_TICKS_INTERVAL = exports.AUTO_JUMP_ADOPTIONS = exports.GROUNDED_ZONE_RATIO = exports.ADOPTION_ZONE_RADIUS = exports.PET_RADIUS = exports.RESCUE_RADIUS = exports.SHELTER_RADIUS_PER_SIZE = exports.SHELTER_BASE_RADIUS = exports.SHELTER_LARGE_SIZE_THRESHOLD = exports.SHELTER_SPEED_LARGE = exports.SHELTER_SPEED = exports.MAP_HEIGHT = exports.MAP_WIDTH = exports.TICK_MS = exports.TICK_RATE = void 0;
-exports.FALL_WIND_MAX = exports.FALL_WIND_MIN = exports.FALL_WIND_CYCLE_TICKS = exports.SPRING_VEGETATION_SPEED = exports.SEASON_SPEED_MULTIPLIER = exports.BOSS_TYCOON_REBUILD_TICKS = exports.BOSS_TYCOON_REBUILD_SECONDS = exports.BOSS_CAUGHT_PENALTY = exports.BOSS_MODE_REWARDS = exports.BOSS_MILL_RADIUS = exports.BOSS_PETMALL_RADIUS = exports.BOSS_MILL_RECIPES = exports.BOSS_MILL_NAMES = exports.BOSS_MILL_PET_COUNTS = exports.BOSS_INGREDIENT_COSTS = exports.BOSS_TYCOON_DETECTION_RADIUS = exports.BOSS_TYCOON_WARNING_SECONDS = exports.BOSS_TYCOON_SPEED = exports.BOSS_TYCOON_DWELL_TICKS = exports.BOSS_TYCOON_DWELL_SECONDS = exports.BOSS_MODE_TIME_LIMIT_TICKS = exports.BOSS_MODE_TIME_LIMIT_SECONDS = void 0;
+exports.DIFFICULTY_CONFIG = exports.DIFFICULTIES = exports.FALL_WIND_MAX = exports.FALL_WIND_MIN = exports.FALL_WIND_CYCLE_TICKS = exports.SPRING_VEGETATION_SPEED = exports.SEASON_SPEED_MULTIPLIER = exports.BOSS_TYCOON_REBUILD_TICKS = exports.BOSS_TYCOON_REBUILD_SECONDS = exports.BOSS_CAUGHT_PENALTY = exports.BOSS_MODE_REWARDS = exports.BOSS_MILL_RADIUS = exports.BOSS_PETMALL_RADIUS = exports.BOSS_MILL_RECIPES = exports.BOSS_MILL_NAMES = exports.BOSS_MILL_PET_COUNTS = exports.BOSS_INGREDIENT_COSTS = exports.BOSS_TYCOON_DETECTION_RADIUS = exports.BOSS_TYCOON_WARNING_SECONDS = exports.BOSS_TYCOON_SPEED = exports.BOSS_TYCOON_DWELL_TICKS = exports.BOSS_TYCOON_DWELL_SECONDS = exports.BOSS_MODE_TIME_LIMIT_TICKS = exports.BOSS_MODE_TIME_LIMIT_SECONDS = void 0;
 exports.getCurrentSeason = getCurrentSeason;
 exports.getSeasonLabel = getSeasonLabel;
 exports.isInVegetationPatch = isInVegetationPatch;
 exports.getWindMultiplier = getWindMultiplier;
+exports.normalizeDifficulty = normalizeDifficulty;
 /** Fixed tick rate (Hz). Server and client use same rate for prediction. */
 exports.TICK_RATE = 25;
 /** Tick interval in ms */
@@ -227,3 +228,87 @@ function getWindMultiplier(tick) {
     const t = hash - Math.floor(hash); // 0..1
     return exports.FALL_WIND_MIN + t * (exports.FALL_WIND_MAX - exports.FALL_WIND_MIN);
 }
+exports.DIFFICULTIES = ['easy', 'medium', 'hard'];
+/** Runtime guard: coerce an arbitrary value into a valid Difficulty (defaults to medium). */
+function normalizeDifficulty(value) {
+    return value === 'easy' || value === 'medium' || value === 'hard' ? value : 'medium';
+}
+/**
+ * Difficulty tuning table.
+ * Easy: fewer/slower camps, mills form slowly, weak boss, weak bots.
+ * Hard: more/faster camps, mills form readily, aggressive boss, bots that can genuinely win.
+ */
+exports.DIFFICULTY_CONFIG = {
+    easy: {
+        campsPerWave: [1, 2],
+        waveIntervalMult: 1.5,
+        firstWaveDelayMult: 2.0,
+        growthTicksMult: 1.8,
+        levelAdvanceEveryWaves: 3,
+        boss: {
+            timeMult: 1.4,
+            tycoonSpeedMult: 0.7,
+            detectionMult: 0.7,
+            ingredientCostMult: 0.6,
+            petCountMult: 0.7,
+            rebuildMult: 1.6,
+        },
+        bot: {
+            hesitation: [0.02, 0.05],
+            targeting: [0.25, 0.55],
+            rtSkew: 3,
+            shelterProb: 0.55,
+            bossProb: 0.25,
+            boostLevel: 0.2,
+            huntCamps: true,
+        },
+    },
+    medium: {
+        campsPerWave: [2, 3],
+        waveIntervalMult: 1.0,
+        firstWaveDelayMult: 1.0,
+        growthTicksMult: 1.0,
+        levelAdvanceEveryWaves: 2,
+        boss: {
+            timeMult: 1.0,
+            tycoonSpeedMult: 1.0,
+            detectionMult: 1.0,
+            ingredientCostMult: 1.0,
+            petCountMult: 1.0,
+            rebuildMult: 1.0,
+        },
+        bot: {
+            hesitation: [0.008, 0.03],
+            targeting: [0.5, 0.8],
+            rtSkew: 2,
+            shelterProb: 0.7,
+            bossProb: 0.5,
+            boostLevel: 0.5,
+            huntCamps: true,
+        },
+    },
+    hard: {
+        campsPerWave: [3, 4],
+        waveIntervalMult: 0.7,
+        firstWaveDelayMult: 0.6,
+        growthTicksMult: 0.7,
+        levelAdvanceEveryWaves: 1,
+        boss: {
+            timeMult: 0.8,
+            tycoonSpeedMult: 1.3,
+            detectionMult: 1.25,
+            ingredientCostMult: 1.25,
+            petCountMult: 1.2,
+            rebuildMult: 0.7,
+        },
+        bot: {
+            hesitation: [0.0, 0.008],
+            targeting: [0.9, 0.98],
+            rtSkew: 1,
+            shelterProb: 1.0,
+            bossProb: 1.0,
+            boostLevel: 1.0,
+            huntCamps: true,
+        },
+    },
+};

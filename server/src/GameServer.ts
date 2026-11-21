@@ -7,7 +7,8 @@
 import type { WebSocket } from 'ws';
 import { WebSocketServer } from 'ws';
 import { World } from './game/World.js';
-import { TICK_RATE, TICK_MS, MAX_FFA_PLAYERS, MAX_RT_PER_MATCH, SHELTER_BUILD_COST } from 'shared';
+import { TICK_RATE, TICK_MS, MAX_FFA_PLAYERS, MAX_RT_PER_MATCH, SHELTER_BUILD_COST, DIFFICULTIES, normalizeDifficulty } from 'shared';
+import type { Difficulty } from 'shared';
 import { decodeInput, encodeSnapshot, MSG_INPUT } from 'shared';
 import { registerServer, appendReplay, getNextGuestName } from './registry.js';
 import { withdrawForMatch, withdrawForMatchSelective, depositAfterMatch, getInventory, type Inventory, type ItemSelection } from './inventory.js';
@@ -514,9 +515,23 @@ setInterval(() => {
   registerServer(SERVER_ID, GAME_WS_URL, totalPlayers).catch(() => {});
 }, 10000);
 
-function createMatch(mode: 'ffa' | 'solo' | 'teams'): Match {
+/**
+ * Rotating difficulty for auto-created matches (FFA/Teams/bot-only). Advances through
+ * easy -> medium -> hard so no two consecutively-created matches share the same level.
+ */
+let difficultyRotationIndex = Math.floor(Math.random() * DIFFICULTIES.length);
+function nextRotatedDifficulty(): Difficulty {
+  const d = DIFFICULTIES[difficultyRotationIndex % DIFFICULTIES.length];
+  difficultyRotationIndex = (difficultyRotationIndex + 1) % DIFFICULTIES.length;
+  return d;
+}
+
+function createMatch(mode: 'ffa' | 'solo' | 'teams', difficulty?: Difficulty): Match {
   const world = new World();
   world.setMatchMode(mode); // Set match mode for boss mode trigger in solo
+  // Solo passes an explicit difficulty; FFA/Teams auto-rotate so games never repeat back-to-back.
+  const diff = difficulty ?? (mode === 'solo' ? 'medium' : nextRotatedDifficulty());
+  world.setDifficulty(diff);
   const match: Match = {
     id: generateMatchId(),
     world,
@@ -536,7 +551,7 @@ function createMatch(mode: 'ffa' | 'solo' | 'teams'): Match {
     playerTeams: mode === 'teams' ? new Map() : undefined,
   };
   matches.set(match.id, match);
-  log(`match created id=${match.id} mode=${mode}`);
+  log(`match created id=${match.id} mode=${mode} difficulty=${diff}`);
   return match;
 }
 
@@ -696,6 +711,9 @@ const BOT_MATCH_CREATE_COOLDOWN_MS = 10000; // 10s cooldown between creating bot
 function createBotMatch(mode: 'ffa' | 'teams'): Match {
   const world = new World();
   world.setMatchMode(mode);
+  // Bot-only spectator matches rotate difficulty so consecutive games never share a level.
+  const botMatchDifficulty = nextRotatedDifficulty();
+  world.setDifficulty(botMatchDifficulty);
   const match: Match = {
     id: generateMatchId(),
     world,
@@ -752,7 +770,7 @@ function createBotMatch(mode: 'ffa' | 'teams'): Match {
   match.world.startMatch();
   matches.set(match.id, match);
   lastBotMatchCreateTime = Date.now();
-  log(`Bot match created id=${match.id} mode=${mode} bots=${match.cpuIds.size}`);
+  log(`Bot match created id=${match.id} mode=${mode} bots=${match.cpuIds.size} difficulty=${botMatchDifficulty}`);
   return match;
 }
 
@@ -1150,6 +1168,7 @@ wss.on('connection', async (ws) => {
       displayName, 
       matchId: match.id, 
       mode: match.mode,
+      difficulty: match.world.getDifficulty(),
       startingRT, 
       startingPorts: 0, 
       adoptSpeedBoosts: 0,
@@ -1195,6 +1214,7 @@ wss.on('connection', async (ws) => {
       displayName,
       matchId: match.id,
       mode: match.mode,
+      difficulty: match.world.getDifficulty(),
       startingRT: rt,
       startingPorts: ports,
       shelterPortCharges: shelterPorts,
@@ -1231,7 +1251,7 @@ wss.on('connection', async (ws) => {
         if (msg.type === 'ping' && typeof msg.ts === 'number') {
           if (currentMatchId) {
             const match = matches.get(currentMatchId);
-            const tick = match ? match.world.getSnapshot().tick : 0;
+            const tick = match ? match.world.getTick() : 0;
             ws.send(JSON.stringify({ type: 'pong', ts: msg.ts, serverTick: tick }));
           }
           return;
@@ -1257,7 +1277,7 @@ wss.on('connection', async (ws) => {
           match.observers.set(obsId, ws);
           match.spectators.add(obsId); // Mark as voluntary spectator — never auto-promote
           currentMatchId = match.id;
-          ws.send(JSON.stringify({ type: 'observing', matchId: match.id, mode: match.mode }));
+          ws.send(JSON.stringify({ type: 'observing', matchId: match.id, mode: match.mode, difficulty: match.world.getDifficulty() }));
           log(`Spectator ${obsId} joined match ${match.id} (${match.mode})`);
           
           // Send player map so spectator can see display names
@@ -1268,6 +1288,8 @@ wss.on('connection', async (ws) => {
         if (msg.type === 'mode' && typeof msg.mode === 'string') {
           clearTimeout(timeout);
           const mode = msg.mode as 'ffa' | 'solo' | 'teams';
+          // Solo players pick difficulty explicitly; FFA/Teams ignore it and auto-rotate.
+          const soloDifficulty = normalizeDifficulty(msg.difficulty);
           const name = typeof msg.displayName === 'string' && msg.displayName ? msg.displayName : null;
           const rejoinMatchId = typeof msg.rejoinMatchId === 'string' ? msg.rejoinMatchId : null;
           const joinMatchId = typeof msg.joinMatchId === 'string' ? msg.joinMatchId : null;
@@ -1336,7 +1358,7 @@ wss.on('connection', async (ws) => {
                         mode: 'solo',
                         countdownEndAt: 0,
                         players: new Map(),
-                        cpuIds: new Set(world.getSnapshot().players.filter((pl) => pl.id.startsWith('cpu-')).map((pl) => pl.id)),
+                        cpuIds: new Set(world.getPlayerIds().filter((id) => id.startsWith('cpu-'))),
                         readySet: new Set(),
                         fightAllyChoices: new Map(),
                         allyRequests: new Map(),
@@ -1347,7 +1369,7 @@ wss.on('connection', async (ws) => {
                         spectators: new Set(),
                         soloUserId: playerUserId,
                         soloPlayerId: humanId,
-                        soloDisplayName: world.getSnapshot().players.find((pl) => pl.id === humanId)?.displayName ?? displayNameToUse,
+                        soloDisplayName: world.getDisplayName(humanId) ?? displayNameToUse,
                       };
                       match.players.set(humanId, ws);
                       playerToMatch.set(humanId, match.id);
@@ -1368,6 +1390,7 @@ wss.on('connection', async (ws) => {
                         displayName: match.soloDisplayName,
                         matchId: match.id,
                         mode: match.mode,
+                        difficulty: match.world.getDifficulty(),
                         startingRT: rt,
                         startingPorts: ports,
                         shelterPortCharges: shelterPorts,
@@ -1385,7 +1408,7 @@ wss.on('connection', async (ws) => {
                   }
                 }
               }
-              const match = createMatch('solo');
+              const match = createMatch('solo', soloDifficulty);
               addPlayerToMatch(match, displayNameToUse);
               ensureCpusForMatch(match);
               match.phase = 'playing';
@@ -1436,6 +1459,7 @@ wss.on('connection', async (ws) => {
                       displayName: p?.displayName ?? displayNameToUse,
                       matchId: existingMatch.id,
                       mode: existingMatch.mode,
+                      difficulty: existingMatch.world.getDifficulty(),
                       startingRT: rt,
                       startingPorts: ports,
                       shelterPortCharges: shelterPorts,
@@ -1593,6 +1617,7 @@ wss.on('connection', async (ws) => {
                       displayName: p?.displayName ?? displayNameToUse,
                       matchId: existingMatch.id,
                       mode: existingMatch.mode,
+                      difficulty: existingMatch.world.getDifficulty(),
                       startingRT: rt,
                       startingPorts: ports,
                       shelterPortCharges: shelterPorts,
@@ -2630,6 +2655,7 @@ setInterval(() => {
                 isWinner,
                 strayLoss: isStrayLoss,
                 karmaAwarded,
+                bossVictory: match.world.isBossFullClear() || undefined,
                 winningTeam: winningTeam || undefined,
                 myTeam: playerTeam || undefined,
               }));

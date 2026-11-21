@@ -62,7 +62,10 @@ import {
   SPRING_VEGETATION_SPEED,
   isInVegetationPatch,
   getWindMultiplier,
+  // Difficulty
+  DIFFICULTY_CONFIG,
 } from 'shared';
+import type { Difficulty, DifficultyConfig } from 'shared';
 import { INPUT_LEFT, INPUT_RIGHT, INPUT_UP, INPUT_DOWN } from 'shared';
 import { SpatialGrid } from './SpatialGrid';
 import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED, PICKUP_TYPE_PORT, PICKUP_TYPE_BREEDER, PICKUP_TYPE_SHELTER_PORT } from 'shared';
@@ -87,33 +90,40 @@ interface BotProfile {
   adoptSpeedBoosts: number;      // starting adopt speed boosts (0-2)
 }
 
-/** Generate a random bot profile. `matchMode` influences probabilities. */
-function generateBotProfile(matchMode: 'ffa' | 'solo' | 'teams'): BotProfile {
-  // RT weighted toward lower end (quadratic distribution)
-  const startingRT = Math.floor(Math.random() ** 2 * 1001); // 0-1000
+/**
+ * Generate a random bot profile. `matchMode` influences probabilities and
+ * `difficulty` scales overall skill (easy = weak/hesitant, hard = strong/decisive).
+ */
+function generateBotProfile(matchMode: 'ffa' | 'solo' | 'teams', difficulty: Difficulty): BotProfile {
+  const bot = DIFFICULTY_CONFIG[difficulty].bot;
 
-  // Shelter builders more likely in teams mode
-  const shelterBuilder = matchMode === 'teams'
-    ? Math.random() < 0.50
-    : Math.random() < 0.30;
+  // RT skewed by difficulty: higher rtSkew exponent => poorer bots start with less RT.
+  const startingRT = Math.floor(Math.random() ** bot.rtSkew * 1001); // 0-1000
 
-  const hesitationRate = 0.005 + Math.random() * 0.035;    // 0.005-0.04
-  const optimalTargeting = 0.3 + Math.random() * 0.6;      // 0.3-0.9
-  const bossParticipant = Math.random() < 0.40;
+  // Shelter builders: base probability from difficulty, teams a bit more likely.
+  const shelterProb = matchMode === 'teams' ? Math.min(1, bot.shelterProb + 0.1) : bot.shelterProb;
+  const shelterBuilder = Math.random() < shelterProb;
+
+  const [hesMin, hesMax] = bot.hesitation;
+  const hesitationRate = hesMin + Math.random() * (hesMax - hesMin);
+  const [tgtMin, tgtMax] = bot.targeting;
+  const optimalTargeting = tgtMin + Math.random() * (tgtMax - tgtMin);
+  const bossParticipant = Math.random() < bot.bossProb;
   const shelterBuildThreshold = 50 + Math.floor(Math.random() * 71); // 50-120
 
-  // Pre-match boosts (same distribution a human might bring in)
-  const sizeBonus = Math.floor(Math.random() ** 1.5 * 31); // 0-30, skewed low
-  const speedBoost = Math.random() < 0.25;
+  // Pre-match boosts scale with difficulty via boostLevel (0-1).
+  const bl = bot.boostLevel;
+  const sizeBonus = Math.floor(Math.random() ** 1.5 * 31 * bl); // 0-30 * boostLevel
+  const speedBoost = Math.random() < 0.25 + bl * 0.5;
 
-  // Port charges: 60% 0, 25% 1, 15% 2-3
+  // Port charges: stronger bots more likely to carry ports.
   let ports = 0;
   const portRoll = Math.random();
-  if (portRoll > 0.85) ports = 2 + Math.floor(Math.random() * 2); // 2-3
-  else if (portRoll > 0.60) ports = 1;
+  if (portRoll > 0.85 - bl * 0.25) ports = 2 + Math.floor(Math.random() * 2); // 2-3
+  else if (portRoll > 0.60 - bl * 0.25) ports = 1;
 
-  // Adopt speed boosts: 0-2
-  const adoptSpeedBoosts = Math.floor(Math.random() * 3);
+  // Adopt speed boosts: 0-2, more likely for stronger bots.
+  const adoptSpeedBoosts = Math.min(2, Math.floor(Math.random() * 3 * (0.5 + bl)));
 
   return {
     startingRT, shelterBuilder, hesitationRate, optimalTargeting,
@@ -150,8 +160,8 @@ function shelterRadius(size: number): number {
 
 /** Calculate shelter tier from size (1-5, capped at 5 for visual purposes) */
 function calculateShelterTier(size: number): number {
-  if (size < 50) return 1;
-  if (size < 120) return 2;
+  if (size < 75) return 1;
+  if (size < 150) return 2;
   if (size < 250) return 3;
   if (size < 500) return 4;
   return 5; // Max tier
@@ -190,6 +200,10 @@ const SHELTER_PET_UPKEEP = 2; // 2 RT per pet when delivered to shelter
 const SHELTER_TOKENS_PER_ADOPTION = 10; // 10 RT when adopted from your shelter (vs 5 RT at main center)
 
 export class World {
+  /** Hard cap on match length. Bots can reach an equilibrium (rescue ~= breeder spawn) where
+   *  strays never hit 0 (no boss mode) nor 2000 (no loss), so matches can otherwise run forever.
+   *  40 minutes keeps games inside the ideal 20-40 min window and always under an hour. */
+  private static readonly MAX_MATCH_TICKS = 40 * 60 * TICK_RATE; // 40 minutes
   private tick = 0;
   private matchStartTick = 0;
   private matchStartTime = Date.now(); // Real-time clock for match duration
@@ -198,6 +212,7 @@ export class World {
   private matchEndAt = 0;
   private matchStarted = false;
   private matchEndedEarly = false; // True if match ended due to domination
+  private bossFullClear = false; // True when all 5 boss hutches were cleared
   private bossModePlayed = false; // True once boss mode has been triggered (prevents re-triggering)
   private players = new Map<string, PlayerState>();
   private pets = new Map<string, PetState>();
@@ -248,11 +263,13 @@ export class World {
   // CPU AI target persistence to prevent diagonal jitter
   /** Per-bot skill profiles – generated at spawn, never stored. */
   private cpuProfiles = new Map<string, BotProfile>();
-  private cpuTargets = new Map<string, { x: number; y: number; type: 'stray' | 'pickup' | 'zone' | 'wander'; breederClaimId?: string }>();
+  private cpuTargets = new Map<string, { x: number; y: number; type: 'stray' | 'pickup' | 'zone' | 'wander' | 'mill'; breederClaimId?: string; millShelterId?: string }>();
   /** CPU retarget cooldown: tick when bot can pick a new target (simulates reaction time) */
   private cpuRetargetCooldown = new Map<string, number>();
   /** CPU hesitation: tick until which bot stands still (simulates thinking) */
   private cpuHesitateTill = new Map<string, number>();
+  /** After fleeing a breeder mill, bot commits to the flee path until this tick (stops mill ping-pong). */
+  private cpuMillFleeUntil = new Map<string, number>();
   /** Boss mill re-entry cooldown: tick when bot can re-enter a mill (prevents oscillation) */
   private bossMillReentryCooldown = new Map<string, number>();
   
@@ -320,6 +337,9 @@ export class World {
   
   // Wild strays (from breeder shelters) - harder to catch, move around
   private wildStrayIds = new Set<string>();
+  /** Per wild-stray tick at which it re-decides its motion (scurry burst vs pause vs glide leg).
+   *  Randomised per pet so decisions stay staggered across ticks (no CPU spike). */
+  private wildStrayNextDecisionTick = new Map<string, number>();
   
   // Spatial grid for fast proximity queries (rebuilt every tick)
   private petGrid = new SpatialGrid<PetState>(200);
@@ -329,6 +349,8 @@ export class World {
   // Solo mode options
   private cpuCanShutdownBreeders = true; // Can be set via game options
   private matchMode: 'ffa' | 'solo' | 'teams' = 'ffa'; // Match mode (set by GameServer)
+  private difficulty: Difficulty = 'medium'; // Game difficulty (set by GameServer)
+  private diff: DifficultyConfig = DIFFICULTY_CONFIG.medium; // Cached config for current difficulty
   
   // Teams mode: team assignments and scores
   private playerTeams = new Map<string, 'red' | 'blue'>(); // playerId -> team
@@ -493,7 +515,7 @@ export class World {
 
   /** Generate and store a random skill profile for a CPU player. Returns the profile so GameServer can read boost values. */
   generateCpuProfile(cpuId: string): BotProfile {
-    const profile = generateBotProfile(this.matchMode);
+    const profile = generateBotProfile(this.matchMode, this.difficulty);
     this.cpuProfiles.set(cpuId, profile);
     return profile;
   }
@@ -1080,7 +1102,7 @@ export class World {
   }
 
   /** Set CPU target and release any previous breeder claim if changing targets */
-  private setCpuTarget(playerId: string, target: { x: number; y: number; type: 'stray' | 'pickup' | 'zone' | 'wander'; breederClaimId?: string }): void {
+  private setCpuTarget(playerId: string, target: { x: number; y: number; type: 'stray' | 'pickup' | 'zone' | 'wander' | 'mill'; breederClaimId?: string; millShelterId?: string }): void {
     const oldTarget = this.cpuTargets.get(playerId);
     // Release old breeder claim if we're switching to a different target
     if (oldTarget?.breederClaimId && oldTarget.breederClaimId !== target.breederClaimId) {
@@ -1139,20 +1161,51 @@ export class World {
       }
     }
     
-    // Keep CPU vans clear of breeder shelters (mills) so they don't path through them.
-    if (!isFull && !touchingZone) {
-      for (const breederShelter of this.breederShelters.values()) {
-        const bsr = 40 + breederShelter.size * 0.5;
-        const dangerRadius = bsr + 80;
-        const d = dist(p.x, p.y, breederShelter.x, breederShelter.y);
-        if (d < dangerRadius) {
-          const dx = p.x - breederShelter.x;
-          const dy = p.y - breederShelter.y;
-          const len = Math.hypot(dx, dy) || 1;
-          const fleeX = clamp(p.x + (dx / len) * 220, 50, MAP_WIDTH - 50);
-          const fleeY = clamp(p.y + (dy / len) * 220, 50, MAP_HEIGHT - 50);
+    // When hunting mills (shelter + huntCamps), drive into mills instead of fleeing them.
+    // Otherwise keep vans clear of mills so stray chase → flee → re-chase doesn't ping-pong.
+    const huntingMills = this.cpuHuntsCamps() && this.hasShelter(p.id);
+    if (huntingMills) {
+      this.cpuMillFleeUntil.delete(p.id);
+    } else {
+      const millFleeUntil = this.cpuMillFleeUntil.get(p.id) ?? 0;
+      const isMillFleeing = this.tick < millFleeUntil;
+      if (!isFull && !touchingZone && !isMillFleeing) {
+        let pushX = 0;
+        let pushY = 0;
+        let inDanger = false;
+        for (const breederShelter of this.breederShelters.values()) {
+          const dangerRadius = this.breederMillDangerRadius(breederShelter);
+          const d = dist(p.x, p.y, breederShelter.x, breederShelter.y);
+          if (d < dangerRadius) {
+            inDanger = true;
+            // Stronger push from closer mills; sum vectors so bots between two mills flee sideways
+            const weight = 1 / Math.max(d, 1);
+            pushX += (p.x - breederShelter.x) * weight;
+            pushY += (p.y - breederShelter.y) * weight;
+          }
+        }
+        if (inDanger) {
+          const len = Math.hypot(pushX, pushY) || 1;
+          // Commit to a flee point well outside the danger zone and stick to it for ~2.5s
+          const fleeX = clamp(p.x + (pushX / len) * 320, 50, MAP_WIDTH - 50);
+          const fleeY = clamp(p.y + (pushY / len) * 320, 50, MAP_HEIGHT - 50);
+          this.cpuMillFleeUntil.set(p.id, this.tick + Math.round(TICK_RATE * 2.5));
           this.setCpuTarget(p.id, { x: fleeX, y: fleeY, type: 'wander' });
           return this.directionToward(p.x, p.y, fleeX, fleeY);
+        }
+      }
+      // While committed to a mill flee, keep driving to that wander target (don't retarget strays)
+      if (isMillFleeing) {
+        const fleeTarget = this.cpuTargets.get(p.id);
+        if (fleeTarget && fleeTarget.type === 'wander') {
+          const dFlee = dist(p.x, p.y, fleeTarget.x, fleeTarget.y);
+          if (dFlee >= 30) {
+            return this.directionToward(p.x, p.y, fleeTarget.x, fleeTarget.y);
+          }
+          // Reached flee point early — clear cooldown so normal AI resumes
+          this.cpuMillFleeUntil.delete(p.id);
+        } else {
+          this.cpuMillFleeUntil.delete(p.id);
         }
       }
     }
@@ -1214,10 +1267,16 @@ export class World {
         // Check if target is still valid (stray/pickup still exists at location)
         let targetValid = false;
         if (currentTarget.type === 'stray') {
-          for (const pet of this.pets.values()) {
-            if (pet.insideShelterId === null && dist(pet.x, pet.y, currentTarget.x, currentTarget.y) < 20) {
-              targetValid = true;
-              break;
+          // Drop stray targets that sit inside a mill avoid zone (prevents re-entering danger)
+          // When hunting mills, near-mill strays are fair game (and may lead into mill clears).
+          if (!huntingMills && this.isNearBreederMill(currentTarget.x, currentTarget.y, 60)) {
+            targetValid = false;
+          } else {
+            for (const pet of this.pets.values()) {
+              if (pet.insideShelterId === null && dist(pet.x, pet.y, currentTarget.x, currentTarget.y) < 20) {
+                targetValid = true;
+                break;
+              }
             }
           }
         } else if (currentTarget.type === 'pickup') {
@@ -1237,6 +1296,17 @@ export class World {
               }
               targetValid = true;
               break;
+            }
+          }
+        } else if (currentTarget.type === 'mill') {
+          const millId = currentTarget.millShelterId;
+          if (millId && this.breederShelters.has(millId) && !this.millInCombat.has(millId)) {
+            const cooldownEnd = this.cpuBreederCooldown.get(p.id) ?? 0;
+            if (this.tick >= cooldownEnd) {
+              const mill = this.breederShelters.get(millId)!;
+              const cpuRt = this.playerMoney.get(p.id) ?? 0;
+              const minRt = World.minRtForBreederLevel(mill.level);
+              targetValid = cpuRt >= minRt;
             }
           }
         } else if (currentTarget.type === 'wander') {
@@ -1281,6 +1351,10 @@ export class World {
 
     for (const pet of this.pets.values()) {
       if (pet.insideShelterId !== null) continue;
+      // Don't chase strays sitting in a mill's danger/buffer zone — that's what causes the
+      // approach→flee→approach loop. When hunting mills (shelter + huntCamps), near-mill
+      // strays are fair game and help bots reach mills that need clearing.
+      if (!huntingMills && this.isNearBreederMill(pet.x, pet.y, 60)) continue;
       const d = dist(p.x, p.y, pet.x, pet.y);
       strayCandidates.push({ x: pet.x, y: pet.y, d });
     }
@@ -1291,8 +1365,8 @@ export class World {
     const canTargetBreeders = this.tick >= breederCooldownEnd;
     
     for (const u of this.pickups.values()) {
-      // Skip breeder camps if CPU is not allowed to shut them down
-      if (u.type === PICKUP_TYPE_BREEDER && !this.cpuCanShutdownBreeders) continue;
+      // Skip breeder camps if CPU is not allowed to shut them down (solo toggle + difficulty gate)
+      if (u.type === PICKUP_TYPE_BREEDER && !this.cpuHuntsCamps()) continue;
       // Skip breeder camps that are already claimed by another player (human or CPU physically at breeder)
       if (u.type === PICKUP_TYPE_BREEDER) {
         // CPU must have a built shelter before it can target breeders.
@@ -1340,7 +1414,7 @@ export class World {
     };
 
     // PRIORITY: Attack breeders aggressively when allowed
-    if (this.cpuCanShutdownBreeders) {
+    if (this.cpuHuntsCamps()) {
       const breederCandidates = pickupCandidates.filter(c => c.type === PICKUP_TYPE_BREEDER);
       if (breederCandidates.length > 0) {
         // Always prioritize if 2+ breeders, or 60% chance with 1 breeder
@@ -1352,6 +1426,31 @@ export class World {
           this.setCpuTarget(p.id, { x: target.x, y: target.y, type: 'pickup', breederClaimId: target.id });
           return this.directionToward(p.x, p.y, target.x, target.y);
         }
+      }
+    }
+
+    // PRIORITY: Drive to mills when hunting (shelter required) so bots can clear them
+    if (huntingMills && canTargetBreeders) {
+      const millCandidates: { x: number; y: number; d: number; id: string }[] = [];
+      for (const [millId, mill] of this.breederShelters) {
+        if (this.millInCombat.has(millId)) continue;
+        const minRt = World.minRtForBreederLevel(mill.level);
+        if (cpuRt < minRt) continue;
+        let anotherCpuTargeting = false;
+        for (const [cpuId, target] of this.cpuTargets) {
+          if (cpuId !== p.id && target.millShelterId === millId) {
+            anotherCpuTargeting = true;
+            break;
+          }
+        }
+        if (anotherCpuTargeting) continue;
+        millCandidates.push({ x: mill.x, y: mill.y, d: dist(p.x, p.y, mill.x, mill.y), id: millId });
+      }
+      millCandidates.sort((a, b) => a.d - b.d);
+      if (millCandidates.length > 0 && (millCandidates.length >= 2 || Math.random() < 0.6 || strayCandidates.length === 0)) {
+        const target = millCandidates[0];
+        this.setCpuTarget(p.id, { x: target.x, y: target.y, type: 'mill', millShelterId: target.id });
+        return this.directionToward(p.x, p.y, target.x, target.y);
       }
     }
 
@@ -1403,7 +1502,7 @@ export class World {
         if (bm.tycoonTargetMill === atMillId) {
           const tycoonDist = dist(bm.tycoonX, bm.tycoonY, mill.x, mill.y);
           // Warning: tycoon within ~3 seconds of arriving (speed * 3s * tick_rate)
-          const warningDist = BOSS_TYCOON_SPEED * TICK_RATE * 3;
+          const warningDist = this.bossTycoonSpeed() * TICK_RATE * 3;
           if (tycoonDist < warningDist) {
             // Flee well outside the mill radius to prevent oscillation
             const dx = p.x - mill.x;
@@ -1549,6 +1648,7 @@ export class World {
     this.triggeredEvents.clear();
     this.satelliteZonesSpawned = false;
     this.winnerId = null;
+    this.bossFullClear = false;
     // Reset shelter system
     this.shelters.clear();
     this.playerShelterIds.clear();
@@ -1556,6 +1656,7 @@ export class World {
     this.lastShelterAdoptTick.clear();
     // Reset CPU AI targets
     this.cpuTargets.clear();
+    this.cpuMillFleeUntil.clear();
     // Reset breeder spawn tracking
     this.breederSpawnCount = 0;
     this.breederCurrentLevel = 1;
@@ -1574,6 +1675,7 @@ export class World {
     this.millInCombat.clear();
     this.activeMillByPlayer.clear();
     this.wildStrayIds.clear();
+    this.wildStrayNextDecisionTick.clear();
     this.pendingAnnouncements = [];
     this.strayWarnings.clear();
     this.adoptionEvents.clear();
@@ -1710,6 +1812,26 @@ export class World {
   setCpuBreederBehavior(canShutdown: boolean): void {
     this.cpuCanShutdownBreeders = canShutdown;
   }
+
+  /** Whether CPUs should actively hunt breeder camps (solo toggle AND difficulty allows it). */
+  private cpuHuntsCamps(): boolean {
+    return this.cpuCanShutdownBreeders && this.diff.bot.huntCamps;
+  }
+
+  /** Radius around a breeder mill that CPU vans should stay out of. */
+  private breederMillDangerRadius(shelter: { size: number }): number {
+    return 40 + shelter.size * 0.5 + 80;
+  }
+
+  /** True if (x,y) is inside any mill's danger radius (+ optional extra buffer). */
+  private isNearBreederMill(x: number, y: number, buffer = 0): boolean {
+    for (const shelter of this.breederShelters.values()) {
+      if (dist(x, y, shelter.x, shelter.y) < this.breederMillDangerRadius(shelter) + buffer) {
+        return true;
+      }
+    }
+    return false;
+  }
   
   /** Set the match mode (ffa, solo, teams) */
   setMatchMode(mode: 'ffa' | 'solo' | 'teams'): void {
@@ -1719,6 +1841,40 @@ export class World {
   /** Get the current match mode */
   getMatchMode(): 'ffa' | 'solo' | 'teams' {
     return this.matchMode;
+  }
+
+  /** Set the game difficulty (easy, medium, hard). Scales breeders, boss, and bot skill. */
+  setDifficulty(difficulty: Difficulty): void {
+    this.difficulty = difficulty;
+    this.diff = DIFFICULTY_CONFIG[difficulty];
+  }
+
+  /** Get the current game difficulty. */
+  getDifficulty(): Difficulty {
+    return this.difficulty;
+  }
+
+  // --- Difficulty-scaled boss tunables (base constants live in shared/constants.ts) ---
+  private bossTimeLimitTicks(): number {
+    return Math.round(BOSS_MODE_TIME_LIMIT_TICKS * this.diff.boss.timeMult);
+  }
+  private bossTycoonSpeed(): number {
+    return BOSS_TYCOON_SPEED * this.diff.boss.tycoonSpeedMult;
+  }
+  /** Rebuild time scales up with how many mills the player has already cleared, so late-game
+   *  progress (e.g. 3 of 5) isn't quickly undone while you work on the remaining shops.
+   *  millsCleared 0→base, 1→1.5x, 2→2x, 3→2.5x, 4→3x. */
+  private bossRebuildTicks(millsCleared: number): number {
+    const progressScale = 1 + Math.max(0, millsCleared) * 0.5;
+    return Math.round(BOSS_TYCOON_REBUILD_TICKS * this.diff.boss.rebuildMult * progressScale);
+  }
+  private bossIngredientCost(ingredient: string): number {
+    const base = BOSS_INGREDIENT_COSTS[ingredient] ?? 10;
+    return Math.max(1, Math.round(base * this.diff.boss.ingredientCostMult));
+  }
+  private bossMillPetCount(petType: number): number {
+    const base = BOSS_MILL_PET_COUNTS[petType] ?? 5;
+    return Math.max(1, Math.round(base * this.diff.boss.petCountMult));
   }
   
   /** Check if boss mode is currently active */
@@ -1962,6 +2118,13 @@ export class World {
 
     if (this.isMatchOver()) return; // no movement, rescue, adoption, or spawns after match end
 
+    // Hard time cap: force the match to end so it can never run indefinitely (e.g. bots stuck
+    // in a rescue/spawn equilibrium). Winner is decided by current standings.
+    if (!this.matchEndedEarly && now - this.matchStartTick >= World.MAX_MATCH_TICKS) {
+      this.endMatchOnTimeLimit();
+      return;
+    }
+
     // Update boss mode if active
     if (this.bossMode?.active) {
       this.updateBossMode();
@@ -2016,32 +2179,53 @@ export class World {
       // No gravity toward adoption center — only shelter gravity applies (see shelter hasGravity loop below)
     }
     
-    // Wild strays (from breeder shelters) move around randomly - harder to catch!
-    // Direction changes are staggered across ticks so we don't spike CPU every 75th tick
-    const tickMod75 = this.tick % 75;
+    // Wild strays (from breeder shelters) move like real animals - harder to catch!
+    // Ground animals scurry in short bursts then pause (sudden direction changes, no gliding);
+    // only birds glide smoothly. Re-decision ticks are randomised per pet so the work stays
+    // staggered across ticks (no CPU spike).
     for (const petId of this.wildStrayIds) {
       const pet = this.pets.get(petId);
       if (!pet || pet.insideShelterId !== null) {
         this.wildStrayIds.delete(petId); // No longer wild if caught
+        this.wildStrayNextDecisionTick.delete(petId);
         continue;
       }
-      
-      // Staggered direction change: use pet's sequence number to distribute across 75 ticks
-      const seq = parseInt(petId.slice(4), 10) || 0; // "pet-123" → 123
-      if ((seq % 75) === tickMod75 || (pet.vx === 0 && pet.vy === 0)) {
-        const angle = Math.random() * Math.PI * 2;
-        const speed = World.BREEDER_STRAY_SPEED;
-        pet.vx = Math.cos(angle) * speed;
-        pet.vy = Math.sin(angle) * speed;
+
+      const isBird = pet.petType === PET_TYPE_BIRD;
+      let nextDecision = this.wildStrayNextDecisionTick.get(petId) ?? 0;
+      if (this.tick >= nextDecision) {
+        if (isBird) {
+          // Birds glide: steady speed with gentle heading changes over long legs.
+          const moving = pet.vx !== 0 || pet.vy !== 0;
+          const heading = moving ? Math.atan2(pet.vy, pet.vx) : Math.random() * Math.PI * 2;
+          const angle = heading + (Math.random() - 0.5) * 0.9; // gentle bank, not a hard turn
+          const speed = World.BREEDER_STRAY_SPEED;
+          pet.vx = Math.cos(angle) * speed;
+          pet.vy = Math.sin(angle) * speed;
+          nextDecision = this.tick + 40 + Math.floor(Math.random() * 40); // ~1.6-3.2s glide legs
+        } else if (Math.random() < 0.4) {
+          // Pause: stop and "sniff around" (also lets the client render it as a cheap static stray).
+          pet.vx = 0;
+          pet.vy = 0;
+          nextDecision = this.tick + 8 + Math.floor(Math.random() * 20); // ~0.3-1.1s pause
+        } else {
+          // Dart off in a fresh (often sharply different) direction — a quick scurry burst.
+          const angle = Math.random() * Math.PI * 2;
+          const speed = World.BREEDER_STRAY_SPEED * (1.1 + Math.random() * 0.5);
+          pet.vx = Math.cos(angle) * speed;
+          pet.vy = Math.sin(angle) * speed;
+          nextDecision = this.tick + 6 + Math.floor(Math.random() * 16); // ~0.24-0.88s burst
+        }
+        this.wildStrayNextDecisionTick.set(petId, nextDecision);
       }
-      
+
       // Apply movement
       pet.x = clamp(pet.x + pet.vx, 50, MAP_WIDTH - 50);
       pet.y = clamp(pet.y + pet.vy, 50, MAP_HEIGHT - 50);
-      
-      // Bounce off edges
-      if (pet.x <= 50 || pet.x >= MAP_WIDTH - 50) pet.vx *= -1;
-      if (pet.y <= 50 || pet.y >= MAP_HEIGHT - 50) pet.vy *= -1;
+
+      // Bounce off edges and force a quick re-decision so strays don't hug the walls
+      if (pet.x <= 50 || pet.x >= MAP_WIDTH - 50) { pet.vx *= -1; nextDecision = Math.min(nextDecision, this.tick + 4); this.wildStrayNextDecisionTick.set(petId, nextDecision); }
+      if (pet.y <= 50 || pet.y >= MAP_HEIGHT - 50) { pet.vy *= -1; nextDecision = Math.min(nextDecision, this.tick + 4); this.wildStrayNextDecisionTick.set(petId, nextDecision); }
     }
     
     // Rebuild spatial grid for outdoor pets (used by all proximity queries below)
@@ -2151,19 +2335,20 @@ export class World {
     const allBreedersClearedNow = this.breederShelters.size === 0 && this.breederCamps.size === 0;
     const victoryConditionsMet = this.shelters.size > 0 && currentStrayCount === 0 && allBreedersClearedNow;
     
-    // Determine if it's time for a new wave
-    const isFirstWave = this.lastBreederWaveTick === 0 && ticksSinceStart >= World.BREEDER_FIRST_WAVE_DELAY_TICKS;
+    // Determine if it's time for a new wave (first-wave grace scales with difficulty)
+    const firstWaveDelay = Math.round(World.BREEDER_FIRST_WAVE_DELAY_TICKS * this.diff.firstWaveDelayMult);
+    const isFirstWave = this.lastBreederWaveTick === 0 && ticksSinceStart >= firstWaveDelay;
     const isNextWave = this.lastBreederWaveTick > 0 && this.breederWaveSpawned && 
                        this.nextBreederWaveInterval > 0 && ticksSinceLastWave >= this.nextBreederWaveInterval;
     
     // Don't spawn new waves if victory conditions are met
     if ((isFirstWave || isNextWave) && !victoryConditionsMet) {
-      // First wave starts at level 1. After that, level advances every 2 waves.
+      // First wave starts at level 1. After that, level advances every N waves (N = difficulty).
       if (isFirstWave) {
         this.breederWaveCount = 1;
       } else {
         this.breederWaveCount++;
-        if (this.breederWaveCount % 2 === 1) {
+        if ((this.breederWaveCount - 1) % this.diff.levelAdvanceEveryWaves === 0) {
           this.breederCurrentLevel = Math.min(this.breederCurrentLevel + 1, World.MAX_BREEDER_LEVEL);
           this.breederSpawnCount = 0;
         }
@@ -2173,12 +2358,14 @@ export class World {
       this.lastBreederWaveTick = now;
       this.breederWaveSpawned = false;
       
-      // Set random interval for the NEXT wave (45-75 seconds)
-      this.nextBreederWaveInterval = World.BREEDER_WAVE_MIN_TICKS + 
-        Math.floor(Math.random() * (World.BREEDER_WAVE_MAX_TICKS - World.BREEDER_WAVE_MIN_TICKS));
+      // Set random interval for the NEXT wave (base 45-75 seconds, scaled by difficulty)
+      const waveMin = World.BREEDER_WAVE_MIN_TICKS * this.diff.waveIntervalMult;
+      const waveMax = World.BREEDER_WAVE_MAX_TICKS * this.diff.waveIntervalMult;
+      this.nextBreederWaveInterval = Math.round(waveMin + Math.random() * (waveMax - waveMin));
       
-      // Spawn 2-3 breeders at random locations
-      const campsThisWave = 2 + Math.floor(Math.random() * 2);
+      // Spawn breeders at random locations (count scales with difficulty)
+      const [campMin, campMax] = this.diff.campsPerWave;
+      const campsThisWave = campMin + Math.floor(Math.random() * (campMax - campMin + 1));
       let spawnedCount = 0;
       for (let i = 0; i < campsThisWave; i++) {
         const pos = this.randomPosOutsideAdoptionZone();
@@ -2212,8 +2399,8 @@ export class World {
       }
       
       const ticksAlive = this.tick - camp.spawnTick;
-      // Check every BREEDER_GROWTH_TICKS (level doesn't slow growth anymore - breeders are aggressive!)
-      const growthThreshold = World.BREEDER_GROWTH_TICKS;
+      // Check every BREEDER_GROWTH_TICKS, scaled by difficulty (easy = slower growth, mills form less readily).
+      const growthThreshold = Math.round(World.BREEDER_GROWTH_TICKS * this.diff.growthTicksMult);
       
       if (ticksAlive >= growthThreshold) {
         const newLevel = camp.level + 1;
@@ -2322,9 +2509,10 @@ export class World {
     
     // Breeder shelters spawn wild strays that are harder to catch
     for (const [shelterId, shelter] of this.breederShelters.entries()) {
-      // Grow the shelter over time
+      // Grow the shelter over time (slower on easy so mills stay weaker)
       if (shelter.level < World.MAX_BREEDER_LEVEL) {
-        const growthCheck = this.tick % (World.BREEDER_GROWTH_TICKS * 2) === 0;
+        const millGrowthInterval = Math.max(1, Math.round(World.BREEDER_GROWTH_TICKS * 2 * this.diff.growthTicksMult));
+        const growthCheck = this.tick % millGrowthInterval === 0;
         if (growthCheck) {
           shelter.level++;
           shelter.size += 20;
@@ -2395,7 +2583,6 @@ export class World {
         if (this.eliminatedPlayerIds.has(p.id)) continue;
         if (this.pendingBreederMiniGames.has(p.id)) continue;
         if (this.cpuAtBreeder.has(p.id) || this.pendingCpuBreederCompletions.has(p.id)) continue;
-        if (p.id.startsWith('cpu-')) continue; // CPUs don't start mill minigame from van (they use camps)
         if (!this.hasShelter(p.id)) continue; // Shelter required before stopping breeder mills
         // Skip if player is on retreat cooldown (just retreated from a camp/mill)
         const millRetreatEnd = this.retreatCooldownUntilTick.get(p.id) ?? 0;
@@ -2403,6 +2590,31 @@ export class World {
         const d2 = distSq(p.x, p.y, breederShelter.x, breederShelter.y);
         const combatR = VAN_FIXED_RADIUS + bsr;
         if (d2 > combatR * combatR) continue;
+
+        // CPUs: no human minigame UI — auto-complete when parked on mill (must be hunting camps)
+        if (p.id.startsWith('cpu-')) {
+          if (!this.cpuHuntsCamps()) continue;
+          const cpuRt = this.playerMoney.get(p.id) ?? 0;
+          const cost = World.estimatedBreederRtCost(breederShelter.level, petCount);
+          if (cpuRt < cost) {
+            // Can't afford — brief cooldown so AI finds something else instead of stuck on mill
+            this.cpuBreederCooldown.set(p.id, now + TICK_RATE * 30);
+            const cpuTarget = this.cpuTargets.get(p.id);
+            if (cpuTarget?.millShelterId === shelterId) this.cpuTargets.delete(p.id);
+            log(`CPU ${p.displayName} can't afford level ${breederShelter.level} mill (need ${cost} RT, have ${cpuRt}) - cooldown 30s`);
+            continue;
+          }
+          this.millInCombat.add(shelterId);
+          this.activeMillByPlayer.set(p.id, shelterId);
+          this.playerMoney.set(p.id, cpuRt - cost);
+          // Full rescue → destroys mill via completeBreederMiniGame (same path as human 100% win)
+          this.completeBreederMiniGame(p.id, petCount, petCount, breederShelter.level);
+          const cpuTarget = this.cpuTargets.get(p.id);
+          if (cpuTarget?.millShelterId === shelterId) this.cpuTargets.delete(p.id);
+          log(`CPU ${p.displayName} auto-cleared mill ${shelterId} (lv${breederShelter.level}, ${petCount} pets, -${cost} RT)`);
+          break; // one van per mill
+        }
+
         this.millInCombat.add(shelterId);
         this.activeMillByPlayer.set(p.id, shelterId);
         this.pendingBreederMiniGames.set(p.id, {
@@ -3258,6 +3470,21 @@ export class World {
     // If running, use current time
     return Date.now() - this.matchStartTime - this.pausedDurationMs;
   }
+
+  /** Current server tick. Cheap accessor — avoids building a full snapshot just to read the tick. */
+  getTick(): number {
+    return this.tick;
+  }
+
+  /** All player ids (humans + bots). Cheap accessor — avoids a full snapshot build to enumerate. */
+  getPlayerIds(): string[] {
+    return Array.from(this.players.keys());
+  }
+
+  /** Display name for a player id, or undefined. Cheap accessor (no full snapshot build). */
+  getDisplayName(playerId: string): string | undefined {
+    return this.players.get(playerId)?.displayName;
+  }
   
   /** Deduct tokens from a player (for breeder mini-game food purchases) */
   deductTokens(playerId: string, amount: number): boolean {
@@ -3509,6 +3736,11 @@ export class World {
   isMatchProcessed(): boolean {
     return this.matchProcessed;
   }
+
+  /** True when the match ended by clearing all 5 boss hutches. */
+  isBossFullClear(): boolean {
+    return this.bossFullClear;
+  }
   
   /** Mark match as processed so we don't double-deposit inventory */
   markMatchProcessed(): void {
@@ -3607,7 +3839,7 @@ export class World {
       const x = mallX + Math.cos(angle) * BOSS_PETMALL_RADIUS;
       const y = mallY + Math.sin(angle) * BOSS_PETMALL_RADIUS;
       const petType = millTypes[i];
-      const petCount = BOSS_MILL_PET_COUNTS[petType] ?? 5;
+      const petCount = this.bossMillPetCount(petType);
       const recipePerPet = BOSS_MILL_RECIPES[petType] ?? {};
       
       // Calculate total recipe (per pet * pet count)
@@ -3633,7 +3865,7 @@ export class World {
     this.bossMode = {
       active: true,
       startTick: this.tick,
-      timeLimit: BOSS_MODE_TIME_LIMIT_TICKS,
+      timeLimit: this.bossTimeLimitTicks(),
       mills,
       tycoonX: mallX,
       tycoonY: mallY,
@@ -3881,13 +4113,13 @@ export class World {
 
   /** Update the Breeder Tycoon patrol behavior */
   private updateTycoonPatrol(): void {
-    if (!this.bossMode) return;
+    if (!this.bossMode?.active) return;
     const bm = this.bossMode;
 
     // Handle active rebuild: tycoon stays at mill and rebuilds it
     if (bm.rebuildingMill >= 0) {
       const rebuildElapsed = this.tick - bm.rebuildStartTick;
-      if (rebuildElapsed >= BOSS_TYCOON_REBUILD_TICKS) {
+      if (rebuildElapsed >= this.bossRebuildTicks(bm.millsCleared)) {
         // Rebuild complete - restore the mill
         const mill = bm.mills[bm.rebuildingMill];
         if (mill && mill.completed) {
@@ -3929,10 +4161,11 @@ export class World {
       const dy = targetMill.y - bm.tycoonY;
       const d = Math.hypot(dx, dy);
       
-      if (d > BOSS_TYCOON_SPEED) {
+      const tycoonSpeed = this.bossTycoonSpeed();
+      if (d > tycoonSpeed) {
         // Move toward target
-        bm.tycoonX += (dx / d) * BOSS_TYCOON_SPEED;
-        bm.tycoonY += (dy / d) * BOSS_TYCOON_SPEED;
+        bm.tycoonX += (dx / d) * tycoonSpeed;
+        bm.tycoonY += (dy / d) * tycoonSpeed;
       } else {
         // Arrived at mill
         bm.tycoonX = targetMill.x;
@@ -3998,6 +4231,46 @@ export class World {
     log(`${caughtPlayers.length} player(s) caught by tycoon at mill ${mill.id}, lost ${BOSS_CAUGHT_PENALTY * 100}% ingredients`);
   }
 
+  /** Force the match to end when the hard time cap is reached. Winner = current standings. */
+  private endMatchOnTimeLimit(): void {
+    if (this.matchEndedEarly) return;
+    // If boss mode is running, resolve it through its own path (awards partial-clear rewards).
+    if (this.bossMode?.active) {
+      this.endBossMode(this.bossMode.millsCleared >= 5);
+      return;
+    }
+    this.matchEndedEarly = true;
+    this.matchEndAt = this.tick;
+
+    // Winner by most adoptions (team-aware for teams mode) — mirrors the boss-mode end path.
+    if (this.matchMode === 'teams') {
+      const redScore = this.teamScores.get('red') ?? 0;
+      const blueScore = this.teamScores.get('blue') ?? 0;
+      this.winningTeam = redScore >= blueScore ? 'red' : 'blue';
+      let winnerId: string | null = null;
+      let maxAdoptions = -1;
+      for (const p of this.players.values()) {
+        if (this.playerTeams.get(p.id) === this.winningTeam && p.totalAdoptions > maxAdoptions) {
+          maxAdoptions = p.totalAdoptions;
+          winnerId = p.id;
+        }
+      }
+      this.winnerId = winnerId;
+    } else {
+      let winnerId: string | null = null;
+      let maxAdoptions = -1;
+      for (const p of this.players.values()) {
+        if (p.totalAdoptions > maxAdoptions) {
+          maxAdoptions = p.totalAdoptions;
+          winnerId = p.id;
+        }
+      }
+      this.winnerId = winnerId;
+    }
+    this.pendingAnnouncements.push("Time's up! The match has reached its time limit.");
+    log(`Match end: hit ${World.MAX_MATCH_TICKS}-tick time cap. Winner: ${this.winnerId ?? 'none'}`);
+  }
+
   /** End boss mode with victory or timeout */
   private endBossMode(victory: boolean): void {
     if (!this.bossMode) return;
@@ -4042,18 +4315,30 @@ export class World {
         }
         this.winnerId = winnerId;
       } else {
+        // Prefer a human so a bot with more adoptions does not take the win screen.
+        const isHuman = (id: string) => !id.startsWith('cpu-') && !id.startsWith('cpu_');
         let winnerId: string | null = null;
-        let maxAdoptions = 0;
+        let maxAdoptions = -1;
         for (const p of this.players.values()) {
+          if (!isHuman(p.id)) continue;
           if (p.totalAdoptions > maxAdoptions) {
             maxAdoptions = p.totalAdoptions;
             winnerId = p.id;
+          }
+        }
+        if (!winnerId) {
+          for (const p of this.players.values()) {
+            if (p.totalAdoptions > maxAdoptions) {
+              maxAdoptions = p.totalAdoptions;
+              winnerId = p.id;
+            }
           }
         }
         this.winnerId = winnerId;
       }
 
       if (victory) {
+        this.bossFullClear = true;
         this.pendingAnnouncements.push(`VICTORY! All pets rescued from the PetMall! Bonus: ${rtBonus} RT + 1 Karma Point!`);
         log(`Boss Mode ended with FULL VICTORY. Awarded ${rtBonus} RT + 1 KP`);
       } else {
@@ -4129,7 +4414,7 @@ export class World {
     const actualAmount = Math.min(amount, remaining);
     
     // Check cost
-    const costPer = BOSS_INGREDIENT_COSTS[ingredient] ?? 10;
+    const costPer = this.bossIngredientCost(ingredient);
     const totalCost = costPer * actualAmount;
     const playerMoney = this.getPlayerMoney(playerId);
     
@@ -4206,6 +4491,12 @@ export class World {
     const millName = BOSS_MILL_NAMES[mill.petType] ?? 'Mill';
     this.pendingAnnouncements.push(`${millName} cleared! (${this.bossMode.millsCleared}/5)`);
     log(`Player ${playerId} cleared mill ${millId} (${millName}). Total cleared: ${this.bossMode.millsCleared}/5. Bonus RT: ${rtBonus}`);
+
+    // End on this tick. Waiting for the next tick let a rebuild steal the 5th clear,
+    // and the win snapshot could miss the same broadcast as the hutch announcement.
+    if (kpAwarded) {
+      this.endBossMode(true);
+    }
     
     return { success: true, message: `${millName} rescued!`, rtBonus, kpAwarded };
   }
@@ -4323,6 +4614,7 @@ export class World {
       adoptionEventIdSeq: this.adoptionEventIdSeq,
       nextAdoptionEventSpawnTick: this.nextAdoptionEventSpawnTick,
       matchMode: this.matchMode,
+      difficulty: this.difficulty,
       bossMode: this.bossMode,
       playerTeams: Array.from(this.playerTeams.entries()),
       teamScores: Array.from(this.teamScores.entries()),
@@ -4434,6 +4726,7 @@ export class World {
     w.adoptionEventIdSeq = state.adoptionEventIdSeq;
     w.nextAdoptionEventSpawnTick = state.nextAdoptionEventSpawnTick;
     w.matchMode = (state as { matchMode?: 'ffa' | 'solo' | 'teams' }).matchMode ?? 'ffa';
+    w.setDifficulty((state as { difficulty?: Difficulty }).difficulty ?? 'medium');
     const rawBoss = (state as { bossMode?: any }).bossMode ?? null;
     if (rawBoss) {
       // Rehydrate Maps that were serialized as plain objects/arrays

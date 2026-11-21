@@ -43,6 +43,16 @@
     .top-bar .settings-btn { background: none; border: none; color: rgba(255,255,255,0.8); font-size: 18px; cursor: pointer; padding: 0 4px; }
     .top-bar .settings-btn:hover { color: #7bed9f; }
     .top-bar .ping-display { font: 600 10px Rubik, sans-serif; color: rgba(255,255,255,0.7); margin-left: 4px; }
+    .objective-hud {
+      position: absolute; top: 52px; left: 50%; transform: translateX(-50%);
+      max-width: min(92vw, 520px); padding: 5px 14px;
+      font: 600 12px/1.35 Rubik, sans-serif; color: rgba(255,255,255,0.88);
+      text-align: center; letter-spacing: 0.02em;
+      background: rgba(22,26,38,0.55); border: 1px solid rgba(123,237,159,0.25);
+      border-radius: 8px; pointer-events: none; z-index: 20;
+      text-shadow: 0 1px 4px rgba(0,0,0,0.45);
+    }
+    .objective-hud.hidden { display: none; }
     .switch-server { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: rgba(35,42,60,0.98); border: 2px solid #ff6b6b; border-radius: 12px; padding: 14px 20px; z-index: 55; text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
     .switch-server.hidden { display: none; }
     .switch-server p { font: 600 14px Rubik, sans-serif; color: #fff; margin-bottom: 10px; }
@@ -322,12 +332,13 @@
     }
     .game-tokens { font: 700 14px Rubik, sans-serif; color: #ffd93d; margin-left: 12px; }
     #leaderboard {
-      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
       background: linear-gradient(145deg, rgba(35,42,60,0.98), rgba(25,30,45,0.98));
       border: 2px solid rgba(255,255,255,0.2); border-radius: 16px; padding: 28px 32px;
       font: 600 16px Rubik, sans-serif; color: #fff; display: none; min-width: 340px; max-width: 90%;
+      max-height: 85vh; overflow-y: auto;
       box-shadow: 0 12px 40px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.08);
-      z-index: 80; pointer-events: auto;
+      z-index: 4000; pointer-events: auto;
     }
     #leaderboard.show { display: block; }
     #leaderboard strong { display: block; margin-bottom: 16px; font-size: 20px; color: #7bed9f; }
@@ -700,6 +711,19 @@
     .game-mode-center .mode-option.selected { border-color: #7bed9f; background: rgba(123,237,159,0.15); color: #7bed9f; }
     .solo-options { margin-top: 12px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 8px; }
     .solo-options.hidden { display: none; }
+    .difficulty-options { margin-top: 12px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 8px; }
+    .difficulty-options.hidden { display: none; }
+    .difficulty-title { font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.8); margin-bottom: 8px; text-align: center; }
+    .difficulty-buttons { display: flex; gap: 8px; justify-content: center; }
+    .difficulty-option {
+      flex: 1; padding: 8px 10px; font: 600 12px Rubik, sans-serif; color: rgba(255,255,255,0.9);
+      background: rgba(0,0,0,0.3); border: 2px solid rgba(255,255,255,0.2); border-radius: 8px; cursor: pointer;
+    }
+    .difficulty-option:hover { border-color: rgba(255,255,255,0.4); }
+    .difficulty-option.selected { border-color: #7bed9f; background: rgba(123,237,159,0.15); color: #7bed9f; }
+    .difficulty-desc { font: 400 11px Rubik, sans-serif; color: rgba(255,255,255,0.7); line-height: 1.4; margin-top: 8px; text-align: center; min-height: 30px; }
+    .difficulty-note { margin-top: 12px; padding: 8px 10px; background: rgba(0,0,0,0.2); border-radius: 8px; font: 400 11px Rubik, sans-serif; color: rgba(255,255,255,0.7); text-align: center; }
+    .difficulty-note.hidden { display: none; }
     .solo-option-label { font: 400 12px Rubik, sans-serif; color: rgba(255,255,255,0.85); cursor: pointer; display: flex; align-items: center; gap: 8px; }
     .solo-option-label input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
     .howto-text { font: 400 12px Rubik, sans-serif; color: rgba(255,255,255,0.85); line-height: 1.5; margin: 0 0 10px 0; }
@@ -933,7 +957,6 @@
         <a href="contact.html">Contact</a>
         <a href="privacy-settings.html">Privacy settings</a>
         <a href="https://iogames.party/">IO Party</a>
-        <a href="https://iogames.space/games/adoptario">IO Space</a>
       </nav>
     </header>
     <main class="landing-main">
@@ -1059,6 +1082,16 @@
             <button type="button" class="mode-option" data-mode="teams">Teams</button>
             <button type="button" class="mode-option" data-mode="solo">Solo / vs CPU</button>
           </div>
+          <div id="difficulty-options" class="difficulty-options hidden">
+            <div class="difficulty-title">Difficulty</div>
+            <div class="difficulty-buttons">
+              <button type="button" class="difficulty-option" data-difficulty="easy">Easy</button>
+              <button type="button" class="difficulty-option selected" data-difficulty="medium">Medium</button>
+              <button type="button" class="difficulty-option" data-difficulty="hard">Hard</button>
+            </div>
+            <div id="difficulty-desc" class="difficulty-desc"></div>
+          </div>
+          <div id="difficulty-note" class="difficulty-note hidden">Difficulty rotates each match (Easy / Medium / Hard) so no two games are the same.</div>
           <div id="solo-options" class="solo-options hidden">
             <label class="solo-option-label">
               <input type="checkbox" id="cpu-shutdown-breeders" checked />
@@ -1081,6 +1114,7 @@
         <div class="howto-section" style="margin-top:20px; text-align:left; max-width:360px;">
           <h3 style="font: 700 14px Rubik, sans-serif; color: #7bed9f; margin-bottom: 12px;">How To Play</h3>
           <p class="howto-text">Drive your <strong>van</strong> to rescue strays. Bring them to the <strong>Adoption Center</strong> (green zone) to adopt out, earn <strong>5 RT each</strong>. Rescue all the strays to win.</p>
+          <p class="howto-text">Clearing the map (camps, mills, and outdoor strays) starts <strong>Boss Mode</strong> at PetMall.</p>
           <p class="howto-text">Drive out <strong>Breeders</strong> by better feeding their pets. <strong>Don't let the breeders setup a Mill and release wandering strays</strong>! If breeders reach 2,000 strays the match is over.</p>
           <p class="howto-text">Build a <strong>shelter</strong> (250 RT), then buy an <strong>Adoption Center</strong> (250 RT) to adopt at your shelter for only 2RT each. Add <strong>Advertising and Gravity</strong> (200 and 300 RT) to pull strays.</p>
           <p class="howto-text">Press <span class="key">E</span> for build menu.</p>
@@ -1237,6 +1271,7 @@
       <div id="auth-area"></div>
       <button type="button" id="settings-btn" class="settings-btn" title="Settings" aria-label="Settings">&#9881;</button>
     </div>
+    <div id="objective-hud" class="objective-hud hidden"></div>
     <div id="settings-panel" class="settings-panel hidden">
       <h3>Settings</h3>
       <div class="settings-slider-row">
@@ -1260,8 +1295,8 @@
       </select>
       <label for="fps-select">Frame rate</label>
       <select id="fps-select" class="settings-fps-select" aria-label="Frame rate">
-        <option value="30">30 FPS</option>
         <option value="60">60 FPS</option>
+        <option value="30">30 FPS</option>
       </select>
       <div style="display:flex; gap:8px; margin-top:12px;">
         <button type="button" id="exit-to-lobby-btn" class="settings-exit-lobby">Exit to lobby</button>
@@ -1476,7 +1511,7 @@
         <p>Drive your <strong>van</strong> to rescue strays. Bring them to the central <strong>Adoption Center</strong> or build your own shelter!</p>
         <p>Press <strong>E</strong> for Build Menu: shelter (250 RT), adoption center (250 RT), gravity (300 RT), and more!</p>
         <p>Deliver pets to your shelter, and if it has an adoption center, it will adopt them automatically.</p>
-        <p>First shelter to reach <strong>51% domination</strong> wins!</p>
+        <p>Rescue strays → adopt for <strong>RT</strong> → build a <strong>shelter</strong> to shut breeder camps before they become mills. Clear the map (camps, mills, outdoor strays) to start <strong>Boss Mode</strong> at PetMall. Lose if outdoor strays reach <strong>2000</strong>.</p>
         <div class="htp-controls">
           <h4>Controls</h4>
           <p>
@@ -1504,6 +1539,12 @@
     </div>
   </div>
   
+  <!-- Final stray hunt: shown when breeders are gone and few strays remain -->
+    <div id="final-hunt-banner" class="final-hunt-banner hidden">
+    <div class="final-hunt-title">ALMOST THERE!</div>
+    <div class="final-hunt-msg" id="final-hunt-msg">Find the last strays — clear them to start Boss Mode!</div>
+  </div>
+
   <!-- Boss Mode Timer Overlay -->
   <div id="boss-mode-timer" class="boss-mode-timer hidden">
     <div class="boss-timer-content">
@@ -1547,6 +1588,38 @@
   </div>
   
   <style>
+    /* Final stray-hunt banner (breeders cleared, few strays left) */
+    .final-hunt-banner {
+      position: fixed;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      text-align: center;
+      background: linear-gradient(135deg, rgba(20, 90, 50, 0.92), rgba(10, 50, 30, 0.95));
+      border: 2px solid #7bed9f;
+      border-radius: 12px;
+      padding: 10px 22px;
+      z-index: 100;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45), 0 0 18px rgba(123, 237, 159, 0.25);
+      pointer-events: none;
+      animation: final-hunt-pulse 1.6s ease-in-out infinite;
+    }
+    .final-hunt-banner.hidden { display: none; }
+    .final-hunt-title {
+      color: #7bed9f;
+      font: 700 13px Rubik, sans-serif;
+      letter-spacing: 2px;
+      margin-bottom: 2px;
+    }
+    .final-hunt-msg {
+      color: #fff;
+      font: 600 15px Rubik, sans-serif;
+    }
+    @keyframes final-hunt-pulse {
+      0%, 100% { box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45), 0 0 12px rgba(123, 237, 159, 0.2); }
+      50% { box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5), 0 0 22px rgba(123, 237, 159, 0.45); }
+    }
+
     /* Boss Mode Timer Overlay Styles */
     .boss-mode-timer {
       position: fixed;

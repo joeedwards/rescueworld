@@ -271,3 +271,146 @@ export function getWindMultiplier(tick: number): number {
   const t = hash - Math.floor(hash); // 0..1
   return FALL_WIND_MIN + t * (FALL_WIND_MAX - FALL_WIND_MIN);
 }
+
+// ============================================
+// DIFFICULTY CONSTANTS
+// ============================================
+
+/** Game difficulty. Solo players pick this; FFA/Teams/bot matches auto-rotate it. */
+export type Difficulty = 'easy' | 'medium' | 'hard';
+
+export const DIFFICULTIES: Difficulty[] = ['easy', 'medium', 'hard'];
+
+/** Runtime guard: coerce an arbitrary value into a valid Difficulty (defaults to medium). */
+export function normalizeDifficulty(value: unknown): Difficulty {
+  return value === 'easy' || value === 'medium' || value === 'hard' ? value : 'medium';
+}
+
+/** Per-bot skill knobs derived from difficulty. Consumed by generateBotProfile(). */
+export interface DifficultyBotConfig {
+  /** Hesitation rate range [min, max] — chance per tick to stand still (lower = better). */
+  hesitation: [number, number];
+  /** Optimal-targeting range [min, max] — how often the bot picks the nearest target (higher = better). */
+  targeting: [number, number];
+  /** Exponent applied to Math.random() for starting RT skew (higher = skewed lower / poorer). */
+  rtSkew: number;
+  /** Probability the bot builds a shelter. */
+  shelterProb: number;
+  /** Probability the bot participates in boss mode. */
+  bossProb: number;
+  /** 0-1 strength of pre-match boosts (size/speed/ports/adopt-speed). */
+  boostLevel: number;
+  /** Whether bots actively hunt and shut down breeder camps. */
+  huntCamps: boolean;
+}
+
+/** Per-match world + bot tuning for each difficulty. */
+export interface DifficultyConfig {
+  /** Breeder camps spawned per wave, [min, max] inclusive. */
+  campsPerWave: [number, number];
+  /** Multiplier on the interval between breeder waves (>1 = slower/easier). */
+  waveIntervalMult: number;
+  /** Multiplier on the delay before the first wave (>1 = longer grace / easier). */
+  firstWaveDelayMult: number;
+  /** Multiplier on camp->mill growth ticks (>1 = mills form more slowly / easier). */
+  growthTicksMult: number;
+  /** Camp level advances by 1 every this many waves (higher = slower escalation / easier). */
+  levelAdvanceEveryWaves: number;
+  /** Boss mode scaling. */
+  boss: {
+    /** Multiplier on the boss time limit (>1 = more time / easier). */
+    timeMult: number;
+    /** Multiplier on tycoon patrol speed (<1 = slower / easier). */
+    tycoonSpeedMult: number;
+    /** Multiplier on tycoon detection radius (<1 = smaller / easier). */
+    detectionMult: number;
+    /** Multiplier on ingredient RT costs (<1 = cheaper / easier). */
+    ingredientCostMult: number;
+    /** Multiplier on pets required per mill (<1 = fewer / easier). */
+    petCountMult: number;
+    /** Multiplier on tycoon mill rebuild time (>1 = slower rebuild / easier). */
+    rebuildMult: number;
+  };
+  /** Bot skill knobs. */
+  bot: DifficultyBotConfig;
+}
+
+/**
+ * Difficulty tuning table.
+ * Easy: fewer/slower camps, mills form slowly, weak boss, weak bots.
+ * Hard: more/faster camps, mills form readily, aggressive boss, bots that can genuinely win.
+ */
+export const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
+  easy: {
+    campsPerWave: [1, 2],
+    waveIntervalMult: 1.5,
+    firstWaveDelayMult: 2.0,
+    growthTicksMult: 1.8,
+    levelAdvanceEveryWaves: 3,
+    boss: {
+      timeMult: 1.4,
+      tycoonSpeedMult: 0.7,
+      detectionMult: 0.7,
+      ingredientCostMult: 0.6,
+      petCountMult: 0.7,
+      rebuildMult: 1.6,
+    },
+    bot: {
+      hesitation: [0.02, 0.05],
+      targeting: [0.25, 0.55],
+      rtSkew: 3,
+      shelterProb: 0.55,
+      bossProb: 0.25,
+      boostLevel: 0.2,
+      huntCamps: true,
+    },
+  },
+  medium: {
+    campsPerWave: [2, 3],
+    waveIntervalMult: 1.0,
+    firstWaveDelayMult: 1.0,
+    growthTicksMult: 1.0,
+    levelAdvanceEveryWaves: 2,
+    boss: {
+      timeMult: 1.0,
+      tycoonSpeedMult: 1.0,
+      detectionMult: 1.0,
+      ingredientCostMult: 1.0,
+      petCountMult: 1.0,
+      rebuildMult: 1.0,
+    },
+    bot: {
+      hesitation: [0.008, 0.03],
+      targeting: [0.5, 0.8],
+      rtSkew: 2,
+      shelterProb: 0.7,
+      bossProb: 0.5,
+      boostLevel: 0.5,
+      huntCamps: true,
+    },
+  },
+  hard: {
+    campsPerWave: [3, 4],
+    waveIntervalMult: 0.7,
+    firstWaveDelayMult: 0.6,
+    growthTicksMult: 0.7,
+    levelAdvanceEveryWaves: 1,
+    boss: {
+      timeMult: 0.8,
+      tycoonSpeedMult: 1.3,
+      detectionMult: 1.25,
+      ingredientCostMult: 1.25,
+      petCountMult: 1.2,
+      rebuildMult: 0.7,
+    },
+    bot: {
+      hesitation: [0.0, 0.008],
+      targeting: [0.9, 0.98],
+      rtSkew: 1,
+      shelterProb: 1.0,
+      bossProb: 1.0,
+      boostLevel: 1.0,
+      huntCamps: true,
+    },
+  },
+};

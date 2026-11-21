@@ -1,0 +1,911 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <meta name="theme-color" content="#173a2b">
+  <title>Adoptar.io — Rescue on the Run</title>
+  <style>
+    :root {
+      color-scheme: only light;
+      --ink: #173a2b;
+      --cream: #fff8e8;
+      --green: #37c978;
+      --dark-green: #168c52;
+      --coral: #ff715d;
+      --yellow: #ffd34d;
+      --blue: #4b9cff;
+      --cta-w: clamp(136px, 21vw, 205px);
+    }
+
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body {
+      display: grid;
+      place-items: center;
+      background: #10291e;
+      color: var(--ink);
+      font-family: ui-rounded, "Arial Rounded MT Bold", "Trebuchet MS", system-ui, sans-serif;
+      overscroll-behavior: none;
+    }
+
+    button, a { font: inherit; }
+    button:focus-visible, a:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
+
+    #creative {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      max-width: 970px;
+      max-height: 250px;
+      min-width: 320px;
+      min-height: 90px;
+      overflow: hidden;
+      isolation: isolate;
+      background: #9edc89;
+      box-shadow: 0 10px 40px rgb(0 0 0 / 35%);
+      user-select: none;
+    }
+
+    #stage {
+      position: absolute;
+      inset: 0 var(--cta-w) 0 0;
+      overflow: hidden;
+      touch-action: manipulation;
+    }
+
+    #game {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+      touch-action: manipulation;
+    }
+
+    .hud {
+      position: absolute;
+      z-index: 3;
+      inset: 8px 9px auto 9px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      pointer-events: none;
+    }
+
+    .logo {
+      color: #fff;
+      font-size: clamp(16px, 2.4vw, 25px);
+      font-weight: 1000;
+      letter-spacing: -1px;
+      line-height: 1;
+      text-shadow: 0 2px 0 #17633f, 0 3px 8px rgb(0 0 0 / 20%);
+      white-space: nowrap;
+    }
+
+    .logo b { color: var(--yellow); }
+    .pill {
+      display: inline-flex;
+      min-width: 0;
+      align-items: center;
+      gap: 4px;
+      padding: 5px 8px;
+      border: 1px solid rgb(255 255 255 / 80%);
+      border-radius: 99px;
+      background: rgb(255 248 232 / 94%);
+      box-shadow: 0 2px 0 rgb(25 82 51 / 22%);
+      font-size: clamp(11px, 1.55vw, 15px);
+      font-weight: 950;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .instruction {
+      margin-left: auto;
+      overflow: hidden;
+      color: #fff;
+      font-size: clamp(11px, 1.55vw, 15px);
+      font-weight: 950;
+      text-overflow: ellipsis;
+      text-shadow: 0 2px 3px rgb(0 0 0 / 40%);
+      white-space: nowrap;
+    }
+
+    #pause {
+      position: absolute;
+      z-index: 5;
+      right: 7px;
+      bottom: 7px;
+      width: 30px;
+      height: 30px;
+      padding: 0;
+      border: 1px solid rgb(255 255 255 / 75%);
+      border-radius: 50%;
+      background: rgb(23 58 43 / 82%);
+      color: #fff;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 1000;
+    }
+
+    #pause[hidden] { display: none; }
+
+    #message {
+      position: absolute;
+      z-index: 4;
+      left: 50%;
+      top: 50%;
+      max-width: 78%;
+      padding: 8px 14px;
+      transform: translate(-50%, -50%);
+      border: 2px solid rgb(255 255 255 / 80%);
+      border-radius: 12px;
+      background: rgb(23 58 43 / 92%);
+      color: #fff;
+      box-shadow: 0 5px 0 rgb(0 0 0 / 18%);
+      font-size: clamp(12px, 1.8vw, 18px);
+      font-weight: 950;
+      line-height: 1.1;
+      text-align: center;
+      pointer-events: none;
+      transition: opacity 150ms ease, transform 150ms ease;
+    }
+
+    #message[hidden] { display: none; }
+
+    #endcard {
+      position: absolute;
+      z-index: 6;
+      inset: 0;
+      display: grid;
+      grid-template-columns: auto minmax(92px, 34%);
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      background: linear-gradient(110deg, rgb(23 58 43 / 96%), rgb(22 140 82 / 94%));
+      color: #fff;
+    }
+
+    #endcard[hidden] { display: none; }
+    .end-copy { min-width: 0; text-align: center; }
+    .end-copy strong {
+      display: block;
+      color: var(--yellow);
+      font-size: clamp(18px, 3vw, 31px);
+      line-height: 1;
+    }
+    .end-copy span { display: block; margin-top: 5px; font-size: clamp(11px, 1.5vw, 15px); font-weight: 850; }
+    #replay {
+      min-height: 40px;
+      border: 2px solid #fff;
+      border-radius: 999px;
+      background: var(--cream);
+      color: var(--ink);
+      cursor: pointer;
+      font-size: clamp(12px, 1.5vw, 16px);
+      font-weight: 1000;
+    }
+
+    #cta-panel {
+      position: absolute;
+      z-index: 10;
+      inset: 0 0 0 auto;
+      display: flex;
+      width: var(--cta-w);
+      flex-direction: column;
+      align-items: stretch;
+      justify-content: center;
+      gap: 9px;
+      padding: 12px;
+      border-left: 3px solid rgb(255 255 255 / 55%);
+      background: linear-gradient(160deg, #173a2b, #146c45);
+      color: #fff;
+      text-align: center;
+    }
+
+    .cta-paw {
+      font-size: clamp(19px, 3.2vw, 32px);
+      line-height: 1;
+    }
+    .cta-title {
+      font-size: clamp(15px, 2.3vw, 24px);
+      font-weight: 1000;
+      letter-spacing: -.6px;
+      line-height: .95;
+    }
+    .cta-sub {
+      color: #d8ffe9;
+      font-size: clamp(10px, 1.25vw, 13px);
+      font-weight: 800;
+      line-height: 1.1;
+    }
+    #cta {
+      display: grid;
+      min-height: 42px;
+      place-items: center;
+      padding: 8px 10px;
+      border: 2px solid #fff;
+      border-radius: 999px;
+      background: var(--coral);
+      color: #fff;
+      box-shadow: 0 4px 0 #9e382e;
+      font-size: clamp(13px, 1.8vw, 18px);
+      font-weight: 1000;
+      line-height: 1;
+      text-decoration: none;
+      transition: transform 120ms ease;
+    }
+    #cta:hover, #cta:focus { transform: translateY(-1px); }
+
+    #live {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
+
+    @media (max-height: 125px) {
+      :root { --cta-w: clamp(128px, 20vw, 155px); }
+      .hud { inset: 4px 5px auto 6px; gap: 4px; }
+      .logo { font-size: 15px; }
+      .pill { padding: 3px 6px; font-size: 10px; }
+      .instruction { font-size: 10px; }
+      #pause { right: 5px; bottom: 4px; width: 24px; height: 24px; font-size: 11px; }
+      #message { padding: 5px 10px; border-radius: 9px; font-size: 11px; }
+      #cta-panel { gap: 4px; padding: 6px 8px; }
+      .cta-paw { display: none; }
+      .cta-title { font-size: 16px; }
+      .cta-sub { font-size: 9px; }
+      #cta { min-height: 31px; padding: 5px 7px; border-width: 1px; box-shadow: 0 3px 0 #9e382e; font-size: 12px; }
+      #endcard { padding: 7px 9px; }
+      .end-copy strong { font-size: 18px; }
+      .end-copy span { margin-top: 2px; font-size: 10px; }
+      #replay { min-height: 31px; font-size: 11px; }
+    }
+
+    @media (max-width: 560px) {
+      :root { --cta-w: 126px; }
+      .instruction { display: none; }
+      .pill.optional { display: none; }
+      .cta-sub { display: none; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main id="creative" aria-label="Adoptar.io horizontal playable ad">
+    <section id="stage" aria-label="Rescue game. Tap pets to rescue them and red breeder threats to stop them.">
+      <canvas id="game" role="img" aria-label="A rescue van travels along a road as pets and breeder threats approach."></canvas>
+      <div class="hud" aria-hidden="true">
+        <div class="logo">Adoptar<b>.io</b></div>
+        <div class="pill">🐾 <span id="rescued">0</span></div>
+        <div class="pill">RT <span id="rt">0</span></div>
+        <div class="pill optional">WAVE <span id="wave">1</span>/3</div>
+        <div class="instruction" id="instruction">TAP PETS + STOP BREEDERS!</div>
+      </div>
+      <div id="message">Tap a pet to rescue!</div>
+      <button id="pause" type="button" aria-label="Pause game" title="Pause (P)">Ⅱ</button>
+      <div id="endcard" hidden>
+        <div class="end-copy">
+          <strong id="end-title">Forever homes found!</strong>
+          <span id="end-detail">0 pets rescued • 0 RT earned</span>
+        </div>
+        <button id="replay" type="button">↻ Replay</button>
+      </div>
+      <div id="live" aria-live="polite"></div>
+    </section>
+
+    <aside id="cta-panel" aria-label="Play Adoptar.io">
+      <div class="cta-paw" aria-hidden="true">🐾</div>
+      <div class="cta-title">Rescue.<br>Adopt. Protect.</div>
+      <div class="cta-sub">Every pet deserves a forever home.</div>
+      <a id="cta" href="https://adoptar.io" target="_blank" rel="noopener noreferrer">PLAY NOW</a>
+    </aside>
+  </main>
+
+  <script>
+  (() => {
+    "use strict";
+
+    const CONFIG = Object.freeze({
+      destinationUrl: "https://adoptar.io",
+      fixedStepMs: 1000 / 60,
+      maxPlayMs: 24000,
+      targetTravelMs: 3600,
+      rtPerRescue: 5,
+      scorePerRescue: 100,
+      scorePerThreat: 150,
+      waves: [
+        { duration: 4300, targets: [["pet", 300, 0], ["pet", 1250, 1], ["pet", 2200, 0]] },
+        { duration: 4600, targets: [["pet", 250, 1], ["threat", 1100, 0], ["pet", 2050, 0]] },
+        { duration: 5400, targets: [["threat", 250, 0], ["pet", 850, 1], ["threat", 1500, 0], ["pet", 2200, 1], ["threat", 2850, 0], ["pet", 3500, 1]] }
+      ]
+    });
+
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+    const stage = document.getElementById("stage");
+    const message = document.getElementById("message");
+    const pauseButton = document.getElementById("pause");
+    const endcard = document.getElementById("endcard");
+    const replayButton = document.getElementById("replay");
+    const live = document.getElementById("live");
+    const rescuedEl = document.getElementById("rescued");
+    const rtEl = document.getElementById("rt");
+    const waveEl = document.getElementById("wave");
+    const instructionEl = document.getElementById("instruction");
+    const endTitle = document.getElementById("end-title");
+    const endDetail = document.getElementById("end-detail");
+    const cta = document.getElementById("cta");
+
+    let width = 1;
+    let height = 1;
+    let dpr = 1;
+    let accumulator = 0;
+    let lastFrame = 0;
+    let idCounter = 0;
+    let state;
+
+    const freshState = () => ({
+      phase: "ready",
+      wave: 0,
+      waveTime: 0,
+      elapsed: 0,
+      rescued: 0,
+      rt: 0,
+      score: 0,
+      threatsStopped: 0,
+      danger: 0,
+      dangerLabel: "CLEAR",
+      targets: [],
+      spawned: new Set(),
+      feedback: [],
+      paused: false,
+      autoPaused: false
+    });
+
+    function restart() {
+      state = freshState();
+      accumulator = 0;
+      idCounter = 0;
+      state.spawned.add("0:0");
+      spawnTarget("pet", CONFIG.waves[0].targets[0][2], 0);
+      message.hidden = false;
+      message.textContent = "Tap a pet to rescue!";
+      endcard.hidden = true;
+      pauseButton.hidden = false;
+      pauseButton.textContent = "Ⅱ";
+      pauseButton.setAttribute("aria-label", "Pause game");
+      updateHud();
+      announce("Ready. Tap a pet to rescue.");
+      render();
+    }
+
+    function start() {
+      if (state.phase !== "ready") return;
+      state.phase = "playing";
+      message.hidden = true;
+      announce("Wave 1. Rescue the pets.");
+    }
+
+    function spawnTarget(type, lane, scheduleIndex) {
+      const wave = state.wave;
+      state.targets.push({
+        id: ++idCounter,
+        type,
+        lane,
+        wave,
+        scheduleIndex,
+        age: 0,
+        x: 1.08,
+        hit: false
+      });
+    }
+
+    function fixedUpdate(ms) {
+      if (state.phase !== "playing" || state.paused) return;
+      state.elapsed += ms;
+      state.waveTime += ms;
+
+      const waveDef = CONFIG.waves[state.wave];
+      waveDef.targets.forEach((target, index) => {
+        const spawnKey = state.wave + ":" + index;
+        if (state.waveTime >= target[1] && !state.spawned.has(spawnKey)) {
+          state.spawned.add(spawnKey);
+          spawnTarget(target[0], target[2], index);
+        }
+      });
+
+      for (const target of state.targets) {
+        target.age += ms;
+        target.x = 1.08 - (target.age / CONFIG.targetTravelMs) * 1.02;
+        if (!target.hit && target.x <= 0.075) missTarget(target);
+      }
+      state.targets = state.targets.filter(target => !target.hit && target.x > -0.12);
+
+      for (const pop of state.feedback) pop.age += ms;
+      state.feedback = state.feedback.filter(pop => pop.age < 850);
+
+      const allSpawned = waveDef.targets.every((_, index) => state.spawned.has(state.wave + ":" + index));
+      if (state.waveTime >= waveDef.duration && allSpawned && !state.targets.length) nextWave();
+      if (state.elapsed >= CONFIG.maxPlayMs) finish(false, "TIME'S UP");
+    }
+
+    function hitTarget(target) {
+      if (!target || target.hit || state.phase === "complete" || state.phase === "failed") return false;
+      start();
+      target.hit = true;
+      if (target.type === "pet") {
+        state.rescued += 1;
+        state.rt += CONFIG.rtPerRescue;
+        state.score += CONFIG.scorePerRescue;
+        addFeedback(target.x, target.lane, "+5 RT", "#ffd34d");
+        announce("Pet rescued. Plus 5 Rescue Tokens.");
+      } else {
+        state.threatsStopped += 1;
+        state.score += CONFIG.scorePerThreat;
+        addFeedback(target.x, target.lane, "STOPPED!", "#ffffff");
+        announce("Breeder threat stopped.");
+      }
+      updateHud();
+      return true;
+    }
+
+    function missTarget(target) {
+      target.hit = true;
+      if (target.type === "threat") {
+        state.danger += 1;
+        state.dangerLabel = state.danger === 1 ? "CAMP" : state.danger === 2 ? "MILL" : "PET MALL";
+        addFeedback(0.14, target.lane, state.dangerLabel + "!", "#ff715d");
+        announce("Threat passed. " + state.dangerLabel + " formed.");
+        updateHud();
+        if (state.danger >= 3) finish(false, "PET MALL FORMED");
+      } else {
+        addFeedback(0.11, target.lane, "MISSED", "#ffffff");
+      }
+    }
+
+    function nextWave() {
+      if (state.wave >= CONFIG.waves.length - 1) {
+        finish(true, "FOREVER HOMES FOUND!");
+        return;
+      }
+      state.wave += 1;
+      state.waveTime = 0;
+      updateHud();
+      showMessage(state.wave === 1 ? "Wave 2 • Stop the camp!" : "Final wave • Stop all 3!", 900);
+      announce("Wave " + (state.wave + 1));
+    }
+
+    function finish(success, title) {
+      if (state.phase === "complete" || state.phase === "failed") return;
+      state.phase = success ? "complete" : "failed";
+      state.paused = false;
+      state.targets.length = 0;
+      message.hidden = true;
+      pauseButton.hidden = true;
+      endTitle.textContent = title;
+      endDetail.textContent = state.rescued + " pets rescued • " + state.rt + " RT earned • Score " + state.score;
+      endcard.hidden = false;
+      announce(title + ". " + endDetail.textContent);
+    }
+
+    function addFeedback(x, lane, text, color) {
+      state.feedback.push({ x, lane, text, color, age: 0 });
+    }
+
+    function showMessage(text, duration) {
+      message.textContent = text;
+      message.hidden = false;
+      window.setTimeout(() => {
+        if (state.phase === "playing" && !state.paused) message.hidden = true;
+      }, duration);
+    }
+
+    function togglePause(force) {
+      if (state.phase !== "playing") return;
+      state.paused = typeof force === "boolean" ? force : !state.paused;
+      pauseButton.textContent = state.paused ? "▶" : "Ⅱ";
+      pauseButton.setAttribute("aria-label", state.paused ? "Resume game" : "Pause game");
+      message.textContent = state.paused ? "Paused • tap ▶ or press P" : "";
+      message.hidden = !state.paused;
+      lastFrame = performance.now();
+      announce(state.paused ? "Game paused." : "Game resumed.");
+    }
+
+    function updateHud() {
+      rescuedEl.textContent = String(state.rescued);
+      rtEl.textContent = String(state.rt);
+      waveEl.textContent = String(state.wave + 1);
+      instructionEl.textContent = state.danger
+        ? "DANGER: " + state.dangerLabel
+        : state.wave === 0 ? "TAP PETS + STOP BREEDERS!" : "DON'T LET THREATS PASS!";
+    }
+
+    function announce(text) {
+      live.textContent = "";
+      window.setTimeout(() => { live.textContent = text; }, 10);
+    }
+
+    function laneY(lane) {
+      const compact = height <= 125;
+      if (compact) return height * (lane ? 0.72 : 0.63);
+      return height * (lane ? 0.75 : 0.55);
+    }
+
+    function targetGeometry(target) {
+      const compact = height <= 125;
+      const radius = compact ? 16 : Math.min(30, height * 0.13);
+      return { x: target.x * width, y: laneY(target.lane), radius };
+    }
+
+    function pointerHit(event) {
+      if (state.paused || state.phase === "complete" || state.phase === "failed") return;
+      const rect = canvas.getBoundingClientRect();
+      const x = (event.clientX - rect.left) * width / rect.width;
+      const y = (event.clientY - rect.top) * height / rect.height;
+      let nearest = null;
+      let nearestDistance = Infinity;
+      for (const target of state.targets) {
+        const g = targetGeometry(target);
+        const distance = Math.hypot(x - g.x, y - g.y);
+        const forgivingRadius = Math.max(g.radius + 12, 28);
+        if (distance <= forgivingRadius && distance < nearestDistance) {
+          nearest = target;
+          nearestDistance = distance;
+        }
+      }
+      if (nearest) {
+        event.preventDefault();
+        hitTarget(nearest);
+      }
+    }
+
+    function hitNearest(type) {
+      if (state.phase === "ready") start();
+      const candidates = state.targets.filter(target => !target.hit && (!type || target.type === type));
+      candidates.sort((a, b) => a.x - b.x || a.id - b.id);
+      return hitTarget(candidates[0]);
+    }
+
+    function resize() {
+      const rect = stage.getBoundingClientRect();
+      width = Math.max(1, rect.width);
+      height = Math.max(1, rect.height);
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      render();
+    }
+
+    function roundedRect(x, y, w, h, radius) {
+      const r = Math.min(radius, w / 2, h / 2);
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, r);
+    }
+
+    function drawBackground() {
+      const compact = height <= 125;
+      const horizon = compact ? height * 0.37 : height * 0.35;
+      const roadTop = compact ? height * 0.47 : height * 0.42;
+      const gradient = ctx.createLinearGradient(0, 0, 0, height);
+      gradient.addColorStop(0, "#91d9f0");
+      gradient.addColorStop(horizon / height, "#d9f4da");
+      gradient.addColorStop(horizon / height + 0.02, "#79c968");
+      gradient.addColorStop(roadTop / height, "#6eb85f");
+      gradient.addColorStop(roadTop / height + 0.01, "#77786f");
+      gradient.addColorStop(1, "#4f514d");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, width, height);
+
+      if (!compact) {
+        ctx.fillStyle = "#5daf52";
+        for (let x = -20; x < width; x += 82) {
+          ctx.beginPath();
+          ctx.arc(x + 20, roadTop - 5, 24, Math.PI, 0);
+          ctx.fill();
+        }
+      }
+
+      ctx.strokeStyle = "#fff5bb";
+      ctx.lineWidth = compact ? 2 : 4;
+      ctx.setLineDash([compact ? 18 : 35, compact ? 14 : 25]);
+      ctx.lineDashOffset = -(state ? state.elapsed * 0.04 : 0);
+      const roadMid = compact ? height * 0.70 : height * 0.66;
+      ctx.beginPath();
+      ctx.moveTo(0, roadMid);
+      ctx.lineTo(width, roadMid);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = "#3c954f";
+      ctx.fillRect(0, height - (compact ? 5 : 11), width, compact ? 5 : 11);
+    }
+
+    function drawVan() {
+      const compact = height <= 125;
+      const scale = compact ? 0.62 : Math.min(1.05, height / 230);
+      const x = width * 0.055;
+      const y = compact ? height * 0.52 : height * 0.57;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(scale, scale);
+      ctx.fillStyle = "rgb(23 58 43 / 20%)";
+      ctx.beginPath();
+      ctx.ellipse(50, 38, 55, 10, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#fff8e8";
+      roundedRect(3, -8, 92, 42, 10);
+      ctx.fill();
+      ctx.fillStyle = "#36c879";
+      roundedRect(8, -3, 49, 25, 6);
+      ctx.fill();
+      ctx.fillStyle = "#4b9cff";
+      roundedRect(62, -3, 26, 20, 5);
+      ctx.fill();
+      ctx.fillStyle = "#ff715d";
+      ctx.beginPath();
+      ctx.arc(32, 8, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.font = "1000 12px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText("❤", 32, 12);
+      ctx.fillStyle = "#263d35";
+      for (const wheelX of [24, 76]) {
+        ctx.beginPath();
+        ctx.arc(wheelX, 32, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#a9c0b7";
+        ctx.beginPath();
+        ctx.arc(wheelX, 32, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#263d35";
+      }
+      ctx.restore();
+    }
+
+    function drawPet(target, g) {
+      const compact = height <= 125;
+      const r = g.radius;
+      ctx.save();
+      ctx.translate(g.x, g.y);
+      ctx.fillStyle = "rgb(0 0 0 / 18%)";
+      ctx.beginPath();
+      ctx.ellipse(0, r * .72, r * .85, r * .24, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = target.lane ? "#f5a95f" : "#fff2d0";
+      ctx.beginPath();
+      ctx.arc(0, 0, r * .73, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(-r * .63, -r * .35);
+      ctx.lineTo(-r * .83, -r * .9);
+      ctx.lineTo(-r * .2, -r * .66);
+      ctx.moveTo(r * .63, -r * .35);
+      ctx.lineTo(r * .83, -r * .9);
+      ctx.lineTo(r * .2, -r * .66);
+      ctx.fill();
+      ctx.fillStyle = "#263d35";
+      ctx.beginPath();
+      ctx.arc(-r * .25, -r * .07, Math.max(1.7, r * .08), 0, Math.PI * 2);
+      ctx.arc(r * .25, -r * .07, Math.max(1.7, r * .08), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ff715d";
+      ctx.beginPath();
+      ctx.arc(0, r * .22, r * .1, 0, Math.PI * 2);
+      ctx.fill();
+      if (!compact) {
+        ctx.fillStyle = "#173a2b";
+        ctx.font = "900 " + Math.max(10, r * .42) + "px system-ui";
+        ctx.textAlign = "center";
+        ctx.fillText("RESCUE", 0, r + 16);
+      }
+      ctx.restore();
+    }
+
+    function drawThreat(target, g) {
+      const compact = height <= 125;
+      const r = g.radius;
+      ctx.save();
+      ctx.translate(g.x, g.y);
+      ctx.fillStyle = "rgb(0 0 0 / 18%)";
+      ctx.beginPath();
+      ctx.ellipse(0, r * .72, r, r * .25, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#d94a42";
+      roundedRect(-r, -r * .7, r * 2, r * 1.38, r * .2);
+      ctx.fill();
+      ctx.fillStyle = "#932e2e";
+      ctx.fillRect(-r * .77, -r * .95, r * .32, r * .34);
+      ctx.fillRect(-r * .18, -r * 1.08, r * .36, r * .47);
+      ctx.fillRect(r * .45, -r * .88, r * .32, r * .27);
+      ctx.fillStyle = "#fff";
+      ctx.font = "1000 " + Math.max(12, r * .75) + "px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText("!", 0, r * .25);
+      if (!compact) {
+        ctx.fillStyle = "#fff";
+        roundedRect(-r * 1.05, r * .73, r * 2.1, 18, 8);
+        ctx.fill();
+        ctx.fillStyle = "#9c302d";
+        ctx.font = "1000 " + Math.max(10, r * .4) + "px system-ui";
+        ctx.fillText("STOP BREEDER", 0, r * .73 + 13);
+      }
+      ctx.restore();
+    }
+
+    function drawDanger() {
+      if (!state.danger) return;
+      const compact = height <= 125;
+      const x = width * 0.29;
+      const y = compact ? height * 0.44 : height * 0.39;
+      ctx.save();
+      ctx.globalAlpha = 0.94;
+      ctx.fillStyle = state.danger >= 3 ? "#6f2325" : state.danger === 2 ? "#9b4935" : "#b9784b";
+      const w = compact ? 38 + state.danger * 8 : 58 + state.danger * 13;
+      const h = compact ? 20 + state.danger * 5 : 34 + state.danger * 8;
+      roundedRect(x - w / 2, y - h, w, h, 4);
+      ctx.fill();
+      ctx.fillStyle = "#fff1c7";
+      ctx.font = "1000 " + (compact ? 8 : 11) + "px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText(state.dangerLabel, x, y - h / 2 + 4);
+      ctx.restore();
+    }
+
+    function drawFeedback() {
+      for (const pop of state.feedback) {
+        const t = pop.age / 850;
+        ctx.save();
+        ctx.globalAlpha = 1 - Math.max(0, (t - .55) / .45);
+        ctx.fillStyle = pop.color;
+        ctx.strokeStyle = "#173a2b";
+        ctx.lineWidth = 4;
+        ctx.font = "1000 " + (height <= 125 ? 13 : 19) + "px system-ui";
+        ctx.textAlign = "center";
+        ctx.strokeText(pop.text, pop.x * width, laneY(pop.lane) - 20 - t * 23);
+        ctx.fillText(pop.text, pop.x * width, laneY(pop.lane) - 20 - t * 23);
+        ctx.restore();
+      }
+    }
+
+    function render() {
+      if (!state) return;
+      ctx.clearRect(0, 0, width, height);
+      drawBackground();
+      drawDanger();
+      drawVan();
+      for (const target of state.targets) {
+        const g = targetGeometry(target);
+        if (target.type === "pet") drawPet(target, g);
+        else drawThreat(target, g);
+      }
+      drawFeedback();
+    }
+
+    function frame(now) {
+      if (!lastFrame) lastFrame = now;
+      const delta = Math.min(100, now - lastFrame);
+      lastFrame = now;
+      if (!state.paused) {
+        accumulator += delta;
+        while (accumulator >= CONFIG.fixedStepMs) {
+          fixedUpdate(CONFIG.fixedStepMs);
+          accumulator -= CONFIG.fixedStepMs;
+        }
+      }
+      render();
+      requestAnimationFrame(frame);
+    }
+
+    canvas.addEventListener("pointerdown", pointerHit);
+    pauseButton.addEventListener("pointerdown", event => event.stopPropagation());
+    pauseButton.addEventListener("click", () => togglePause());
+    replayButton.addEventListener("click", restart);
+
+    document.addEventListener("keydown", event => {
+      if (event.target === cta || event.target === replayButton || event.target === pauseButton) return;
+      const key = event.key.toLowerCase();
+      if (key === "p" || key === "escape") {
+        event.preventDefault();
+        togglePause();
+      } else if (key === " " || key === "enter") {
+        event.preventDefault();
+        hitNearest("pet");
+      } else if (key === "x" || key === "b") {
+        event.preventDefault();
+        hitNearest("threat");
+      } else if (key === "r" && (state.phase === "complete" || state.phase === "failed")) {
+        restart();
+      }
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden && state.phase === "playing" && !state.paused) {
+        state.autoPaused = true;
+        togglePause(true);
+      } else if (!document.hidden && state.autoPaused) {
+        state.autoPaused = false;
+        togglePause(false);
+      }
+    });
+
+    cta.addEventListener("click", event => {
+      event.stopPropagation();
+      const url = CONFIG.destinationUrl;
+      if (window.mraid && typeof window.mraid.open === "function") {
+        event.preventDefault();
+        window.mraid.open(url);
+      } else if (window.dapi && typeof window.dapi.openStoreUrl === "function") {
+        event.preventDefault();
+        window.dapi.openStoreUrl();
+      } else if (window.FbPlayableAd && typeof window.FbPlayableAd.onCTAClick === "function") {
+        event.preventDefault();
+        window.FbPlayableAd.onCTAClick();
+      }
+    });
+
+    window.AdoptarioHorizontal = Object.freeze({
+      getState() {
+        return {
+          phase: state.phase,
+          paused: state.paused,
+          wave: state.wave + 1,
+          elapsedMs: Math.round(state.elapsed),
+          rescued: state.rescued,
+          rt: state.rt,
+          score: state.score,
+          threatsStopped: state.threatsStopped,
+          danger: state.danger,
+          dangerLabel: state.dangerLabel,
+          targets: state.targets.map(target => ({
+            id: target.id,
+            type: target.type,
+            lane: target.lane,
+            x: Number(target.x.toFixed(3))
+          }))
+        };
+      },
+      restart,
+      pause() { togglePause(true); },
+      resume() { togglePause(false); },
+      hitNext(type) {
+        if (type !== undefined && type !== "pet" && type !== "threat") {
+          throw new TypeError('type must be "pet", "threat", or undefined');
+        }
+        return hitNearest(type);
+      },
+      advance(ms) {
+        if (!Number.isFinite(ms) || ms < 0 || ms > 30000) {
+          throw new RangeError("advance(ms) requires 0–30000 milliseconds");
+        }
+        let remaining = ms;
+        const wasPaused = state.paused;
+        state.paused = false;
+        while (remaining > 0 && state.phase !== "complete" && state.phase !== "failed") {
+          const step = Math.min(CONFIG.fixedStepMs, remaining);
+          fixedUpdate(step);
+          remaining -= step;
+        }
+        state.paused = wasPaused;
+        updateHud();
+        render();
+        return this.getState();
+      }
+    });
+
+    if ("ResizeObserver" in window) new ResizeObserver(resize).observe(stage);
+    window.addEventListener("resize", resize);
+    restart();
+    resize();
+    requestAnimationFrame(frame);
+  })();
+  </script>
+</body>
+</html>

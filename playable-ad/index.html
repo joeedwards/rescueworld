@@ -1,0 +1,1424 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <meta name="theme-color" content="#173a2b">
+  <title>Adoptar.io — Rescue a Forever Friend</title>
+  <style>
+    :root {
+      color-scheme: only light;
+      --ink: #173a2b;
+      --cream: #fff8e8;
+      --green: #36c879;
+      --green-dark: #168c52;
+      --coral: #ff725e;
+      --yellow: #ffd34d;
+      --blue: #4c9dff;
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #0d261b;
+      font-family: ui-rounded, "Arial Rounded MT Bold", "Trebuchet MS", system-ui, sans-serif;
+      color: var(--ink);
+      overscroll-behavior: none;
+    }
+
+    button {
+      font: inherit;
+    }
+
+    .creative {
+      position: relative;
+      width: min(100vw, 540px);
+      height: 100vh;
+      height: 100svh;
+      height: 100dvh;
+      min-height: 480px;
+      margin: 0 auto;
+      overflow: hidden;
+      isolation: isolate;
+      background: #a9df91;
+      box-shadow: 0 0 60px rgb(0 0 0 / 35%);
+      touch-action: none;
+      user-select: none;
+    }
+
+    #game-canvas {
+      position: absolute;
+      inset: 0;
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: grab;
+      touch-action: none;
+    }
+
+    #game-canvas.is-driving {
+      cursor: grabbing;
+    }
+
+    .brand {
+      position: absolute;
+      z-index: 3;
+      top: max(10px, env(safe-area-inset-top));
+      left: 50%;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      transform: translateX(-50%);
+      color: #fff;
+      font-weight: 1000;
+      font-size: clamp(22px, 6vw, 31px);
+      letter-spacing: -1.4px;
+      line-height: 1;
+      text-shadow: 0 3px 0 #155c3d, 0 5px 12px rgb(0 0 0 / 22%);
+      white-space: nowrap;
+      pointer-events: none;
+    }
+
+    .brand-mark {
+      display: grid;
+      width: 32px;
+      height: 32px;
+      place-items: center;
+      border: 3px solid #fff;
+      border-radius: 50%;
+      background: var(--coral);
+      box-shadow: 0 3px 0 #a73f32;
+    }
+
+    .brand-paw {
+      position: relative;
+      width: 14px;
+      height: 12px;
+      border-radius: 48% 48% 58% 58%;
+      background: #fff;
+    }
+
+    .brand-paw::before,
+    .brand-paw::after {
+      position: absolute;
+      top: -6px;
+      width: 6px;
+      height: 7px;
+      border-radius: 50%;
+      background: #fff;
+      content: "";
+    }
+
+    .brand-paw::before {
+      left: -2px;
+      box-shadow: 5px -3px 0 #fff;
+    }
+
+    .brand-paw::after {
+      right: -2px;
+      box-shadow: -5px -3px 0 #fff;
+    }
+
+    .hud {
+      position: absolute;
+      z-index: 3;
+      top: max(54px, calc(env(safe-area-inset-top) + 47px));
+      left: 12px;
+      right: 12px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 7px;
+      pointer-events: none;
+    }
+
+    .hud-pill {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      padding: 7px 8px;
+      border: 2px solid rgb(255 255 255 / 75%);
+      border-radius: 999px;
+      background: rgb(255 248 232 / 92%);
+      box-shadow: 0 4px 0 rgb(29 87 54 / 24%);
+      font-weight: 950;
+      font-size: clamp(12px, 3.4vw, 16px);
+      line-height: 1;
+    }
+
+    .hud-icon {
+      width: 10px;
+      height: 10px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: var(--coral);
+      box-shadow: inset 0 -2px 0 rgb(0 0 0 / 12%);
+    }
+
+    .hud-pill:nth-child(2) .hud-icon {
+      border-radius: 3px;
+      background: var(--blue);
+    }
+
+    .hud-pill:nth-child(3) .hud-icon {
+      background: var(--yellow);
+    }
+
+    .objective {
+      position: absolute;
+      z-index: 3;
+      top: max(96px, calc(env(safe-area-inset-top) + 89px));
+      left: 50%;
+      width: max-content;
+      max-width: calc(100% - 28px);
+      padding: 8px 16px;
+      transform: translateX(-50%);
+      border-radius: 13px;
+      background: var(--ink);
+      color: #fff;
+      box-shadow: 0 4px 0 rgb(0 0 0 / 18%);
+      font-weight: 900;
+      font-size: clamp(13px, 3.8vw, 17px);
+      line-height: 1.15;
+      text-align: center;
+      pointer-events: none;
+      transition: transform 180ms ease, background 180ms ease;
+    }
+
+    .objective.is-updated {
+      transform: translateX(-50%) scale(1.07);
+      background: var(--green-dark);
+    }
+
+    .drive-hint {
+      position: absolute;
+      z-index: 3;
+      bottom: max(22px, calc(env(safe-area-inset-bottom) + 14px));
+      left: 50%;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      width: max-content;
+      max-width: calc(100% - 32px);
+      padding: 11px 17px;
+      transform: translateX(-50%);
+      border: 2px solid rgb(255 255 255 / 80%);
+      border-radius: 999px;
+      background: rgb(23 58 43 / 90%);
+      color: #fff;
+      box-shadow: 0 5px 0 rgb(0 0 0 / 18%);
+      font-weight: 900;
+      font-size: clamp(13px, 3.8vw, 17px);
+      line-height: 1;
+      white-space: nowrap;
+      pointer-events: none;
+      transition: opacity 300ms ease, transform 300ms ease;
+    }
+
+    .drive-hint.is-hidden {
+      opacity: 0;
+      transform: translate(-50%, 12px);
+    }
+
+    .finger {
+      position: relative;
+      width: 19px;
+      height: 23px;
+      flex: 0 0 auto;
+      border: 2px solid #fff;
+      border-radius: 10px 10px 8px 8px;
+    }
+
+    .finger::before {
+      position: absolute;
+      top: -7px;
+      left: 6px;
+      width: 4px;
+      height: 12px;
+      border: 2px solid #fff;
+      border-bottom: 0;
+      border-radius: 5px 5px 0 0;
+      background: var(--ink);
+      content: "";
+    }
+
+    .end-card {
+      position: absolute;
+      z-index: 8;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom));
+      background:
+        radial-gradient(circle at 50% 30%, rgb(255 255 255 / 34%) 0 18%, transparent 19%),
+        linear-gradient(160deg, rgb(22 140 82 / 95%), rgb(12 73 48 / 98%));
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 220ms ease, visibility 220ms ease;
+    }
+
+    .end-card[hidden] {
+      display: grid;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .end-card-panel {
+      width: min(100%, 400px);
+      padding: 28px 22px 23px;
+      border: 3px solid rgb(255 255 255 / 75%);
+      border-radius: 28px;
+      background: var(--cream);
+      box-shadow: 0 12px 0 rgb(5 43 28 / 26%), 0 24px 70px rgb(0 0 0 / 25%);
+      text-align: center;
+    }
+
+    .end-icon {
+      display: grid;
+      width: 92px;
+      height: 92px;
+      margin: -4px auto 16px;
+      place-items: center;
+      border: 5px solid #fff;
+      border-radius: 50%;
+      background: var(--coral);
+      box-shadow: 0 7px 0 #b54739;
+    }
+
+    .end-icon-house {
+      position: relative;
+      width: 48px;
+      height: 39px;
+      margin-top: 11px;
+      border-radius: 4px 4px 8px 8px;
+      background: #fff;
+    }
+
+    .end-icon-house::before {
+      position: absolute;
+      top: -20px;
+      left: 4px;
+      width: 34px;
+      height: 34px;
+      transform: rotate(45deg);
+      border-radius: 5px;
+      background: #fff;
+      content: "";
+    }
+
+    .end-icon-house::after {
+      position: absolute;
+      bottom: 0;
+      left: 17px;
+      width: 14px;
+      height: 22px;
+      border-radius: 8px 8px 0 0;
+      background: var(--green-dark);
+      content: "";
+    }
+
+    .end-card h1 {
+      margin: 0;
+      color: var(--ink);
+      font-size: clamp(28px, 8vw, 42px);
+      letter-spacing: -1.5px;
+      line-height: 1;
+    }
+
+    .end-card p {
+      margin: 12px auto 20px;
+      max-width: 310px;
+      color: #37604e;
+      font-size: clamp(15px, 4.2vw, 19px);
+      font-weight: 750;
+      line-height: 1.3;
+    }
+
+    .reward {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 18px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: #fff1b5;
+      color: #775b00;
+      font-weight: 1000;
+      font-size: 18px;
+    }
+
+    .cta,
+    .retry {
+      display: block;
+      width: 100%;
+      min-height: 56px;
+      border: 0;
+      border-radius: 16px;
+      font-weight: 1000;
+      font-size: clamp(18px, 5vw, 22px);
+      cursor: pointer;
+    }
+
+    .cta {
+      background: var(--coral);
+      color: #fff;
+      box-shadow: 0 6px 0 #b54739;
+      text-shadow: 0 2px 0 rgb(0 0 0 / 12%);
+    }
+
+    .cta:active {
+      transform: translateY(4px);
+      box-shadow: 0 2px 0 #b54739;
+    }
+
+    .retry {
+      background: var(--yellow);
+      color: #5e4700;
+      box-shadow: 0 6px 0 #b78d00;
+    }
+
+    .retry:active {
+      transform: translateY(4px);
+      box-shadow: 0 2px 0 #b78d00;
+    }
+
+    .end-brand {
+      margin-top: 18px;
+      color: var(--green-dark);
+      font-weight: 1000;
+      font-size: 20px;
+      letter-spacing: -0.5px;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (orientation: landscape) and (max-height: 520px) {
+      .creative {
+        width: min(100vw, 760px);
+        min-height: 320px;
+      }
+
+      .brand {
+        left: 18px;
+        transform: none;
+        font-size: 21px;
+      }
+
+      .brand-mark {
+        width: 28px;
+        height: 28px;
+      }
+
+      .hud {
+        top: 48px;
+        right: auto;
+        width: 190px;
+        grid-template-columns: 1fr;
+      }
+
+      .objective {
+        top: 14px;
+        left: auto;
+        right: 14px;
+        transform: none;
+      }
+
+      .objective.is-updated {
+        transform: scale(1.07);
+      }
+
+      .drive-hint {
+        left: auto;
+        right: 14px;
+        transform: none;
+      }
+
+      .drive-hint.is-hidden {
+        transform: translateY(12px);
+      }
+
+      .end-card-panel {
+        display: grid;
+        grid-template-columns: 90px minmax(180px, 1fr) minmax(180px, 1fr);
+        gap: 8px 18px;
+        align-items: center;
+        max-width: 650px;
+        padding: 18px 24px;
+        text-align: left;
+      }
+
+      .end-icon {
+        grid-row: 1 / 4;
+        width: 80px;
+        height: 80px;
+        margin: 0;
+      }
+
+      .end-card h1,
+      .end-card p,
+      .reward {
+        grid-column: 2;
+      }
+
+      .end-card p {
+        margin: 2px 0;
+        font-size: 15px;
+      }
+
+      .reward {
+        width: max-content;
+        margin: 0;
+      }
+
+      .cta,
+      .retry {
+        grid-column: 3;
+        grid-row: 1 / 3;
+      }
+
+      .end-brand {
+        grid-column: 3;
+        grid-row: 3;
+        margin: 0;
+        text-align: center;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="creative" id="creative" data-state="tutorial" aria-label="Adoptar.io playable ad">
+    <canvas id="game-canvas" aria-label="Rescue game. Drag or use arrow keys to drive the van."></canvas>
+
+    <div class="brand" aria-hidden="true">
+      <span class="brand-mark"><span class="brand-paw"></span></span>
+      ADOPTAR.IO
+    </div>
+
+    <section class="hud" aria-label="Game status">
+      <div class="hud-pill"><span class="hud-icon"></span><span id="timer">0:30</span></div>
+      <div class="hud-pill"><span class="hud-icon"></span><span id="pet-count">Pets 0/3</span></div>
+      <div class="hud-pill"><span class="hud-icon"></span><span id="token-count">RT 0</span></div>
+    </section>
+
+    <div class="objective" id="objective" aria-live="polite">Rescue 3 stray pets</div>
+    <div class="drive-hint" id="drive-hint" aria-hidden="true">
+      <span class="finger"></span>
+      Drag anywhere to drive
+    </div>
+
+    <section class="end-card" id="success-card" hidden aria-labelledby="success-title">
+      <div class="end-card-panel">
+        <div class="end-icon" aria-hidden="true"><span class="end-icon-house"></span></div>
+        <h1 id="success-title">Forever homes!</h1>
+        <p>You rescued every pet. A whole world still needs your help.</p>
+        <div class="reward"><span aria-hidden="true">+15</span> Rescue Tokens</div>
+        <button class="cta" id="cta" type="button">Play Adoptar.io</button>
+        <div class="end-brand">ADOPTAR.IO</div>
+      </div>
+    </section>
+
+    <section class="end-card" id="timeout-card" hidden aria-labelledby="timeout-title">
+      <div class="end-card-panel">
+        <div class="end-icon" aria-hidden="true"><span class="end-icon-house"></span></div>
+        <h1 id="timeout-title">They need you!</h1>
+        <p>Try once more and guide every stray to a forever home.</p>
+        <div class="reward"><span id="timeout-progress">0/3</span> pets rescued</div>
+        <button class="retry" id="retry" type="button">Rescue again</button>
+        <div class="end-brand">ADOPTAR.IO</div>
+      </div>
+    </section>
+
+    <p class="sr-only" id="game-announcement" aria-live="assertive"></p>
+  </main>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const CONFIG = Object.freeze({
+        duration: 30,
+        destinationUrl: "https://adoptar.io",
+        petsToRescue: 3,
+        tokensPerAdoption: 5,
+        vanSpeed: 285,
+        rescueRadius: 35,
+        adoptionDuration: 0.48
+      });
+
+      const canvas = document.getElementById("game-canvas");
+      const ctx = canvas.getContext("2d", { alpha: false });
+      const creative = document.getElementById("creative");
+      const timerEl = document.getElementById("timer");
+      const petCountEl = document.getElementById("pet-count");
+      const tokenCountEl = document.getElementById("token-count");
+      const objectiveEl = document.getElementById("objective");
+      const hintEl = document.getElementById("drive-hint");
+      const successCard = document.getElementById("success-card");
+      const timeoutCard = document.getElementById("timeout-card");
+      const timeoutProgress = document.getElementById("timeout-progress");
+      const retryButton = document.getElementById("retry");
+      const ctaButton = document.getElementById("cta");
+      const announcement = document.getElementById("game-announcement");
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      let width = 0;
+      let height = 0;
+      let dpr = 1;
+      let state = "tutorial";
+      let timeLeft = CONFIG.duration;
+      let tokens = 0;
+      let lastFrame = performance.now();
+      let pointerActive = false;
+      let deliveryElapsed = 0;
+      let adoptedCount = 0;
+      let target = { x: 0, y: 0 };
+      let van = { x: 0, y: 0, angle: -Math.PI / 2, moving: false };
+      let pets = [];
+      let effects = [];
+      let confetti = [];
+      const keys = new Set();
+
+      const PET_TEMPLATES = Object.freeze([
+        { kind: "dog", color: "#f29a52", accent: "#8d5230", u: 0.25, v: 0.61 },
+        { kind: "cat", color: "#8e91a8", accent: "#55596e", u: 0.75, v: 0.53 },
+        { kind: "rabbit", color: "#fff2df", accent: "#d38f98", u: 0.48, v: 0.43 }
+      ]);
+
+      function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+
+      function distance(a, b) {
+        return Math.hypot(a.x - b.x, a.y - b.y);
+      }
+
+      function roundedRect(context, x, y, w, h, r) {
+        const radius = Math.min(r, w / 2, h / 2);
+        context.beginPath();
+        context.moveTo(x + radius, y);
+        context.arcTo(x + w, y, x + w, y + h, radius);
+        context.arcTo(x + w, y + h, x, y + h, radius);
+        context.arcTo(x, y + h, x, y, radius);
+        context.arcTo(x, y, x + w, y, radius);
+        context.closePath();
+      }
+
+      function setState(nextState) {
+        state = nextState;
+        creative.dataset.state = nextState;
+      }
+
+      function setObjective(text) {
+        objectiveEl.textContent = text;
+        objectiveEl.classList.remove("is-updated");
+        void objectiveEl.offsetWidth;
+        objectiveEl.classList.add("is-updated");
+        window.setTimeout(() => objectiveEl.classList.remove("is-updated"), 260);
+      }
+
+      function announce(text) {
+        announcement.textContent = "";
+        window.setTimeout(() => {
+          announcement.textContent = text;
+        }, 20);
+      }
+
+      function createPets() {
+        pets = PET_TEMPLATES.map((template, index) => ({
+          ...template,
+          id: index,
+          x: width * template.u,
+          y: height * template.v,
+          rescued: false,
+          phase: index * 1.9
+        }));
+      }
+
+      function resetGame() {
+        setState("tutorial");
+        timeLeft = CONFIG.duration;
+        tokens = 0;
+        adoptedCount = 0;
+        deliveryElapsed = 0;
+        pointerActive = false;
+        effects = [];
+        confetti = [];
+        keys.clear();
+        createPets();
+        van.x = width * 0.5;
+        van.y = height * 0.81;
+        van.angle = -Math.PI / 2;
+        van.moving = false;
+        target.x = van.x;
+        target.y = van.y;
+        successCard.hidden = true;
+        timeoutCard.hidden = true;
+        announcement.textContent = "";
+        hintEl.classList.remove("is-hidden");
+        canvas.classList.remove("is-driving");
+        setObjective("Rescue 3 stray pets");
+        updateHud();
+        lastFrame = performance.now();
+        canvas.focus({ preventScroll: true });
+      }
+
+      function resizeCanvas() {
+        const rect = creative.getBoundingClientRect();
+        const nextWidth = Math.max(1, rect.width);
+        const nextHeight = Math.max(1, rect.height);
+        const oldWidth = width || nextWidth;
+        const oldHeight = height || nextHeight;
+        width = nextWidth;
+        height = nextHeight;
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+
+        if (pets.length) {
+          const scaleX = width / oldWidth;
+          const scaleY = height / oldHeight;
+          van.x *= scaleX;
+          van.y *= scaleY;
+          target.x *= scaleX;
+          target.y *= scaleY;
+          pets.forEach((pet) => {
+            pet.x *= scaleX;
+            pet.y *= scaleY;
+          });
+          effects.forEach((effect) => {
+            effect.x *= scaleX;
+            effect.y *= scaleY;
+          });
+        } else {
+          createPets();
+          van.x = width * 0.5;
+          van.y = height * 0.81;
+          target.x = van.x;
+          target.y = van.y;
+        }
+      }
+
+      function adoptionCenter() {
+        return {
+          x: width * (height < 520 && width > height ? 0.69 : 0.5),
+          y: height * (height < 520 && width > height ? 0.46 : 0.29),
+          radius: clamp(Math.min(width, height) * 0.125, 48, 72)
+        };
+      }
+
+      function beginPlay() {
+        if (state !== "tutorial") return;
+        setState("rescue");
+        hintEl.classList.add("is-hidden");
+        announce("Rescue started. Collect three stray pets.");
+      }
+
+      function pointerPosition(event) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: clamp(event.clientX - rect.left, 16, width - 16),
+          y: clamp(event.clientY - rect.top, 135, height - 16)
+        };
+      }
+
+      function onPointerDown(event) {
+        if (state === "success" || state === "timeout" || state === "adopting") return;
+        event.preventDefault();
+        pointerActive = true;
+        canvas.classList.add("is-driving");
+        canvas.setPointerCapture?.(event.pointerId);
+        target = pointerPosition(event);
+        beginPlay();
+      }
+
+      function onPointerMove(event) {
+        if (!pointerActive) return;
+        event.preventDefault();
+        target = pointerPosition(event);
+      }
+
+      function onPointerUp(event) {
+        pointerActive = false;
+        canvas.classList.remove("is-driving");
+        if (canvas.hasPointerCapture?.(event.pointerId)) {
+          canvas.releasePointerCapture(event.pointerId);
+        }
+      }
+
+      function updateVan(dt) {
+        let dx = 0;
+        let dy = 0;
+
+        if (keys.has("ArrowLeft") || keys.has("KeyA")) dx -= 1;
+        if (keys.has("ArrowRight") || keys.has("KeyD")) dx += 1;
+        if (keys.has("ArrowUp") || keys.has("KeyW")) dy -= 1;
+        if (keys.has("ArrowDown") || keys.has("KeyS")) dy += 1;
+
+        if (dx || dy) {
+          const length = Math.hypot(dx, dy);
+          dx /= length;
+          dy /= length;
+        } else if (pointerActive) {
+          dx = target.x - van.x;
+          dy = target.y - van.y;
+          const length = Math.hypot(dx, dy);
+          if (length > 6) {
+            dx /= length;
+            dy /= length;
+          } else {
+            dx = 0;
+            dy = 0;
+          }
+        }
+
+        van.moving = Boolean(dx || dy);
+        if (!van.moving) return;
+
+        van.angle = Math.atan2(dy, dx);
+        van.x = clamp(van.x + dx * CONFIG.vanSpeed * dt, 25, width - 25);
+        van.y = clamp(van.y + dy * CONFIG.vanSpeed * dt, 135, height - 25);
+      }
+
+      function addBurst(x, y, color, label) {
+        effects.push({
+          x,
+          y,
+          color,
+          label,
+          life: 1,
+          particles: Array.from({ length: reducedMotion ? 2 : 9 }, (_, index) => {
+            const angle = (Math.PI * 2 * index) / 9;
+            return {
+              dx: Math.cos(angle) * (26 + (index % 3) * 8),
+              dy: Math.sin(angle) * (26 + (index % 2) * 7)
+            };
+          })
+        });
+      }
+
+      function rescueNearbyPets() {
+        let rescuedThisFrame = false;
+        pets.forEach((pet) => {
+          if (!pet.rescued && distance(van, pet) < CONFIG.rescueRadius) {
+            pet.rescued = true;
+            rescuedThisFrame = true;
+            addBurst(pet.x, pet.y, pet.color, "RESCUED!");
+          }
+        });
+
+        if (!rescuedThisFrame) return;
+        const rescuedCount = pets.filter((pet) => pet.rescued).length;
+        petCountEl.textContent = `Pets ${rescuedCount}/${CONFIG.petsToRescue}`;
+        announce(`${rescuedCount} of ${CONFIG.petsToRescue} pets rescued.`);
+
+        if (rescuedCount === CONFIG.petsToRescue) {
+          setState("deliver");
+          setObjective("Drive to the Adoption Center");
+          announce("All pets are safe. Drive to the green Adoption Center.");
+        }
+      }
+
+      function beginAdoption() {
+        if (state !== "deliver") return;
+        setState("adopting");
+        pointerActive = false;
+        canvas.classList.remove("is-driving");
+        van.moving = false;
+        deliveryElapsed = 0;
+        setObjective("Finding forever homes…");
+        announce("Adoption started.");
+      }
+
+      function updateAdoption(dt) {
+        deliveryElapsed += dt;
+        const nextCount = Math.min(
+          CONFIG.petsToRescue,
+          Math.floor(deliveryElapsed / CONFIG.adoptionDuration)
+        );
+
+        while (adoptedCount < nextCount) {
+          adoptedCount += 1;
+          tokens += CONFIG.tokensPerAdoption;
+          const center = adoptionCenter();
+          addBurst(
+            center.x + (adoptedCount - 2) * 25,
+            center.y + 10,
+            "#ffd34d",
+            `+${CONFIG.tokensPerAdoption} RT`
+          );
+          announce(`Pet adopted. ${tokens} Rescue Tokens earned.`);
+          updateHud();
+        }
+
+        if (
+          adoptedCount === CONFIG.petsToRescue &&
+          deliveryElapsed >= CONFIG.adoptionDuration * CONFIG.petsToRescue + 0.55
+        ) {
+          showSuccess();
+        }
+      }
+
+      function showSuccess() {
+        setState("success");
+        setObjective("Every pet found a home!");
+        createConfetti();
+        successCard.hidden = false;
+        announce("Success. Every pet found a forever home. You earned 15 Rescue Tokens.");
+        window.setTimeout(() => ctaButton.focus({ preventScroll: true }), 220);
+      }
+
+      function showTimeout() {
+        setState("timeout");
+        pointerActive = false;
+        canvas.classList.remove("is-driving");
+        van.moving = false;
+        const rescuedCount = pets.filter((pet) => pet.rescued).length;
+        timeoutProgress.textContent = `${rescuedCount}/${CONFIG.petsToRescue}`;
+        timeoutCard.hidden = false;
+        announce(`Time is up. You rescued ${rescuedCount} of ${CONFIG.petsToRescue} pets.`);
+        window.setTimeout(() => retryButton.focus({ preventScroll: true }), 220);
+      }
+
+      function updateHud() {
+        const seconds = Math.max(0, Math.ceil(timeLeft));
+        timerEl.textContent = `0:${String(seconds).padStart(2, "0")}`;
+        petCountEl.textContent = `Pets ${pets.filter((pet) => pet.rescued).length}/${CONFIG.petsToRescue}`;
+        tokenCountEl.textContent = `RT ${tokens}`;
+      }
+
+      function updateEffects(dt) {
+        effects.forEach((effect) => {
+          effect.life -= dt * 1.25;
+          effect.y -= dt * 17;
+        });
+        effects = effects.filter((effect) => effect.life > 0);
+
+        confetti.forEach((piece) => {
+          piece.y += piece.speed * dt;
+          piece.x += Math.sin(piece.phase + piece.y * 0.02) * 18 * dt;
+          piece.rotation += piece.spin * dt;
+          if (piece.y > height + 10) piece.y = -15;
+        });
+      }
+
+      function createConfetti() {
+        if (reducedMotion) return;
+        const colors = ["#ff725e", "#ffd34d", "#4c9dff", "#ffffff", "#36c879"];
+        confetti = Array.from({ length: 45 }, (_, index) => ({
+          x: ((index * 83) % 101) / 101 * width,
+          y: -((index * 47) % Math.max(1, Math.round(height))),
+          speed: 75 + (index % 6) * 18,
+          phase: index * 0.8,
+          rotation: index,
+          spin: (index % 2 ? 1 : -1) * (2 + (index % 4)),
+          color: colors[index % colors.length]
+        }));
+      }
+
+      function update(dt) {
+        if (document.hidden) return;
+
+        if (state === "rescue" || state === "deliver") {
+          timeLeft -= dt;
+          if (timeLeft <= 0) {
+            timeLeft = 0;
+            updateHud();
+            showTimeout();
+            return;
+          }
+
+          updateVan(dt);
+          if (state === "rescue") {
+            rescueNearbyPets();
+          } else {
+            const center = adoptionCenter();
+            if (distance(van, center) < center.radius * 0.72) {
+              beginAdoption();
+            }
+          }
+          updateHud();
+        } else if (state === "adopting") {
+          updateAdoption(dt);
+        }
+
+        updateEffects(dt);
+      }
+
+      function drawBackground(now) {
+        const landscape = height < 520 && width > height;
+        const center = adoptionCenter();
+        const grass = ctx.createLinearGradient(0, 0, 0, height);
+        grass.addColorStop(0, "#d4ed9e");
+        grass.addColorStop(1, "#8fd786");
+        ctx.fillStyle = grass;
+        ctx.fillRect(0, 0, width, height);
+
+        ctx.globalAlpha = 0.16;
+        ctx.strokeStyle = "#27734e";
+        ctx.lineWidth = 1;
+        for (let x = 18; x < width; x += 34) {
+          for (let y = 145; y < height; y += 39) {
+            const sway = Math.sin(x * 0.13 + y * 0.08) * 4;
+            ctx.beginPath();
+            ctx.moveTo(x + sway, y + 5);
+            ctx.lineTo(x, y - 5);
+            ctx.moveTo(x, y);
+            ctx.lineTo(x + 5, y - 5);
+            ctx.stroke();
+          }
+        }
+        ctx.globalAlpha = 1;
+
+        ctx.strokeStyle = "#d5c695";
+        ctx.lineWidth = landscape ? 76 : 82;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(width * 0.5, height + 30);
+        ctx.bezierCurveTo(
+          width * 0.42,
+          height * 0.66,
+          center.x + width * 0.1,
+          center.y + height * 0.18,
+          center.x,
+          center.y
+        );
+        ctx.stroke();
+
+        ctx.strokeStyle = "rgb(255 255 255 / 23%)";
+        ctx.lineWidth = 4;
+        ctx.setLineDash([14, 16]);
+        ctx.beginPath();
+        ctx.moveTo(width * 0.5, height + 30);
+        ctx.bezierCurveTo(
+          width * 0.42,
+          height * 0.66,
+          center.x + width * 0.1,
+          center.y + height * 0.18,
+          center.x,
+          center.y
+        );
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        for (let i = 0; i < 13; i += 1) {
+          const x = ((i * 97 + 41) % 503) / 503 * width;
+          const y = 145 + (((i * 137 + 23) % 509) / 509) * Math.max(30, height - 180);
+          if (Math.hypot(x - center.x, y - center.y) < center.radius + 45) continue;
+          const wobble = reducedMotion ? 0 : Math.sin(now * 0.0018 + i) * 1.5;
+          ctx.fillStyle = i % 2 ? "#fff1a6" : "#ffffff";
+          for (let petal = 0; petal < 4; petal += 1) {
+            const angle = (Math.PI / 2) * petal;
+            ctx.beginPath();
+            ctx.ellipse(
+              x + Math.cos(angle) * 5,
+              y + Math.sin(angle) * 5 + wobble,
+              4,
+              2.5,
+              angle,
+              0,
+              Math.PI * 2
+            );
+            ctx.fill();
+          }
+          ctx.fillStyle = "#ffc640";
+          ctx.beginPath();
+          ctx.arc(x, y + wobble, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function drawAdoptionCenter(now) {
+        const center = adoptionCenter();
+        const pulse = reducedMotion ? 0 : Math.sin(now * 0.005) * 4;
+
+        ctx.save();
+        ctx.translate(center.x, center.y);
+
+        ctx.fillStyle = "rgb(54 200 121 / 20%)";
+        ctx.beginPath();
+        ctx.arc(0, 0, center.radius + 18 + pulse, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "rgb(255 255 255 / 38%)";
+        ctx.strokeStyle = "#168c52";
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.arc(0, 0, center.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "#fff8e8";
+        roundedRect(ctx, -36, -21, 72, 53, 7);
+        ctx.fill();
+        ctx.strokeStyle = "#d96450";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        ctx.fillStyle = "#ff725e";
+        ctx.beginPath();
+        ctx.moveTo(-46, -18);
+        ctx.lineTo(0, -53);
+        ctx.lineTo(46, -18);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = "#b54739";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        ctx.fillStyle = "#168c52";
+        roundedRect(ctx, -11, 5, 22, 27, 9);
+        ctx.fill();
+
+        drawPaw(ctx, 0, -9, 0.74, "#ff725e");
+
+        ctx.fillStyle = "#173a2b";
+        ctx.font = "900 12px ui-rounded, system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        roundedRect(ctx, -68, center.radius + 7, 136, 27, 13);
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText("ADOPTION CENTER", 0, center.radius + 20);
+        ctx.restore();
+      }
+
+      function drawPaw(context, x, y, scale, color) {
+        context.save();
+        context.translate(x, y);
+        context.scale(scale, scale);
+        context.fillStyle = color;
+        context.beginPath();
+        context.ellipse(0, 5, 9, 8, 0, 0, Math.PI * 2);
+        context.fill();
+        [
+          [-9, -4, 4],
+          [-3, -9, 4],
+          [4, -9, 4],
+          [10, -3, 4]
+        ].forEach(([px, py, radius]) => {
+          context.beginPath();
+          context.arc(px, py, radius, 0, Math.PI * 2);
+          context.fill();
+        });
+        context.restore();
+      }
+
+      function drawPet(pet, now, carriedIndex = -1) {
+        const bob = reducedMotion ? 0 : Math.sin(now * 0.004 + pet.phase) * 3;
+        const x = carriedIndex >= 0 ? -14 + carriedIndex * 14 : pet.x;
+        const y = carriedIndex >= 0 ? -10 : pet.y + bob;
+        const scale = carriedIndex >= 0 ? 0.55 : 1;
+
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(scale, scale);
+
+        if (carriedIndex < 0) {
+          ctx.fillStyle = "rgb(255 255 255 / 62%)";
+          ctx.beginPath();
+          ctx.ellipse(0, 18, 24, 10, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          const pulse = reducedMotion ? 0 : Math.sin(now * 0.006 + pet.phase) * 3;
+          ctx.strokeStyle = "rgb(255 255 255 / 78%)";
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.arc(0, 0, 27 + pulse, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        ctx.fillStyle = pet.color;
+        ctx.beginPath();
+        ctx.ellipse(0, 5, 18, 17, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (pet.kind === "rabbit") {
+          ctx.beginPath();
+          ctx.ellipse(-8, -17, 7, 17, -0.18, 0, Math.PI * 2);
+          ctx.ellipse(8, -17, 7, 17, 0.18, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = pet.accent;
+          ctx.beginPath();
+          ctx.ellipse(-8, -18, 2.5, 10, -0.18, 0, Math.PI * 2);
+          ctx.ellipse(8, -18, 2.5, 10, 0.18, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (pet.kind === "cat") {
+          ctx.fillStyle = pet.color;
+          ctx.beginPath();
+          ctx.moveTo(-17, -3);
+          ctx.lineTo(-13, -22);
+          ctx.lineTo(-2, -11);
+          ctx.moveTo(17, -3);
+          ctx.lineTo(13, -22);
+          ctx.lineTo(2, -11);
+          ctx.fill();
+        } else {
+          ctx.fillStyle = pet.accent;
+          ctx.beginPath();
+          ctx.ellipse(-16, -5, 8, 13, -0.45, 0, Math.PI * 2);
+          ctx.ellipse(16, -5, 8, 13, 0.45, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.fillStyle = "#173a2b";
+        ctx.beginPath();
+        ctx.arc(-6, 1, 2.3, 0, Math.PI * 2);
+        ctx.arc(6, 1, 2.3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = pet.kind === "rabbit" ? "#d87786" : "#3c2a24";
+        ctx.beginPath();
+        ctx.arc(0, 7, 2.8, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (carriedIndex < 0) {
+          ctx.fillStyle = "#173a2b";
+          ctx.font = "900 11px ui-rounded, system-ui, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(pet.kind.toUpperCase(), 0, 43);
+        }
+        ctx.restore();
+      }
+
+      function drawVan(now) {
+        const carried = pets.filter((pet) => pet.rescued);
+        const bounce = van.moving && !reducedMotion ? Math.sin(now * 0.018) * 1.5 : 0;
+
+        ctx.save();
+        ctx.translate(van.x, van.y + bounce);
+        ctx.rotate(van.angle + Math.PI / 2);
+
+        ctx.fillStyle = "rgb(10 45 28 / 24%)";
+        ctx.beginPath();
+        ctx.ellipse(0, 9, 28, 20, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#2d3440";
+        roundedRect(ctx, -25, -15, 8, 14, 4);
+        ctx.fill();
+        roundedRect(ctx, 17, -15, 8, 14, 4);
+        ctx.fill();
+        roundedRect(ctx, -25, 10, 8, 14, 4);
+        ctx.fill();
+        roundedRect(ctx, 17, 10, 8, 14, 4);
+        ctx.fill();
+
+        ctx.fillStyle = "#fff8e8";
+        ctx.strokeStyle = "#b54739";
+        ctx.lineWidth = 3;
+        roundedRect(ctx, -23, -31, 46, 62, 12);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "#ff725e";
+        roundedRect(ctx, -20, -27, 40, 23, 8);
+        ctx.fill();
+
+        ctx.fillStyle = "#93ddf5";
+        roundedRect(ctx, -14, -24, 28, 12, 5);
+        ctx.fill();
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, -24);
+        ctx.lineTo(0, -12);
+        ctx.stroke();
+
+        ctx.fillStyle = "#168c52";
+        roundedRect(ctx, -17, 1, 34, 24, 7);
+        ctx.fill();
+        drawPaw(ctx, 0, 10, 0.58, "#ffffff");
+
+        ctx.fillStyle = "#ffd34d";
+        ctx.beginPath();
+        ctx.arc(-14, -29, 3.2, 0, Math.PI * 2);
+        ctx.arc(14, -29, 3.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        carried.forEach((pet, index) => drawPet(pet, now, index));
+        ctx.restore();
+      }
+
+      function drawDirectionCue(now) {
+        if (state !== "deliver") return;
+        const center = adoptionCenter();
+        const angle = Math.atan2(center.y - van.y, center.x - van.x);
+        const distanceToCenter = distance(van, center);
+        if (distanceToCenter < center.radius + 25) return;
+        const pulse = reducedMotion ? 0 : Math.sin(now * 0.009) * 6;
+        const x = van.x + Math.cos(angle) * (53 + pulse);
+        const y = van.y + Math.sin(angle) * (53 + pulse);
+
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+        ctx.fillStyle = "#173a2b";
+        ctx.beginPath();
+        ctx.moveTo(16, 0);
+        ctx.lineTo(-8, -13);
+        ctx.lineTo(-5, -5);
+        ctx.lineTo(-20, -5);
+        ctx.lineTo(-20, 5);
+        ctx.lineTo(-5, 5);
+        ctx.lineTo(-8, 13);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+
+      function drawEffects() {
+        effects.forEach((effect) => {
+          const alpha = clamp(effect.life, 0, 1);
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          effect.particles.forEach((particle) => {
+            const progress = 1 - effect.life;
+            ctx.fillStyle = effect.color;
+            ctx.beginPath();
+            ctx.arc(
+              effect.x + particle.dx * progress,
+              effect.y + particle.dy * progress,
+              3 + alpha * 2,
+              0,
+              Math.PI * 2
+            );
+            ctx.fill();
+          });
+          ctx.fillStyle = "#173a2b";
+          ctx.font = "1000 16px ui-rounded, system-ui, sans-serif";
+          ctx.textAlign = "center";
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 5;
+          ctx.strokeText(effect.label, effect.x, effect.y - 27);
+          ctx.fillText(effect.label, effect.x, effect.y - 27);
+          ctx.restore();
+        });
+      }
+
+      function drawConfetti() {
+        confetti.forEach((piece) => {
+          ctx.save();
+          ctx.translate(piece.x, piece.y);
+          ctx.rotate(piece.rotation);
+          ctx.fillStyle = piece.color;
+          ctx.fillRect(-4, -7, 8, 14);
+          ctx.restore();
+        });
+      }
+
+      function draw(now) {
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+        drawBackground(now);
+        drawAdoptionCenter(now);
+        pets.filter((pet) => !pet.rescued).forEach((pet) => drawPet(pet, now));
+        drawDirectionCue(now);
+        drawVan(now);
+        drawEffects();
+        drawConfetti();
+      }
+
+      function frame(now) {
+        const dt = Math.min(0.05, Math.max(0, (now - lastFrame) / 1000));
+        lastFrame = now;
+        update(dt);
+        draw(now);
+        window.requestAnimationFrame(frame);
+      }
+
+      function openDestination() {
+        const host = window;
+        const url = CONFIG.destinationUrl;
+
+        if (host.mraid && typeof host.mraid.open === "function") {
+          host.mraid.open(url);
+        } else if (host.dapi && typeof host.dapi.openStoreUrl === "function") {
+          host.dapi.openStoreUrl();
+        } else if (host.FbPlayableAd && typeof host.FbPlayableAd.onCTAClick === "function") {
+          host.FbPlayableAd.onCTAClick();
+        } else {
+          host.open(url, "_blank", "noopener,noreferrer");
+        }
+      }
+
+      canvas.addEventListener("pointerdown", onPointerDown);
+      canvas.addEventListener("pointermove", onPointerMove);
+      canvas.addEventListener("pointerup", onPointerUp);
+      canvas.addEventListener("pointercancel", onPointerUp);
+      canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+
+      window.addEventListener("keydown", (event) => {
+        const allowed = [
+          "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+          "KeyW", "KeyA", "KeyS", "KeyD"
+        ];
+        if (!allowed.includes(event.code)) return;
+        if (state === "success" || state === "timeout" || state === "adopting") return;
+        event.preventDefault();
+        keys.add(event.code);
+        beginPlay();
+      });
+
+      window.addEventListener("keyup", (event) => {
+        keys.delete(event.code);
+      });
+
+      window.addEventListener("blur", () => {
+        keys.clear();
+        pointerActive = false;
+        canvas.classList.remove("is-driving");
+      });
+
+      document.addEventListener("visibilitychange", () => {
+        lastFrame = performance.now();
+      });
+
+      window.addEventListener("resize", resizeCanvas);
+      retryButton.addEventListener("click", resetGame);
+      ctaButton.addEventListener("click", openDestination);
+
+      window.AdoptarioPlayable = Object.freeze({
+        destinationUrl: CONFIG.destinationUrl,
+        getState: () => state,
+        restart: resetGame
+      });
+
+      resizeCanvas();
+      resetGame();
+      window.requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>

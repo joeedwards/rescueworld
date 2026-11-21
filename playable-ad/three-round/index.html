@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <meta name="theme-color" content="#173b2b">
+  <title>Adoptar.io — Rescue, Care, Protect</title>
+  <style>
+    :root{color-scheme:light;--ink:#173b2b;--cream:#fff8e8;--green:#35c878;--dark:#168a52;--coral:#ff725e;--gold:#ffd451;--red:#e94d4d;--blue:#55a8ff}
+    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+    html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#0d261b;font-family:ui-rounded,"Arial Rounded MT Bold","Trebuchet MS",system-ui,sans-serif;color:var(--ink);overscroll-behavior:none}
+    button{font:inherit}
+    #app{position:relative;width:min(100vw,540px);height:100vh;height:100dvh;margin:auto;overflow:hidden;background:#98d985;box-shadow:0 0 55px #0007;isolation:isolate;touch-action:none;user-select:none}
+    canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+    canvas.dragging{cursor:grabbing}
+    .brand{position:absolute;z-index:3;top:max(8px,env(safe-area-inset-top));left:12px;color:#fff;font-size:clamp(19px,5.8vw,27px);font-weight:1000;letter-spacing:-1px;text-shadow:0 3px 0 #16613e;pointer-events:none}
+    .top-actions{position:absolute;z-index:5;top:max(8px,env(safe-area-inset-top));right:10px;display:flex;gap:6px}
+    .icon-btn{width:38px;height:38px;border:2px solid #fff9;border-radius:50%;background:#173b2be8;color:#fff;font-size:18px;font-weight:1000;box-shadow:0 3px 0 #0003}
+    .hud{position:absolute;z-index:3;top:max(49px,calc(env(safe-area-inset-top) + 45px));left:9px;right:9px;display:grid;grid-template-columns:repeat(3,1fr);gap:5px;pointer-events:none}
+    .pill{padding:6px 4px;border:2px solid #ffffffc9;border-radius:999px;background:#fff8e8ed;text-align:center;font-size:clamp(11px,3.25vw,15px);font-weight:950;box-shadow:0 3px 0 #1d57362e;white-space:nowrap}
+    .pill b{color:var(--dark)}
+    #objective{position:absolute;z-index:3;top:max(84px,calc(env(safe-area-inset-top) + 80px));left:50%;max-width:calc(100% - 24px);transform:translateX(-50%);padding:7px 14px;border-radius:12px;background:#173b2bf2;color:#fff;text-align:center;font-size:clamp(12px,3.5vw,16px);font-weight:950;line-height:1.15;box-shadow:0 4px 0 #0003;pointer-events:none}
+    #threats{position:absolute;z-index:3;top:max(120px,calc(env(safe-area-inset-top) + 116px));left:10px;right:10px;display:none;gap:5px;pointer-events:none}
+    #threats.show{display:flex}
+    .threat{min-width:0;flex:1;padding:3px;border-radius:8px;background:#173b2bd9;color:#fff;font-size:9px;font-weight:900;text-align:center}
+    .bar{height:5px;margin-top:2px;overflow:hidden;border-radius:9px;background:#ffffff40}
+    .bar i{display:block;height:100%;width:0;background:var(--gold);transition:width .12s linear,background .2s}
+    #toast{position:absolute;z-index:6;top:46%;left:50%;width:max-content;max-width:88%;transform:translate(-50%,-50%) scale(.85);padding:10px 18px;border:3px solid #fff;border-radius:999px;background:var(--green);color:#fff;font-size:clamp(17px,5vw,24px);font-weight:1000;text-align:center;opacity:0;pointer-events:none;transition:.2s;box-shadow:0 5px 0 #168a52}
+    #toast.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
+    #care{position:absolute;z-index:4;right:14px;bottom:max(16px,calc(env(safe-area-inset-bottom) + 10px));display:none;width:92px;height:58px;border:3px solid #fff;border-radius:18px;background:#a9a9a9;color:#fff;font-weight:1000;font-size:17px;box-shadow:0 6px 0 #656565;touch-action:none}
+    #care.show{display:block}
+    #care.ready{background:var(--coral);box-shadow:0 6px 0 #ad3f34;animation:pulse 1s infinite}
+    #care.held{transform:translateY(5px);box-shadow:0 1px 0 #ad3f34;animation:none}
+    @keyframes pulse{50%{transform:scale(1.05)}}
+    #hint{position:absolute;z-index:4;bottom:max(18px,calc(env(safe-area-inset-bottom) + 12px));left:50%;transform:translateX(-50%);width:max-content;max-width:calc(100% - 28px);padding:10px 16px;border:2px solid #fff9;border-radius:999px;background:#173b2bea;color:#fff;font-size:clamp(13px,3.8vw,17px);font-weight:950;pointer-events:none;animation:bob 1.2s ease-in-out infinite}
+    @keyframes bob{50%{transform:translate(-50%,-5px)}}
+    .cover{position:absolute;z-index:10;inset:0;display:none;place-items:center;padding:22px;background:#173b2bd9;backdrop-filter:blur(4px)}
+    .cover.show{display:grid}
+    .card{width:min(100%,390px);padding:24px 21px;border:4px solid #fff;border-radius:25px;background:var(--cream);text-align:center;box-shadow:0 10px 0 #09221880}
+    .card h1{margin:0 0 8px;font-size:clamp(29px,9vw,45px);line-height:.95;color:var(--dark)}
+    .card h2{margin:0 0 8px;font-size:28px}
+    .card p{margin:8px 0 17px;font-size:16px;font-weight:800;line-height:1.35}
+    .reward{margin:12px 0;padding:9px;border-radius:12px;background:#fff0b8;font-size:20px;font-weight:1000;color:#8b5d00}
+    .primary,.secondary{display:block;width:100%;margin-top:10px;padding:13px 12px;border:0;border-radius:14px;color:#fff;font-weight:1000;font-size:19px;box-shadow:0 5px 0 #0b6339}
+    .primary{background:var(--green)}
+    .secondary{background:var(--coral);box-shadow:0 5px 0 #a83f34}
+    .primary:active,.secondary:active{transform:translateY(4px);box-shadow:0 1px 0 #0b6339}
+    .small{font-size:12px!important;opacity:.7}
+    @media(max-height:520px){.brand{font-size:18px}.hud{top:43px}.pill{padding:4px}.top-actions{top:5px}.icon-btn{width:34px;height:34px}#objective{top:72px}#threats{top:104px}.card{padding:15px}.card h1{font-size:30px}.card p{margin:5px 0 10px}}
+  </style>
+</head>
+<body>
+<main id="app" aria-label="Adoptar.io three-round playable">
+  <canvas id="game" aria-label="Drag to steer the rescue van"></canvas>
+  <div class="brand">🐾 Adoptar.io</div>
+  <div class="top-actions"><button id="pause" class="icon-btn" aria-label="Pause">Ⅱ</button></div>
+  <div class="hud">
+    <div class="pill">ROUND <b id="round">—</b></div>
+    <div class="pill">TIME <b id="time">60</b>s</div>
+    <div class="pill">RT <b id="rt">0</b></div>
+  </div>
+  <div id="objective">Drag to steer your rescue van</div>
+  <div id="threats"></div>
+  <div id="toast" role="status"></div>
+  <div id="hint">☝️ DRAG TO STEER</div>
+  <button id="care" aria-label="Hold to care">HOLD<br>CARE</button>
+
+  <section id="transition" class="cover" aria-live="polite">
+    <div class="card">
+      <h2 id="transition-title">ROUND 2</h2>
+      <p id="transition-copy"></p>
+    </div>
+  </section>
+  <section id="paused" class="cover">
+    <div class="card">
+      <h2>PAUSED</h2>
+      <p>Your rescue clock is stopped.</p>
+      <button id="resume" class="primary">RESUME</button>
+    </div>
+  </section>
+  <section id="end" class="cover" aria-live="polite">
+    <div class="card">
+      <h1 id="end-title">FOREVER HOMES!</h1>
+      <p id="end-copy"></p>
+      <div id="reward" class="reward"></div>
+      <button id="cta" class="primary">PLAY ADOPTAR.IO</button>
+      <button id="replay" class="secondary">PLAY AGAIN</button>
+      <p class="small">Only “Play Adoptar.io” opens the game.</p>
+    </div>
+  </section>
+</main>
+<script>
+(() => {
+  "use strict";
+
+  const DESTINATION = "https://adoptar.io";
+  const TOKENS_PER_ADOPTION = 5;
+  const CAP_SECONDS = 60;
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const app = document.getElementById("app");
+  const ui = {
+    round: document.getElementById("round"), time: document.getElementById("time"),
+    rt: document.getElementById("rt"), objective: document.getElementById("objective"),
+    threats: document.getElementById("threats"), toast: document.getElementById("toast"),
+    hint: document.getElementById("hint"), care: document.getElementById("care"),
+    pause: document.getElementById("pause"), paused: document.getElementById("paused"),
+    resume: document.getElementById("resume"), transition: document.getElementById("transition"),
+    transitionTitle: document.getElementById("transition-title"),
+    transitionCopy: document.getElementById("transition-copy"), end: document.getElementById("end"),
+    endTitle: document.getElementById("end-title"), endCopy: document.getElementById("end-copy"),
+    reward: document.getElementById("reward"), cta: document.getElementById("cta"),
+    replay: document.getElementById("replay")
+  };
+
+  let W = 360, H = 640, dpr = 1, raf = 0, lastReal = 0, toastTimer = 0;
+  const game = {
+    state: "tutorial", round: 0, elapsed: 0, roundElapsed: 0, transitionLeft: 0,
+    paused: false, hiddenPause: false, started: false, rt: 0, rescued: 0, adopted: 0,
+    van: {x: .5, y: .78, angle: -Math.PI / 2}, target: {x: .5, y: .78},
+    pointer: false, keys: new Set(), careHeld: false, careTarget: null,
+    pets: [], center: null, threats: [], particles: [], message: ""
+  };
+
+  const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
+  const dist = (a,b) => Math.hypot((a.x-b.x)*W,(a.y-b.y)*H);
+  const fieldTop = () => Math.min(160, H * .25);
+  const fieldBottom = () => H - Math.min(60, H * .1);
+  const inPlayableY = y => clamp(y, fieldTop()/H + .035, fieldBottom()/H - .035);
+
+  function resize() {
+    const r = app.getBoundingClientRect();
+    W = Math.max(1, r.width); H = Math.max(1, r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.round(W*dpr); canvas.height = Math.round(H*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+
+  function setObjective(text) {
+    if (ui.objective.textContent !== text) ui.objective.textContent = text;
+  }
+
+  function showToast(text, seconds=.9) {
+    game.message = text; ui.toast.textContent = text; ui.toast.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { ui.toast.classList.remove("show"); game.message = ""; }, seconds*1000);
+  }
+
+  function burst(x,y,color,count=12) {
+    for(let i=0;i<count;i++) game.particles.push({
+      x,y,vx:(Math.random()-.5)*.16,vy:(Math.random()-.8)*.16,
+      life:.65+Math.random()*.35,color
+    });
+  }
+
+  function reset() {
+    game.state="tutorial"; game.round=0; game.elapsed=0; game.roundElapsed=0;
+    game.transitionLeft=0; game.paused=false; game.hiddenPause=false; game.started=false;
+    game.rt=0; game.rescued=0; game.adopted=0; game.van={x:.5,y:inPlayableY(.79),angle:-Math.PI/2};
+    game.target={x:game.van.x,y:game.van.y}; game.pointer=false; game.keys.clear();
+    game.careHeld=false; game.careTarget=null; game.pets=[]; game.center=null;
+    game.threats=[]; game.particles=[]; ui.end.classList.remove("show");
+    ui.paused.classList.remove("show"); ui.transition.classList.remove("show");
+    ui.hint.style.display="block"; ui.care.className=""; ui.threats.className="";
+    setObjective("Drag to steer your rescue van"); syncHud();
+  }
+
+  function begin() {
+    if (game.state !== "tutorial") return;
+    game.started = true; ui.hint.style.display="none"; setupRound1();
+  }
+
+  function setupRound1() {
+    game.state="round1"; game.round=1; game.roundElapsed=0;
+    game.van={x:.5,y:inPlayableY(.79),angle:-Math.PI/2}; game.target={...game.van};
+    game.pets=[
+      {x:.20,y:inPlayableY(.61),emoji:"🐶",rescued:false},
+      {x:.77,y:inPlayableY(.49),emoji:"🐱",rescued:false},
+      {x:.34,y:inPlayableY(.35),emoji:"🐰",rescued:false}
+    ];
+    game.center={x:.72,y:inPlayableY(.26),r:Math.min(W,H)*.105};
+    game.threats=[]; ui.care.className=""; ui.threats.className="";
+    setObjective("Rescue 3 stray pets"); syncHud();
+  }
+
+  function startTransition(next) {
+    game.state="transition"; game.transitionLeft=1.45; game.careHeld=false;
+    ui.care.className=""; ui.threats.className="";
+    ui.transitionTitle.textContent = next===2 ? "ROUND 2" : "ROUND 3";
+    ui.transitionCopy.textContent = next===2
+      ? "Reach the Breeder Camp and hold CARE before it grows."
+      : "Three camps. Three growth clocks. Stop them all!";
+    ui.transition.classList.add("show");
+    game.nextRound=next;
+  }
+
+  function setupRound2() {
+    ui.transition.classList.remove("show"); game.state="round2"; game.round=2; game.roundElapsed=0;
+    game.van={x:.18,y:inPlayableY(.76),angle:-Math.PI/2}; game.target={...game.van};
+    game.pets=[]; game.center=null;
+    game.threats=[makeThreat("Breeder Camp",.72,inPlayableY(.36),12,2.35)];
+    ui.care.classList.add("show"); renderThreatBars();
+    setObjective("Hold CARE near the Breeder Camp"); syncHud();
+  }
+
+  function setupRound3() {
+    ui.transition.classList.remove("show"); game.state="round3"; game.round=3; game.roundElapsed=0;
+    game.van={x:.5,y:inPlayableY(.79),angle:-Math.PI/2}; game.target={...game.van};
+    game.pets=[]; game.center=null;
+    game.threats=[
+      makeThreat("Camp A",.18,inPlayableY(.34),6.5,1.8),
+      makeThreat("Camp B",.78,inPlayableY(.39),9.5,1.8),
+      makeThreat("Camp C",.51,inPlayableY(.56),12.5,1.8)
+    ];
+    ui.care.classList.add("show"); renderThreatBars();
+    setObjective("Clear all 3 camps"); syncHud();
+  }
+
+  function makeThreat(name,x,y,growAt,careNeed) {
+    return {name,x,y,growAt,careNeed,age:0,care:0,status:"camp",cleared:false,mergedCount:1};
+  }
+
+  function renderThreatBars() {
+    ui.threats.innerHTML="";
+    game.threats.forEach((t,i)=>{
+      const el=document.createElement("div"); el.className="threat";
+      el.innerHTML=`<span>${t.name}</span><div class="bar"><i></i></div>`;
+      t.bar=el.querySelector("i"); t.label=el.querySelector("span");
+      ui.threats.appendChild(el);
+    });
+    ui.threats.classList.toggle("show", game.threats.length>0);
+  }
+
+  function syncHud() {
+    ui.round.textContent=game.round ? `${game.round}/3` : "—";
+    ui.time.textContent=Math.max(0,Math.ceil(CAP_SECONDS-game.elapsed));
+    ui.rt.textContent=game.rt;
+  }
+
+  function nearThreat(t) { return !t.cleared && dist(game.van,t) < (t.status==="mall" ? 94 : 76); }
+
+  function chooseCareTarget() {
+    let best=null,bestD=Infinity;
+    game.threats.forEach(t=>{if(!t.cleared){const d=dist(game.van,t);if(d<bestD){best=t;bestD=d}}});
+    return bestD < (best && best.status==="mall" ? 94 : 76) ? best : null;
+  }
+
+  function clearThreat(t) {
+    t.cleared=true; t.care=t.careNeed; game.careTarget=null; game.careHeld=false;
+    burst(t.x,t.y,"#ffd451",22);
+    const bonus=10*t.mergedCount; game.rt+=bonus;
+    showToast(`SAFE! +${bonus} RT`);
+    if(game.state==="round2") {
+      setObjective("Breeder Camp cleared!"); setTimeout(()=>{if(game.state==="round2")startTransition(3)},700);
+    } else {
+      const left=game.threats.filter(x=>!x.cleared).length;
+      setObjective(left ? `Clear ${left} remaining threat${left===1?"":"s"}` : "All breeder threats cleared!");
+      if(!left) setTimeout(()=>{if(game.state==="round3")finish(true)},650);
+    }
+    syncHud();
+  }
+
+  function mature(t) {
+    if(t.status!=="camp"||t.cleared)return;
+    t.status="mill"; t.name="Breeder Mill"; t.careNeed+=.45;
+    burst(t.x,t.y,"#e94d4d",15); showToast("⚠ CAMP GREW INTO A MILL");
+  }
+
+  function mergeMills() {
+    const mills=game.threats.filter(t=>!t.cleared&&t.status==="mill");
+    if(mills.length<2)return;
+    const mall={
+      name:"Pet Mall",x:mills.reduce((s,t)=>s+t.x,0)/mills.length,
+      y:mills.reduce((s,t)=>s+t.y,0)/mills.length,growAt:999,careNeed:2.6+mills.length*.45,
+      age:0,care:0,status:"mall",cleared:false,mergedCount:mills.reduce((s,t)=>s+t.mergedCount,0)
+    };
+    mills.forEach(t=>t.cleared=true);
+    game.threats=game.threats.filter(t=>!mills.includes(t)); game.threats.push(mall);
+    burst(mall.x,mall.y,"#e94d4d",28); showToast("⚠ MILLS MERGED: PET MALL!",1.35);
+    setObjective("Shut down the Pet Mall"); renderThreatBars();
+  }
+
+  function updateThreats(dt) {
+    let changed=false;
+    game.threats.forEach(t=>{
+      if(t.cleared)return;
+      t.age+=dt;
+      if(t.status==="camp"&&t.age>=t.growAt){mature(t);changed=true}
+      if(t.bar){
+        const growth=t.status==="camp" ? clamp(t.age/t.growAt,0,1) : 1;
+        t.bar.style.width=`${growth*100}%`;
+        t.bar.style.background=t.status==="camp"?(growth>.72?"#e94d4d":"#ffd451"):"#e94d4d";
+        t.label.textContent=t.cleared?"SAFE":t.name;
+      }
+    });
+    if(game.state==="round3"&&game.roundElapsed>10.5&&game.threats.filter(t=>!t.cleared&&t.status==="mill").length>=2) {
+      mergeMills(); changed=true;
+    }
+    game.careTarget=chooseCareTarget();
+    ui.care.classList.toggle("ready",!!game.careTarget);
+    ui.care.classList.toggle("held",game.careHeld&&!!game.careTarget);
+    if(game.careHeld&&game.careTarget) {
+      const t=game.careTarget; t.care=Math.min(t.careNeed,t.care+dt);
+      if(t.care>=t.careNeed) clearThreat(t);
+    }
+    if(changed) renderThreatBars();
+  }
+
+  function updateMovement(dt) {
+    let dx=0,dy=0;
+    if(game.keys.has("ArrowLeft")||game.keys.has("KeyA"))dx--;
+    if(game.keys.has("ArrowRight")||game.keys.has("KeyD"))dx++;
+    if(game.keys.has("ArrowUp")||game.keys.has("KeyW"))dy--;
+    if(game.keys.has("ArrowDown")||game.keys.has("KeyS"))dy++;
+    let moving=false;
+    if(dx||dy) {
+      const l=Math.hypot(dx,dy); dx/=l;dy/=l; moving=true;
+    } else if(game.pointer) {
+      const px=(game.target.x-game.van.x)*W,py=(game.target.y-game.van.y)*H,l=Math.hypot(px,py);
+      if(l>8){dx=px/l;dy=py/l;moving=true}
+    }
+    if(moving && !game.careHeld) {
+      const speed=Math.min(W,H)*.56;
+      game.van.x=clamp(game.van.x+dx*speed*dt/W,.055,.945);
+      game.van.y=inPlayableY(game.van.y+dy*speed*dt/H);
+      game.van.angle=Math.atan2(dy,dx);
+    }
+  }
+
+  function updateRound1() {
+    game.pets.forEach(p=>{
+      if(!p.rescued&&dist(game.van,p)<52){
+        p.rescued=true; game.rescued++; burst(p.x,p.y,"#ffd451");
+        showToast("PET RESCUED!"); setObjective(game.rescued===3?"Deliver to the green Adoption Center":`Rescue ${3-game.rescued} more pet${3-game.rescued===1?"":"s"}`);
+      }
+    });
+    if(game.rescued===3&&dist(game.van,game.center)<game.center.r+23){
+      game.adopted+=3; game.rt+=3*TOKENS_PER_ADOPTION; burst(game.center.x,game.center.y,"#ffffff",30);
+      showToast("FOREVER HOMES! +15 RT",1.2); setObjective("3 pets adopted!");
+      startTransition(2);
+    }
+  }
+
+  function update(dt) {
+    if(game.paused||game.hiddenPause||game.state==="tutorial"||game.state==="success"||game.state==="failure")return;
+    if(game.started){game.elapsed+=dt;syncHud()}
+    if(game.elapsed>=CAP_SECONDS){finish(false);return}
+    if(game.state==="transition"){
+      game.transitionLeft-=dt;
+      if(game.transitionLeft<=0)(game.nextRound===2?setupRound2():setupRound3());
+      return;
+    }
+    game.roundElapsed+=dt; updateMovement(dt);
+    if(game.state==="round1")updateRound1();
+    else updateThreats(dt);
+    game.particles.forEach(p=>{p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=.18*dt;p.life-=dt});
+    game.particles=game.particles.filter(p=>p.life>0);
+  }
+
+  function finish(win) {
+    game.state=win?"success":"failure"; game.paused=false; game.pointer=false; game.careHeld=false;
+    ui.care.className=""; ui.threats.className=""; ui.end.classList.add("show");
+    ui.endTitle.textContent=win?"FOREVER HOMES!":"TIME'S UP";
+    ui.endCopy.textContent=win
+      ?"You rescued pets, stopped breeder growth, and cleared every threat."
+      :"The breeder threat grew too fast. Replay and hold CARE near each camp.";
+    ui.reward.textContent=win?`${game.rt} RT earned • ${Math.ceil(CAP_SECONDS-game.elapsed)}s left`:`${game.adopted} adopted • ${game.rt} RT earned`;
+  }
+
+  function pause(show=true) {
+    if(["success","failure","tutorial"].includes(game.state))return;
+    game.paused=show; ui.paused.classList.toggle("show",show);
+    game.pointer=false; game.careHeld=false; ui.care.classList.remove("held");
+    lastReal=performance.now();
+  }
+
+  function pointerPosition(e) {
+    const r=canvas.getBoundingClientRect();
+    return {x:clamp((e.clientX-r.left)/r.width,0,1),y:clamp((e.clientY-r.top)/r.height,0,1)};
+  }
+  canvas.addEventListener("pointerdown",e=>{
+    e.preventDefault(); if(game.state==="tutorial")begin();
+    if(!["round1","round2","round3"].includes(game.state))return;
+    canvas.setPointerCapture(e.pointerId); game.pointer=true; game.target=pointerPosition(e); canvas.classList.add("dragging");
+  });
+  canvas.addEventListener("pointermove",e=>{if(game.pointer)game.target=pointerPosition(e)});
+  const endPointer=e=>{game.pointer=false;canvas.classList.remove("dragging");if(canvas.hasPointerCapture?.(e.pointerId))canvas.releasePointerCapture(e.pointerId)};
+  canvas.addEventListener("pointerup",endPointer); canvas.addEventListener("pointercancel",endPointer);
+
+  function setCare(on) {
+    if(!["round2","round3"].includes(game.state))return;
+    game.careHeld=on; if(on)game.pointer=false;
+  }
+  ui.care.addEventListener("pointerdown",e=>{e.preventDefault();e.stopPropagation();ui.care.setPointerCapture(e.pointerId);setCare(true)});
+  ui.care.addEventListener("pointerup",e=>{e.preventDefault();setCare(false)});
+  ui.care.addEventListener("pointercancel",()=>setCare(false));
+  window.addEventListener("keydown",e=>{
+    if(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","KeyW","KeyA","KeyS","KeyD","Space"].includes(e.code))e.preventDefault();
+    if(game.state==="tutorial"&&e.code!=="Escape")begin();
+    game.keys.add(e.code); if(e.code==="Space")setCare(true);
+    if(e.code==="Escape")pause(!game.paused);
+  });
+  window.addEventListener("keyup",e=>{game.keys.delete(e.code);if(e.code==="Space")setCare(false)});
+  ui.pause.addEventListener("click",e=>{e.stopPropagation();pause(true)});
+  ui.resume.addEventListener("click",e=>{e.stopPropagation();pause(false)});
+  ui.replay.addEventListener("click",e=>{e.stopPropagation();reset()});
+  ui.cta.addEventListener("click",e=>{
+    e.stopPropagation();
+    if(window.mraid&&typeof window.mraid.open==="function")window.mraid.open(DESTINATION);
+    else if(window.dapi&&typeof window.dapi.openStoreUrl==="function")window.dapi.openStoreUrl();
+    else if(window.FbPlayableAd&&typeof window.FbPlayableAd.onCTAClick==="function")window.FbPlayableAd.onCTAClick();
+    else window.open(DESTINATION,"_blank","noopener,noreferrer");
+  });
+  document.addEventListener("visibilitychange",()=>{
+    game.hiddenPause=document.hidden;
+    if(!document.hidden)lastReal=performance.now();
+  });
+  window.addEventListener("blur",()=>{game.hiddenPause=true});
+  window.addEventListener("focus",()=>{game.hiddenPause=false;lastReal=performance.now()});
+  window.addEventListener("resize",resize);
+
+  function roundedRect(x,y,w,h,r,fill,stroke) {
+    ctx.beginPath();ctx.roundRect(x,y,w,h,r);if(fill){ctx.fillStyle=fill;ctx.fill()}if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=3;ctx.stroke()}
+  }
+  function drawGround() {
+    const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,"#bce8a4");g.addColorStop(1,"#78c97a");ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+    ctx.globalAlpha=.12;ctx.fillStyle="#1a7248";
+    for(let y=fieldTop();y<H;y+=55)for(let x=(y%110?18:45);x<W;x+=75){ctx.beginPath();ctx.arc(x,y,2.5,0,7);ctx.fill()}
+    ctx.globalAlpha=1;
+  }
+  function drawCenter(c) {
+    const x=c.x*W,y=c.y*H,r=c.r;
+    ctx.save();ctx.globalAlpha=.28;ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(x,y,r+9,0,7);ctx.fill();
+    ctx.globalAlpha=.9;ctx.fillStyle="#29b96a";ctx.beginPath();ctx.arc(x,y,r,0,7);ctx.fill();
+    ctx.strokeStyle="#fff";ctx.lineWidth=4;ctx.setLineDash([9,7]);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle="#fff";ctx.textAlign="center";ctx.font=`1000 ${Math.max(12,Math.min(17,W*.04))}px system-ui`;ctx.fillText("ADOPTION",x,y-3);ctx.fillText("CENTER",x,y+16);ctx.restore();
+  }
+  function drawPet(p,i) {
+    if(p.rescued)return;
+    const x=p.x*W,y=p.y*H,bob=Math.sin(performance.now()/260+i)*3;
+    ctx.fillStyle="#fff9";ctx.beginPath();ctx.arc(x,y+bob,23,0,7);ctx.fill();
+    ctx.textAlign="center";ctx.textBaseline="middle";ctx.font="29px serif";ctx.fillText(p.emoji,x,y+bob);
+    ctx.fillStyle="#173b2b";ctx.font="900 10px system-ui";ctx.fillText("STRAY",x,y+35);
+  }
+  function drawThreat(t,i) {
+    if(t.cleared)return;
+    const x=t.x*W,y=t.y*H,near=nearThreat(t);
+    ctx.save();
+    ctx.strokeStyle=near?"#fff":"#ff725e99";ctx.lineWidth=near?5:3;ctx.setLineDash([8,6]);
+    ctx.beginPath();ctx.arc(x,y,t.status==="mall"?72:57,0,7);ctx.stroke();ctx.setLineDash([]);
+    if(t.status==="camp"){
+      roundedRect(x-35,y-23,70,46,10,"#9b643c","#fff4");
+      ctx.fillStyle="#f0dfbe";ctx.beginPath();ctx.moveTo(x-43,y-20);ctx.lineTo(x,y-51);ctx.lineTo(x+43,y-20);ctx.fill();
+      ctx.fillStyle="#4c2b21";ctx.fillRect(x-7,y-2,14,25);
+      ctx.font="20px serif";ctx.textAlign="center";ctx.fillText("🐾",x,y-23);
+    } else {
+      const size=t.status==="mall"?110:78;
+      roundedRect(x-size/2,y-size*.34,size,size*.68,8,t.status==="mall"?"#553044":"#6c4141","#ffd451");
+      ctx.fillStyle="#20252b";for(let q=-1;q<=1;q++)ctx.fillRect(x+q*24-6,y-8,12,18);
+      ctx.fillStyle="#ffd451";ctx.textAlign="center";ctx.font=`1000 ${t.status==="mall"?15:12}px system-ui`;ctx.fillText(t.status==="mall"?"PET MALL":"BREEDER MILL",x,y-size*.44);
+    }
+    if(near){
+      const pct=clamp(t.care/t.careNeed,0,1);
+      roundedRect(x-42,y+48,84,10,6,"#173b2b","#fff");
+      roundedRect(x-39,y+51,78*pct,4,3,"#35c878");
+    }
+    ctx.restore();
+  }
+  function drawVan() {
+    const x=game.van.x*W,y=game.van.y*H,a=game.van.angle;
+    ctx.save();ctx.translate(x,y);ctx.rotate(a+Math.PI/2);
+    ctx.fillStyle="#0003";ctx.beginPath();ctx.ellipse(3,7,20,29,0,0,7);ctx.fill();
+    roundedRect(-18,-27,36,54,10,"#fff","#173b2b");
+    ctx.fillStyle="#4c9dff";ctx.fillRect(-13,-20,26,13);
+    ctx.fillStyle="#35c878";ctx.fillRect(-13,-2,26,18);
+    ctx.fillStyle="#fff";ctx.font="17px serif";ctx.textAlign="center";ctx.fillText("🐾",0,13);
+    ctx.fillStyle="#173b2b";ctx.fillRect(-22,-17,5,13);ctx.fillRect(17,-17,5,13);ctx.fillRect(-22,10,5,13);ctx.fillRect(17,10,5,13);
+    ctx.restore();
+    if(game.state==="round1"&&game.rescued){
+      ctx.textAlign="center";ctx.font="16px serif";ctx.fillText(["","🐶","🐶 🐱","🐶 🐱 🐰"][game.rescued],x,y+43);
+    }
+  }
+  function drawParticles() {
+    game.particles.forEach(p=>{ctx.globalAlpha=clamp(p.life,0,1);ctx.fillStyle=p.color;ctx.beginPath();ctx.arc(p.x*W,p.y*H,3.5,0,7);ctx.fill()});ctx.globalAlpha=1;
+  }
+  function draw() {
+    ctx.setTransform(dpr,0,0,dpr,0,0);drawGround();
+    if(game.center)drawCenter(game.center);
+    game.pets.forEach(drawPet);game.threats.forEach(drawThreat);
+    drawVan();drawParticles();
+    if(game.state==="tutorial"){
+      ctx.fillStyle="#173b2b25";ctx.beginPath();ctx.arc(W*.5,H*.62,34+Math.sin(performance.now()/250)*6,0,7);ctx.fill();
+      ctx.strokeStyle="#fff";ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(W*.5,H*.73);ctx.lineTo(W*.5,H*.62);ctx.stroke();
+    }
+  }
+  function frame(now) {
+    if(!lastReal)lastReal=now;
+    const dt=Math.min(.05,(now-lastReal)/1000);lastReal=now;
+    update(dt);draw();raf=requestAnimationFrame(frame);
+  }
+
+  window.AdoptarioThreeRound = Object.freeze({
+    getState: () => JSON.parse(JSON.stringify({
+      state:game.state,round:game.round,elapsed:+game.elapsed.toFixed(3),
+      remaining:+Math.max(0,CAP_SECONDS-game.elapsed).toFixed(3),rt:game.rt,
+      rescued:game.rescued,adopted:game.adopted,paused:game.paused||game.hiddenPause,
+      threats:game.threats.map(t=>({name:t.name,status:t.status,age:+t.age.toFixed(2),care:+t.care.toFixed(2),cleared:t.cleared,mergedCount:t.mergedCount}))
+    })),
+    restart: reset,
+    advanceTime: ms => {for(let left=clamp(Number(ms)||0,0,65000);left>0;left-=50)update(Math.min(.05,left/1000));draw();return window.AdoptarioThreeRound.getState()},
+    moveVanNearObjective: (index=0) => {
+      const targets=game.state==="round1"?(game.rescued<3?game.pets.filter(p=>!p.rescued):[game.center]):game.threats.filter(t=>!t.cleared);
+      const t=targets[clamp(index|0,0,Math.max(0,targets.length-1))];
+      if(t){game.van.x=t.x;game.van.y=t.y;update(.016);draw()}
+      return window.AdoptarioThreeRound.getState();
+    },
+    setCareHeld: on => {setCare(Boolean(on));return window.AdoptarioThreeRound.getState()}
+  });
+
+  resize();reset();cancelAnimationFrame(raf);raf=requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

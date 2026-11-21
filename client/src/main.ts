@@ -28,9 +28,13 @@ import {
   getSeasonLabel,
   isInVegetationPatch,
   getWindMultiplier,
+  SEASON_SPEED_MULTIPLIER,
+  SPRING_VEGETATION_SPEED,
   MAX_RT_PER_MATCH,
+  DIFFICULTY_CONFIG,
+  normalizeDifficulty,
 } from 'shared';
-import type { Season } from 'shared';
+import type { Season, Difficulty } from 'shared';
 import { PICKUP_TYPE_GROWTH, PICKUP_TYPE_SPEED, PICKUP_TYPE_PORT, PICKUP_TYPE_BREEDER, PICKUP_TYPE_SHELTER_PORT, VAN_MAX_CAPACITY } from 'shared';
 import { PET_TYPE_CAT, PET_TYPE_DOG, PET_TYPE_BIRD, PET_TYPE_RABBIT, PET_TYPE_SPECIAL } from 'shared';
 import { BOSS_MILL_HORSE, BOSS_MILL_CAT, BOSS_MILL_DOG, BOSS_MILL_BIRD, BOSS_MILL_RABBIT } from 'shared';
@@ -236,7 +240,7 @@ let joystickOriginX = 0;
 let joystickOriginY = 0;
 let joystickCurrentX = 0;
 let joystickCurrentY = 0;
-const JOYSTICK_DEADZONE = 15; // pixels from center before movement starts
+const JOYSTICK_DEADZONE = 28; // pixels from center before movement starts
 const JOYSTICK_MAX_RADIUS = 60; // max visual radius
 
 // --- Network ---
@@ -253,6 +257,10 @@ const INTERP_BUFFER_MS = 100;
 // --- Local prediction (for my player) ---
 let predictedPlayer: PlayerState | null = null;
 let lastProcessedInputSeq = -1;
+/** Inputs sent to the server but not yet acknowledged (seq <= server inputSeq).
+ *  Used to replay un-acked inputs on top of each authoritative snapshot so the
+ *  predicted van doesn't snap backwards when snapshots arrive late/bursty. */
+const inputHistory: { seq: number; inputFlags: number }[] = [];
 let lastKnownSize = 0;
 let lastTotalAdoptions = 0;
 let lastPetsInsideLength = 0;
@@ -266,6 +274,10 @@ const lastPetTypesById = new Map<string, number>();
 let lastSpeedBoostUntil = 0;
 let matchEndPlayed = false;
 let matchEndTokensAwarded = false;
+/** Latched when the server says the match is over, so a late snapshot cannot hide the win screen. */
+let forcedMatchOver = false;
+/** Human won a full boss clear (hutches), even if a bot has more adoptions. */
+let matchEndBossVictory = false;
 /** Set when matchEndInventory has strayLoss: true; used so match-over UI shows 0 RT even if snapshot lacked the field. */
 let matchEndWasStrayLoss = false;
 let growthPopUntil = 0;
@@ -298,11 +310,31 @@ let statsPanelOpen = false;
 const fpsFrameTimes: number[] = [];
 let lastFpsMeasureTime = 0;
 let measuredFps = 0;
+// --- Netcode debug metrics (surfaced in the ?debug overlay; diagnostics only) ---
+/** performance.now() when the previous snapshot arrived, for measuring inter-snapshot interval. */
+let lastSnapshotRecvTime = 0;
+/** Smoothed ms between snapshot arrivals (server broadcasts ~12.5Hz → expect ~80ms). */
+let snapshotIntervalMs = 0;
+/** px between the client-predicted van position and the server's authoritative position at the
+ *  instant a snapshot lands (i.e. the size of the per-snapshot correction / "snap"). */
+let predServerGap = 0;
+/** Rolling peak of predServerGap, so brief large corrections are visible even if transient. */
+let maxPredServerGap = 0;
+/** Perf debug overlay: enabled via ?debug or ?debug=1 in the URL. */
+const DEBUG_PERF = /[?&]debug(=1)?(&|$)/.test(location.search);
 const carriedEl = document.getElementById('carried')!;
 const tagCooldownEl = document.getElementById('tag-cooldown')!;
 const timerEl = document.getElementById('timer')!;
 const gameClockEl = document.getElementById('game-clock')!;
 const seasonBadgeEl = document.getElementById('season-badge')!;
+const objectiveHudEl = document.getElementById('objective-hud');
+
+// Final stray-hunt banner (breeders cleared, <20 strays left)
+const FINAL_HUNT_STRAY_MAX = 20;
+const finalHuntBannerEl = document.getElementById('final-hunt-banner');
+const finalHuntMsgEl = document.getElementById('final-hunt-msg');
+/** One-shot announcement when the final hunt begins this match. */
+let finalHuntAnnounced = false;
 
 // Initialize season badge
 {
@@ -620,6 +652,7 @@ const PET_EMOJIS: Record<PetType, string> = {
 
 const COOKIE_CONSENT_KEY = 'cookieConsent';
 const MODE_KEY = 'rescueworld_mode';
+const DIFFICULTY_KEY = 'rescueworld_difficulty';
 const FPS_KEY = 'rescueworld_fps';
 const REF_KEY = 'rescueworld_ref';
 const SKIN_KEY = 'rescueworld_skin_unlocked';
@@ -632,6 +665,10 @@ const ATTACK_WARN_COOLDOWN_MS = 2000;
 // Van facing direction: 1 = right, -1 = left
 // Persists when stopped so van keeps its last direction
 const vanFacingDir = new Map<string, number>();
+
+// Rear cargo-door open amount per van (0 = closed, 1 = fully open). Eased each frame so the
+// doors visibly swing open while the van is loading rescued strays and shut when full/empty.
+const vanDoorOpen = new Map<string, number>();
 
 // Port animation state: tracks players who are porting
 interface PortAnimation {
@@ -767,6 +804,8 @@ type ReferralInfo = {
 };
 let selectedMode: 'ffa' | 'teams' | 'solo' = 'ffa';
 let currentMatchMode: 'ffa' | 'teams' | 'solo' = 'ffa'; // Actual mode from server (vs selectedMode which is UI state)
+let selectedDifficulty: Difficulty = 'medium'; // Solo lobby UI selection
+let currentDifficulty: Difficulty = 'medium'; // Actual difficulty of the active match (from server)
 let selectedTeam: 'red' | 'blue' = 'red';
 let hasSavedMatch = false;
 const pendingBoosts = { sizeBonus: 0, speedBoost: false };  // adoptSpeed is now inventory-based
@@ -1561,21 +1600,41 @@ function showToast(message: string, type: 'success' | 'error' | 'info' = 'info',
 const announcementQueue: string[] = [];
 let announcementEl: HTMLElement | null = null;
 let announcementAnimating = false;
+let announcementGen = 0;
+let announcementTimer: ReturnType<typeof setTimeout> | null = null;
+
+function isPriorityAnnouncement(m: string): boolean {
+  const s = m.toLowerCase();
+  return s.includes('cleared!') || s.includes('victory') || s.includes("time's up") || s.includes('you lost the boss') || s.includes('boss mode');
+}
 
 function isAdoptionEventAnnouncement(m: string): boolean {
   return m.includes(' - rescue ') && m.includes('pets!');
 }
 
 function showAnnouncement(messages: string[]): void {
-  // Limit queue size to prevent announcements from getting too stale
-  const MAX_QUEUE_SIZE = 3;
-  const adoptionEventMsgs = messages.filter(isAdoptionEventAnnouncement);
-  const otherMsgs = messages.filter(m => !isAdoptionEventAnnouncement(m));
-  // Prioritize adoption events — show them immediately, not delayed behind breeder/warning announcements
-  announcementQueue.unshift(...adoptionEventMsgs);
+  // Hutch clears and the win/loss line must not wait behind an 8s scroll, and must not be dropped.
+  const MAX_QUEUE_SIZE = 5;
+  const priorityMsgs = messages.filter(isPriorityAnnouncement);
+  const rest = messages.filter(m => !isPriorityAnnouncement(m));
+  const adoptionEventMsgs = rest.filter(isAdoptionEventAnnouncement);
+  const otherMsgs = rest.filter(m => !isAdoptionEventAnnouncement(m));
   announcementQueue.push(...otherMsgs);
+  announcementQueue.unshift(...adoptionEventMsgs);
+  announcementQueue.unshift(...priorityMsgs);
   while (announcementQueue.length > MAX_QUEUE_SIZE) {
-    announcementQueue.pop(); // Drop from end (keep prioritized items at front)
+    let dropAt = -1;
+    for (let i = announcementQueue.length - 1; i >= 0; i--) {
+      if (!isPriorityAnnouncement(announcementQueue[i])) { dropAt = i; break; }
+    }
+    if (dropAt < 0) break;
+    announcementQueue.splice(dropAt, 1);
+  }
+  if (priorityMsgs.length > 0 && announcementAnimating) {
+    announcementGen++;
+    announcementAnimating = false;
+    if (announcementTimer) { clearTimeout(announcementTimer); announcementTimer = null; }
+    if (announcementEl) announcementEl.innerHTML = '';
   }
   // When an adoption event starts, show a toast encouraging players to rush there
   if (adoptionEventMsgs.length > 0) {
@@ -1588,10 +1647,15 @@ function showAnnouncement(messages: string[]): void {
 function clearAnnouncements(): void {
   announcementQueue.length = 0;
   announcementAnimating = false;
+  announcementGen++;
+  if (announcementTimer) { clearTimeout(announcementTimer); announcementTimer = null; }
   if (announcementEl) {
     announcementEl.style.display = 'none';
     announcementEl.innerHTML = '';
   }
+  finalHuntAnnounced = false;
+  finalHuntBannerEl?.classList.add('hidden');
+  objectiveHudEl?.classList.add('hidden');
 }
 
 function processAnnouncementQueue(): void {
@@ -1599,6 +1663,8 @@ function processAnnouncementQueue(): void {
   
   const message = announcementQueue.shift()!;
   announcementAnimating = true;
+  const gen = ++announcementGen;
+  const priority = isPriorityAnnouncement(message);
   
   // Determine if this is a positive (green) or negative (red) announcement
   // GREEN: rescuing pets, adoption events, shutting down camps - GOOD things
@@ -1606,7 +1672,7 @@ function processAnnouncementQueue(): void {
   const positiveKeywords = [
     'rescued', 'shut down', 'destroyed', 'saved', 'stopped', 'is shutting down',
     'farmers market', 'school fair', 'petco', 'stadium', 'event started', 'partial win',
-    'dropped off', 'instant adoption', 'won '
+    'dropped off', 'instant adoption', 'won ', 'cleared', 'victory'
   ];
   const negativeKeywords = [
     'arrived', 'appeared', 'failed', 'formed', 'expanding', 'breeding',
@@ -1648,14 +1714,21 @@ function processAnnouncementQueue(): void {
     pointer-events: none;
   `;
   
-  // Create scrolling text - 8s animation (slower for readability)
+  // Priority lines (hutch cleared, victory) sit in the center. Everything else scrolls.
   const textEl = document.createElement('div');
-  textEl.style.cssText = `
+  textEl.style.cssText = priority
+    ? `
     white-space: nowrap;
     font: bold 18px 'Rubik', sans-serif;
     color: #fff;
     text-shadow: 2px 2px 4px rgba(0,0,0,0.8), 0 0 10px ${glowColor};
-    animation: announcementScroll 8s linear forwards;
+  `
+    : `
+    white-space: nowrap;
+    font: bold 18px 'Rubik', sans-serif;
+    color: #fff;
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.8), 0 0 10px ${glowColor};
+    animation: announcementScroll 4s linear forwards;
   `;
   textEl.textContent = `${icon} ${message} ${icon}`;
   
@@ -1678,15 +1751,22 @@ function processAnnouncementQueue(): void {
   announcementEl.innerHTML = '';
   announcementEl.appendChild(textEl);
   
-  // When animation ends, hide bar and process next in queue
-  textEl.addEventListener('animationend', () => {
+  const advance = () => {
+    if (gen !== announcementGen) return;
     announcementAnimating = false;
-    // Hide the bar if no more announcements
     if (announcementQueue.length === 0 && announcementEl) {
       announcementEl.style.display = 'none';
     }
     processAnnouncementQueue();
-  });
+  };
+  if (priority) {
+    announcementTimer = setTimeout(() => {
+      announcementTimer = null;
+      advance();
+    }, 2200);
+  } else {
+    textEl.addEventListener('animationend', advance);
+  }
 }
 
 // --- Ally Request Popup ---
@@ -2300,25 +2380,28 @@ function applyJoystickToInput(): void {
     return;
   }
   
-  // Normalize direction
-  const nx = dx / dist;
-  const ny = dy / dist;
-  
-  // Apply input based on direction (threshold at 0.3 for diagonal support)
-  setInputFlag(INPUT_LEFT, nx < -0.3);
-  setInputFlag(INPUT_RIGHT, nx > 0.3);
-  setInputFlag(INPUT_UP, ny < -0.3);
-  setInputFlag(INPUT_DOWN, ny > 0.3);
+  // Snap to nearest of 8 directions so slight off-axis flicks don't add a second axis
+  const angle = Math.atan2(dy, dx);
+  const sector = ((Math.round(angle / (Math.PI / 4)) % 8) + 8) % 8; // 0=R … 7=UR
+  setInputFlag(INPUT_RIGHT, sector === 0 || sector === 1 || sector === 7);
+  setInputFlag(INPUT_DOWN, sector === 1 || sector === 2 || sector === 3);
+  setInputFlag(INPUT_LEFT, sector === 3 || sector === 4 || sector === 5);
+  setInputFlag(INPUT_UP, sector === 5 || sector === 6 || sector === 7);
 }
 
 canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
-  if (e.touches.length) {
+  if (!e.touches.length) return;
+  const touch = e.touches[0];
+  const rect = canvas.getBoundingClientRect();
+  // Always track finger for gesture / ally deadzone checks
+  joystickOriginX = touch.clientX;
+  joystickOriginY = touch.clientY;
+  joystickCurrentX = joystickOriginX;
+  joystickCurrentY = joystickOriginY;
+  // Drive stick only activates in the left half of the canvas
+  if (touch.clientX - rect.left < rect.width * 0.5) {
     joystickActive = true;
-    joystickOriginX = e.touches[0].clientX;
-    joystickOriginY = e.touches[0].clientY;
-    joystickCurrentX = joystickOriginX;
-    joystickCurrentY = joystickOriginY;
   }
 }, { passive: false });
 
@@ -2327,13 +2410,30 @@ canvas.addEventListener('touchmove', (e) => {
   if (e.touches.length && joystickActive) {
     joystickCurrentX = e.touches[0].clientX;
     joystickCurrentY = e.touches[0].clientY;
+    // Follow-finger: slide origin when finger goes past max radius
+    const dx = joystickCurrentX - joystickOriginX;
+    const dy = joystickCurrentY - joystickOriginY;
+    const dist = Math.hypot(dx, dy);
+    if (dist > JOYSTICK_MAX_RADIUS) {
+      const excess = dist - JOYSTICK_MAX_RADIUS;
+      joystickOriginX += (dx / dist) * excess;
+      joystickOriginY += (dy / dist) * excess;
+    }
+  } else if (e.touches.length) {
+    // Keep tracking finger even when stick isn't active (right-half taps / ally)
+    joystickCurrentX = e.touches[0].clientX;
+    joystickCurrentY = e.touches[0].clientY;
   }
 }, { passive: false });
 
 function sendInputImmediately(): void {
   if (gameWs?.readyState === WebSocket.OPEN) {
-    const buf = encodeInput(inputFlags, inputSeq++);
+    const seq = inputSeq++;
+    const buf = encodeInput(inputFlags, seq);
     gameWs.send(buf);
+    // Same as tick path so release/stop reconciles instead of rubber-banding forward
+    inputHistory.push({ seq, inputFlags });
+    if (inputHistory.length > 240) inputHistory.shift();
   }
 }
 
@@ -2498,6 +2598,9 @@ canvas.addEventListener('touchend', (e) => {
   if (!latestSnapshot || !myPlayerId || !gameWs || gameWs.readyState !== WebSocket.OPEN) return;
   // Only process single-finger taps (not joystick gestures)
   if (e.changedTouches.length !== 1) return;
+  // Skip ally hit-test when the gesture moved past the deadzone (drive / drag)
+  const gestureDist = Math.hypot(joystickCurrentX - joystickOriginX, joystickCurrentY - joystickOriginY);
+  if (gestureDist >= JOYSTICK_DEADZONE) return;
   const touch = e.changedTouches[0];
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
@@ -2592,6 +2695,8 @@ let observerCameraX = MAP_WIDTH / 2;
 let observerCameraY = MAP_HEIGHT / 2;
 const OBSERVER_PAN_SPEED = 15; // pixels per frame
 let observerFreeLook = false; // true when spectator clicked minimap to free-roam
+// Id of the van the spectator camera is currently following (used to snap on target switch vs. ease-follow).
+let observerFollowedId: string | null = null;
 let isPanning = false;
 let panStartClientX = 0;
 let panStartClientY = 0;
@@ -2613,13 +2718,27 @@ function getCamera(): { x: number; y: number; w: number; h: number } {
   
   if (isObserver) {
     if (!observerFreeLook) {
-      // Full spectator mode: follow a player by index
+      // Full spectator mode: follow a player by index.
+      // Follow the interpolated (smoothed) position and ease the camera toward it so the
+      // watched van glides continuously instead of snapping on every ~80ms snapshot.
       const players = latestSnapshot?.players.filter(p => !p.eliminated) ?? [];
       if (players.length > 0) {
         const idx = observerFollowIndex % players.length;
         const target = players[idx];
-        observerCameraX = target.x;
-        observerCameraY = target.y;
+        const it = getInterpolatedPlayer(target.id) ?? target;
+        if (
+          observerFollowedId !== target.id ||
+          !Number.isFinite(observerCameraX) ||
+          !Number.isFinite(observerCameraY)
+        ) {
+          // Switched target (or first frame): snap to avoid a long pan across the map.
+          observerCameraX = it.x;
+          observerCameraY = it.y;
+          observerFollowedId = target.id;
+        } else {
+          observerCameraX += (it.x - observerCameraX) * CAMERA_SMOOTH;
+          observerCameraY += (it.y - observerCameraY) * CAMERA_SMOOTH;
+        }
       }
     }
     const camX = Math.max(0, Math.min(MAP_WIDTH - w, observerCameraX - w / 2));
@@ -2687,15 +2806,17 @@ function applyPanDelta(deltaScreenX: number, deltaScreenY: number): void {
 }
 
 // --- Prediction: advance by one server tick (used when sending input) ---
-function predictPlayerTick(p: PlayerState, inputFlags: number): PlayerState {
-  return predictPlayerByDt(p, inputFlags, 1 / TICK_RATE);
+// `nowTick` is the server tick the prediction is evaluated at, needed so speed-boost
+// expiry matches the server (speedBoostUntil is a tick, not a boolean).
+function predictPlayerTick(p: PlayerState, inputFlags: number, nowTick: number): PlayerState {
+  return predictPlayerByDt(p, inputFlags, 1 / TICK_RATE, nowTick);
 }
 
 // Fixed radius for van collision - matches server VAN_FIXED_RADIUS
 const VAN_FIXED_RADIUS = 30;
 
 // --- Prediction: advance by dt seconds (per-frame for smooth camera) ---
-function predictPlayerByDt(p: PlayerState, inputFlags: number, dtSec: number): PlayerState {
+function predictPlayerByDt(p: PlayerState, inputFlags: number, dtSec: number, nowTick: number): PlayerState {
   let dx = 0,
     dy = 0;
   if (inputFlags & INPUT_LEFT) dx -= 1;
@@ -2706,7 +2827,21 @@ function predictPlayerByDt(p: PlayerState, inputFlags: number, dtSec: number): P
     vy = 0;
   if (dx !== 0 || dy !== 0) {
     const len = Math.hypot(dx, dy) || 1;
-    const speed = (p.speedBoostUntil ?? 0) > 0 ? SHELTER_SPEED * SPEED_BOOST_MULTIPLIER : SHELTER_SPEED;
+    // Match server applyInput. A flat SHELTER_SPEED ran ahead of Fall/wind/season
+    // speed, so every snapshot yanked the van (and camera) backward.
+    // Use the calendar season, not the cosmetic easter-egg season — the server does too.
+    // Underdog (1.1x) is not in the snapshot, so it is omitted.
+    const season = getCurrentSeason();
+    let baseSpeed = SHELTER_SPEED;
+    if (p.vanSpeedUpgrade) baseSpeed *= 1.2;
+    baseSpeed *= SEASON_SPEED_MULTIPLIER[season];
+    if (season === 'spring' && isInVegetationPatch(p.x, p.y)) {
+      baseSpeed *= SPRING_VEGETATION_SPEED;
+    }
+    if (season === 'fall') {
+      baseSpeed *= getWindMultiplier(nowTick);
+    }
+    const speed = (p.speedBoostUntil ?? 0) > nowTick ? baseSpeed * SPEED_BOOST_MULTIPLIER : baseSpeed;
     const step = speed * dtSec;
     vx = (dx / len) * step;
     vy = (dy / len) * step;
@@ -2887,6 +3022,8 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
       joinMatchId: options?.joinMatchId,
       botsEnabled: (options?.mode === 'ffa' || options?.mode === 'teams') ? botsEnabled : undefined,
       team: options?.mode === 'teams' ? selectedTeam : undefined,
+      // Difficulty only applies to Solo; FFA/Teams auto-rotate server-side.
+      difficulty: options?.mode === 'solo' ? selectedDifficulty : undefined,
       guestStartingRt: guestRt,
     }));
     // Clear guest localStorage RT only for NEW matches (not rejoins).
@@ -2989,6 +3126,8 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           } else {
             currentMatchMode = selectedMode; // Fallback to selectedMode
           }
+          // Track actual match difficulty from server (used for boss ingredient costs, etc.)
+          currentDifficulty = normalizeDifficulty(msg.difficulty);
           // Initialize in-match boost state
           inMatchAdoptSpeedBoosts = typeof msg.adoptSpeedBoosts === 'number' ? msg.adoptSpeedBoosts : 0;
           adoptSpeedActiveUntilTick = typeof msg.adoptSpeedActiveUntilTick === 'number' ? msg.adoptSpeedActiveUntilTick : 0;
@@ -3035,6 +3174,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           myPlayerId = null; // observer has no player entity
           observerFollowIndex = 0;
           currentMatchId = msg.matchId ?? null;
+          currentDifficulty = normalizeDifficulty(msg.difficulty);
           observerOverlayMinimized = false;
           observerOverlayEl.classList.remove('hidden');
           observerMiniBtnEl.classList.add('hidden');
@@ -3068,6 +3208,8 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           clearStrayTiles();
           leaderboardEl.classList.remove('show');
           matchEndPlayed = false;
+          forcedMatchOver = false;
+          matchEndBossVictory = false;
           matchEndTokensAwarded = false;
           matchEndWasStrayLoss = false;
           clearAnnouncements();
@@ -3111,6 +3253,8 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
           clearStrayTiles();
           leaderboardEl.classList.remove('show');
           matchEndPlayed = false;
+          forcedMatchOver = false;
+          matchEndBossVictory = false;
           matchEndTokensAwarded = false;
           matchEndWasStrayLoss = false;
           clearAnnouncements();
@@ -3218,6 +3362,9 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         if (msg.type === 'groundFailed' && typeof msg.reason === 'string') {
           showToast(msg.reason);
         }
+        if (msg.type === 'buildFailed' && typeof msg.reason === 'string') {
+          showToast(msg.reason);
+        }
         // Breeder mini-game messages
         if (msg.type === 'breederStart' && typeof msg.petCount === 'number') {
           const level = typeof msg.level === 'number' ? msg.level : 1;
@@ -3305,7 +3452,10 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         // Match end inventory notification - match has ended, saved match cleared
         if (msg.type === 'matchEndInventory') {
           hasSavedMatch = false;
+          forcedMatchOver = true;
+          if (msg.bossVictory === true && msg.isWinner === true) matchEndBossVictory = true;
           if (msg.strayLoss === true) matchEndWasStrayLoss = true;
+          closeBossMillModal();
           // Remove current match from pending list (it has ended)
           if (currentMatchId) {
             removeActiveMultiplayerMatch(currentMatchId);
@@ -3359,6 +3509,13 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     if (new DataView(buf).getUint8(0) === MSG_SNAPSHOT) {
       const snap = decodeSnapshot(buf);
       latestSnapshot = snap;
+      // Netcode metric: smoothed interval between snapshot arrivals (diagnostics only).
+      const snapRecvNow = performance.now();
+      if (lastSnapshotRecvTime > 0) {
+        const dtSnap = snapRecvNow - lastSnapshotRecvTime;
+        snapshotIntervalMs = snapshotIntervalMs > 0 ? snapshotIntervalMs * 0.8 + dtSnap * 0.2 : dtSnap;
+      }
+      lastSnapshotRecvTime = snapRecvNow;
       if (matchPhase !== 'playing') {
         matchPhase = 'playing';
         lobbyOverlayEl.classList.add('hidden');
@@ -3545,10 +3702,36 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
         lastKnownSize = me.size;
         const prevX = predictedPlayer?.x ?? me.x;
         const prevY = predictedPlayer?.y ?? me.y;
-        predictedPlayer = { ...me, petsInside: [...me.petsInside] };
+        // Raw gap between the just-arrived authoritative position and our prediction
+        // (kept for the netcode overlay metric).
+        const rawGap = Math.hypot(me.x - prevX, me.y - prevY);
+        // Reconcile: reset to the server-authoritative state, then replay every input
+        // the server has NOT processed yet (seq > me.inputSeq). This reproduces the
+        // movement still "in flight", so the van doesn't snap backwards when a snapshot
+        // arrives late/bursty (root cause of the rubber-band / revert lag).
+        while (inputHistory.length > 0 && inputHistory[0].seq <= me.inputSeq) {
+          inputHistory.shift();
+        }
+        let reconciled: PlayerState = { ...me, petsInside: [...me.petsInside] };
+        // `me` is authoritative as of snap.tick; each un-acked input is applied on a
+        // subsequent tick, so evaluate speed-boost expiry at snap.tick + i + 1.
+        for (let i = 0; i < inputHistory.length; i++) {
+          reconciled = predictPlayerTick(reconciled, inputHistory[i].inputFlags, snap.tick + i + 1);
+        }
+        predictedPlayer = reconciled;
         lastProcessedInputSeq = me.inputSeq;
-        const jump = Math.hypot(me.x - prevX, me.y - prevY);
-        if (jump > 300) {
+        // Visible per-snapshot correction (after replay) — should be ~0 in steady play.
+        const jump = Math.hypot(predictedPlayer.x - prevX, predictedPlayer.y - prevY);
+        // Netcode metric: the per-snapshot correction (predicted vs authoritative). Decay the
+        // peak slowly so a transient large snap stays visible for a moment in the overlay.
+        predServerGap = rawGap;
+        maxPredServerGap = Math.max(maxPredServerGap * 0.95, rawGap);
+        // Only hard-snap the camera/display for a genuine teleport (port), which the snapshot
+        // handler flags via portAnimations. A large *reconciliation* correction (late/bursty
+        // snapshot) must NOT teleport — that's the "redraws me backward" jolt. Let the camera
+        // (cameraSmoothed) and van (playerDisplay) glide to the corrected spot instead.
+        const localPorting = !!(myPlayerId && portAnimations.has(myPlayerId));
+        if (jump > 300 && localPorting) {
           cameraSmoothedX = null;
           cameraSmoothedY = null;
           cameraPanOffsetX = 0;
@@ -3600,6 +3783,7 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
     clearStrayTiles();
     lastShelterPortCharges = 0;
     predictedPlayer = null;
+    inputHistory.length = 0;
     matchPhase = 'playing';
     sentAllyRequests.clear();
     iAmReady = false;
@@ -3656,8 +3840,8 @@ async function connect(options?: { latency?: number; mode?: 'ffa' | 'teams' | 's
 // Frame rate: user choice (30 or 60), persisted in localStorage
 function getStoredFps(): 30 | 60 {
   const v = localStorage.getItem(FPS_KEY);
-  if (v === '60') return 60;
-  return 30;
+  if (v === '30') return 30;
+  return 60;
 }
 let targetFps: 30 | 60 = getStoredFps();
 let targetFrameMs = 1000 / targetFps;
@@ -3666,13 +3850,19 @@ let lastInputSendTime = 0;
 /** Cached performance.now() for the current frame — avoids repeated syscalls in interpolation. */
 let frameNow = 0;
 let lastRenderTime = 0;
+/** Minimap redraw throttle: the minimap doesn't need 60fps (pets/players update at the
+ *  snapshot rate ~12.5Hz), so we skip its expensive per-pet loop on most frames. */
+let lastMinimapDraw = 0;
+const MINIMAP_REDRAW_MS = 80;
 
 function tick(now: number): void {
   // Schedule next frame immediately to maintain timing accuracy
   requestAnimationFrame(tick);
   
-  // Frame rate limiting - skip if not enough time has passed
-  if (lastRenderTime && now - lastRenderTime < targetFrameMs - 1) {
+  // Frame rate limiting - skip if not enough time has passed.
+  // Spectating always renders at 60 FPS so the follow-camera pans smoothly.
+  const frameBudgetMs = isObserver ? (1000 / 60) : targetFrameMs;
+  if (lastRenderTime && now - lastRenderTime < frameBudgetMs - 1) {
     return; // Skip this frame, wait for next
   }
   
@@ -3717,8 +3907,13 @@ function tick(now: number): void {
   // Observers don't send input
   if (canMove && !isObserver && gameWs?.readyState === WebSocket.OPEN && now - lastInputSendTime >= TICK_MS) {
     lastInputSendTime = now;
-    const buf = encodeInput(inputFlags, inputSeq++);
+    const seq = inputSeq++;
+    const buf = encodeInput(inputFlags, seq);
     gameWs.send(buf);
+    // Record for snapshot reconciliation (replay un-acked inputs). Cap to avoid
+    // unbounded growth if the connection stalls badly.
+    inputHistory.push({ seq, inputFlags });
+    if (inputHistory.length > 240) inputHistory.shift();
   }
 
   // Van engine sounds (Camaro purr / jet swoosh) when "Van sounds" is enabled
@@ -3736,7 +3931,7 @@ function tick(now: number): void {
   if (canMove && predictedPlayer && myPlayerId) {
     const prevX = predictedPlayer.x;
     const prevY = predictedPlayer.y;
-    predictedPlayer = predictPlayerByDt(predictedPlayer, inputFlags, dt);
+    predictedPlayer = predictPlayerByDt(predictedPlayer, inputFlags, dt, latestSnapshot?.tick ?? 0);
     // Vans can pass through each other - collision is only between shelters (handled by server)
     // No client-side van-van collision check needed
     // Smoothed display position so shelter doesn't jitter when server snapshots overwrite predictedPlayer
@@ -3750,10 +3945,11 @@ function tick(now: number): void {
       playerDisplayX = tx;
       playerDisplayY = ty;
     } else {
-      // Check if this is a teleport (large position change) - snap camera instantly instead of smoothing
+      // Snap instantly only for a genuine teleport (port, flagged via portAnimations). A large
+      // gap from a netcode reconciliation must glide, otherwise the van visibly jumps backward.
       const distToTarget = Math.hypot(tx - playerDisplayX, ty - playerDisplayY);
-      if (distToTarget > 200) {
-        // Teleport detected - snap camera instantly
+      const localPorting = !!(myPlayerId && portAnimations.has(myPlayerId));
+      if (distToTarget > 200 && localPorting) {
         playerDisplayX = tx;
         playerDisplayY = ty;
       } else {
@@ -3963,61 +4159,65 @@ function drawSeasonParticles(cam: { x: number; y: number; w: number; h: number }
   }
 }
 
-function drawMapBackground(cam: { x: number; y: number; w: number; h: number }): void {
-  const pad = DOT_SPACING * 2;
-  const x0 = Math.floor((cam.x - pad) / DOT_SPACING) * DOT_SPACING;
-  const y0 = Math.floor((cam.y - pad) / DOT_SPACING) * DOT_SPACING;
-  const x1 = Math.ceil((cam.x + cam.w + pad) / DOT_SPACING) * DOT_SPACING;
-  const y1 = Math.ceil((cam.y + cam.h + pad) / DOT_SPACING) * DOT_SPACING;
+// Static ground (dots + season patches) baked into tiles. Falling leaves stay live.
+// 960px divides the 4800 map into 5×5. Tiles are created on first view and dropped
+// once they leave the camera, so a pan is a few blits instead of hundreds of fillRects.
+const GROUND_TILE_SIZE = 960;
+const GROUND_TILE_COLS = Math.ceil(MAP_WIDTH / GROUND_TILE_SIZE);
+const GROUND_TILE_ROWS = Math.ceil(MAP_HEIGHT / GROUND_TILE_SIZE);
+const groundTiles: (HTMLCanvasElement | null)[] = new Array(GROUND_TILE_COLS * GROUND_TILE_ROWS).fill(null);
+let groundTilesSeason: Season | null = null;
 
-  // Season-aware background
-  ctx.fillStyle = SEASON_BG[currentSeason];
-  ctx.fillRect(cam.x, cam.y, cam.w, cam.h);
+function clearGroundTiles(): void {
+  for (let i = 0; i < groundTiles.length; i++) groundTiles[i] = null;
+  groundTilesSeason = null;
+}
 
-  // Season-specific terrain patches
+/** Paint season patches and dots that overlap a world rect. Caller clips to the tile. */
+function paintGroundDecor(g: CanvasRenderingContext2D, left: number, top: number, width: number, height: number): void {
+  const right = left + width;
+  const bottom = top + height;
+  const margin = 120;
+
   if (currentSeason === 'winter') {
-    // Ice/snow patches
     const patchSpacing = 300;
-    const px0 = Math.floor((cam.x - patchSpacing) / patchSpacing) * patchSpacing;
-    const py0 = Math.floor((cam.y - patchSpacing) / patchSpacing) * patchSpacing;
-    const px1 = Math.ceil((cam.x + cam.w + patchSpacing) / patchSpacing) * patchSpacing;
-    const py1 = Math.ceil((cam.y + cam.h + patchSpacing) / patchSpacing) * patchSpacing;
+    const px0 = Math.floor((left - margin) / patchSpacing) * patchSpacing;
+    const py0 = Math.floor((top - margin) / patchSpacing) * patchSpacing;
+    const px1 = Math.ceil((right + margin) / patchSpacing) * patchSpacing;
+    const py1 = Math.ceil((bottom + margin) / patchSpacing) * patchSpacing;
     for (let py = py0; py <= py1; py += patchSpacing) {
       for (let px = px0; px <= px1; px += patchSpacing) {
-        // Deterministic placement using spatial hash
         const hash = Math.sin(px * 0.017 + py * 0.013) * 43758.5453;
         const t = hash - Math.floor(hash);
-        if (t > 0.55) continue; // ~55% chance of a patch
+        if (t > 0.55) continue;
         const patchR = 30 + t * 60;
         const offX = (hash * 7) % patchSpacing * 0.5;
         const offY = (hash * 13) % patchSpacing * 0.5;
-        ctx.fillStyle = t > 0.3 ? 'rgba(220,235,248,0.4)' : 'rgba(200,220,240,0.3)';
-        ctx.beginPath();
-        ctx.ellipse(px + offX, py + offY, patchR, patchR * 0.7, t * Math.PI, 0, Math.PI * 2);
-        ctx.fill();
+        g.fillStyle = t > 0.3 ? 'rgba(220,235,248,0.4)' : 'rgba(200,220,240,0.3)';
+        g.beginPath();
+        g.ellipse(px + offX, py + offY, patchR, patchR * 0.7, t * Math.PI, 0, Math.PI * 2);
+        g.fill();
       }
     }
   } else if (currentSeason === 'spring') {
-    // Thick vegetation patches (matching server isInVegetationPatch)
     const vegSpacing = 60;
-    const vx0 = Math.floor((cam.x - vegSpacing) / vegSpacing) * vegSpacing;
-    const vy0 = Math.floor((cam.y - vegSpacing) / vegSpacing) * vegSpacing;
-    const vx1 = Math.ceil((cam.x + cam.w + vegSpacing) / vegSpacing) * vegSpacing;
-    const vy1 = Math.ceil((cam.y + cam.h + vegSpacing) / vegSpacing) * vegSpacing;
+    const vx0 = Math.floor((left - vegSpacing) / vegSpacing) * vegSpacing;
+    const vy0 = Math.floor((top - vegSpacing) / vegSpacing) * vegSpacing;
+    const vx1 = Math.ceil((right + vegSpacing) / vegSpacing) * vegSpacing;
+    const vy1 = Math.ceil((bottom + vegSpacing) / vegSpacing) * vegSpacing;
     for (let vy = vy0; vy <= vy1; vy += vegSpacing) {
       for (let vx = vx0; vx <= vx1; vx += vegSpacing) {
         if (isInVegetationPatch(vx, vy)) {
-          ctx.fillStyle = 'rgba(20,90,20,0.25)';
-          ctx.fillRect(vx - vegSpacing / 2, vy - vegSpacing / 2, vegSpacing, vegSpacing);
+          g.fillStyle = 'rgba(20,90,20,0.25)';
+          g.fillRect(vx - vegSpacing / 2, vy - vegSpacing / 2, vegSpacing, vegSpacing);
         }
       }
     }
-    // Small flower dots
     const flowerSpacing = 150;
-    const fx0 = Math.floor((cam.x - flowerSpacing) / flowerSpacing) * flowerSpacing;
-    const fy0 = Math.floor((cam.y - flowerSpacing) / flowerSpacing) * flowerSpacing;
-    const fx1 = Math.ceil((cam.x + cam.w + flowerSpacing) / flowerSpacing) * flowerSpacing;
-    const fy1 = Math.ceil((cam.y + cam.h + flowerSpacing) / flowerSpacing) * flowerSpacing;
+    const fx0 = Math.floor((left - flowerSpacing) / flowerSpacing) * flowerSpacing;
+    const fy0 = Math.floor((top - flowerSpacing) / flowerSpacing) * flowerSpacing;
+    const fx1 = Math.ceil((right + flowerSpacing) / flowerSpacing) * flowerSpacing;
+    const fy1 = Math.ceil((bottom + flowerSpacing) / flowerSpacing) * flowerSpacing;
     const flowerColors = ['#ff69b4', '#ff6347', '#ffd700', '#da70d6', '#fff'];
     for (let fy = fy0; fy <= fy1; fy += flowerSpacing) {
       for (let fx = fx0; fx <= fx1; fx += flowerSpacing) {
@@ -4027,19 +4227,18 @@ function drawMapBackground(cam: { x: number; y: number; w: number; h: number }):
         const color = flowerColors[Math.floor(ft * 5 * flowerColors.length) % flowerColors.length];
         const fOx = (fHash * 11) % flowerSpacing * 0.6;
         const fOy = (fHash * 17) % flowerSpacing * 0.6;
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.arc(fx + fOx, fy + fOy, 2, 0, Math.PI * 2);
-        ctx.fill();
+        g.fillStyle = color;
+        g.beginPath();
+        g.arc(fx + fOx, fy + fOy, 2, 0, Math.PI * 2);
+        g.fill();
       }
     }
   } else if (currentSeason === 'summer') {
-    // Brown/dry patches
     const drySpacing = 280;
-    const dx0 = Math.floor((cam.x - drySpacing) / drySpacing) * drySpacing;
-    const dy0 = Math.floor((cam.y - drySpacing) / drySpacing) * drySpacing;
-    const dx1 = Math.ceil((cam.x + cam.w + drySpacing) / drySpacing) * drySpacing;
-    const dy1 = Math.ceil((cam.y + cam.h + drySpacing) / drySpacing) * drySpacing;
+    const dx0 = Math.floor((left - margin) / drySpacing) * drySpacing;
+    const dy0 = Math.floor((top - margin) / drySpacing) * drySpacing;
+    const dx1 = Math.ceil((right + margin) / drySpacing) * drySpacing;
+    const dy1 = Math.ceil((bottom + margin) / drySpacing) * drySpacing;
     for (let dy = dy0; dy <= dy1; dy += drySpacing) {
       for (let dx = dx0; dx <= dx1; dx += drySpacing) {
         const dHash = Math.sin(dx * 0.019 + dy * 0.011) * 43758.5453;
@@ -4048,20 +4247,19 @@ function drawMapBackground(cam: { x: number; y: number; w: number; h: number }):
         const patchR = 25 + dt * 55;
         const doX = (dHash * 9) % drySpacing * 0.4;
         const doY = (dHash * 15) % drySpacing * 0.4;
-        ctx.fillStyle = dt > 0.25 ? 'rgba(160,140,80,0.2)' : 'rgba(140,120,60,0.15)';
-        ctx.beginPath();
-        ctx.ellipse(dx + doX, dy + doY, patchR, patchR * 0.65, dt * Math.PI * 2, 0, Math.PI * 2);
-        ctx.fill();
+        g.fillStyle = dt > 0.25 ? 'rgba(160,140,80,0.2)' : 'rgba(140,120,60,0.15)';
+        g.beginPath();
+        g.ellipse(dx + doX, dy + doY, patchR, patchR * 0.65, dt * Math.PI * 2, 0, Math.PI * 2);
+        g.fill();
       }
     }
   }
-  // Fall terrain: slight orange/brown hue patches (leaves on ground)
   if (currentSeason === 'fall') {
     const fallSpacing = 200;
-    const ax0 = Math.floor((cam.x - fallSpacing) / fallSpacing) * fallSpacing;
-    const ay0 = Math.floor((cam.y - fallSpacing) / fallSpacing) * fallSpacing;
-    const ax1 = Math.ceil((cam.x + cam.w + fallSpacing) / fallSpacing) * fallSpacing;
-    const ay1 = Math.ceil((cam.y + cam.h + fallSpacing) / fallSpacing) * fallSpacing;
+    const ax0 = Math.floor((left - margin) / fallSpacing) * fallSpacing;
+    const ay0 = Math.floor((top - margin) / fallSpacing) * fallSpacing;
+    const ax1 = Math.ceil((right + margin) / fallSpacing) * fallSpacing;
+    const ay1 = Math.ceil((bottom + margin) / fallSpacing) * fallSpacing;
     for (let ay = ay0; ay <= ay1; ay += fallSpacing) {
       for (let ax = ax0; ax <= ax1; ax += fallSpacing) {
         const aHash = Math.sin(ax * 0.021 + ay * 0.017) * 43758.5453;
@@ -4070,19 +4268,74 @@ function drawMapBackground(cam: { x: number; y: number; w: number; h: number }):
         const patchR = 20 + at * 40;
         const aoX = (aHash * 7) % fallSpacing * 0.5;
         const aoY = (aHash * 11) % fallSpacing * 0.5;
-        ctx.fillStyle = at > 0.3 ? 'rgba(180,120,50,0.12)' : 'rgba(160,100,40,0.1)';
-        ctx.beginPath();
-        ctx.ellipse(ax + aoX, ay + aoY, patchR, patchR * 0.7, at * Math.PI, 0, Math.PI * 2);
-        ctx.fill();
+        g.fillStyle = at > 0.3 ? 'rgba(180,120,50,0.12)' : 'rgba(160,100,40,0.1)';
+        g.beginPath();
+        g.ellipse(ax + aoX, ay + aoY, patchR, patchR * 0.7, at * Math.PI, 0, Math.PI * 2);
+        g.fill();
       }
     }
   }
 
-  // Grid dots
-  ctx.fillStyle = SEASON_DOT[currentSeason];
+  const x0 = Math.floor((left - DOT_SPACING) / DOT_SPACING) * DOT_SPACING;
+  const y0 = Math.floor((top - DOT_SPACING) / DOT_SPACING) * DOT_SPACING;
+  const x1 = Math.ceil((right + DOT_SPACING) / DOT_SPACING) * DOT_SPACING;
+  const y1 = Math.ceil((bottom + DOT_SPACING) / DOT_SPACING) * DOT_SPACING;
+  g.fillStyle = SEASON_DOT[currentSeason];
   for (let yy = y0; yy <= y1; yy += DOT_SPACING) {
     for (let xx = x0; xx <= x1; xx += DOT_SPACING) {
-      ctx.fillRect(xx - DOT_R, yy - DOT_R, DOT_R * 2, DOT_R * 2);
+      g.fillRect(xx - DOT_R, yy - DOT_R, DOT_R * 2, DOT_R * 2);
+    }
+  }
+}
+
+function bakeGroundTile(col: number, row: number): HTMLCanvasElement {
+  const ox = col * GROUND_TILE_SIZE;
+  const oy = row * GROUND_TILE_SIZE;
+  const w = Math.min(GROUND_TILE_SIZE, MAP_WIDTH - ox);
+  const h = Math.min(GROUND_TILE_SIZE, MAP_HEIGHT - oy);
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const g = c.getContext('2d')!;
+  g.fillStyle = SEASON_BG[currentSeason];
+  g.fillRect(0, 0, w, h);
+  g.save();
+  g.translate(-ox, -oy);
+  g.beginPath();
+  g.rect(ox, oy, w, h);
+  g.clip();
+  paintGroundDecor(g, ox, oy, w, h);
+  g.restore();
+  return c;
+}
+
+function drawMapBackground(cam: { x: number; y: number; w: number; h: number }): void {
+  if (groundTilesSeason !== currentSeason) {
+    clearGroundTiles();
+    groundTilesSeason = currentSeason;
+  }
+  const startCol = Math.max(0, Math.floor(cam.x / GROUND_TILE_SIZE));
+  const endCol = Math.min(GROUND_TILE_COLS - 1, Math.floor((cam.x + cam.w) / GROUND_TILE_SIZE));
+  const startRow = Math.max(0, Math.floor(cam.y / GROUND_TILE_SIZE));
+  const endRow = Math.min(GROUND_TILE_ROWS - 1, Math.floor((cam.y + cam.h) / GROUND_TILE_SIZE));
+  // Drop tiles well outside the view so exploring the map doesn't keep every canvas.
+  for (let i = 0; i < groundTiles.length; i++) {
+    if (!groundTiles[i]) continue;
+    const col = i % GROUND_TILE_COLS;
+    const row = (i / GROUND_TILE_COLS) | 0;
+    if (col < startCol - 1 || col > endCol + 1 || row < startRow - 1 || row > endRow + 1) {
+      groundTiles[i] = null;
+    }
+  }
+  for (let row = startRow; row <= endRow; row++) {
+    for (let col = startCol; col <= endCol; col++) {
+      const i = row * GROUND_TILE_COLS + col;
+      let tile = groundTiles[i];
+      if (!tile) {
+        tile = bakeGroundTile(col, row);
+        groundTiles[i] = tile;
+      }
+      ctx.drawImage(tile, col * GROUND_TILE_SIZE, row * GROUND_TILE_SIZE);
     }
   }
 }
@@ -4500,7 +4753,66 @@ function drawPlayerShelter(p: PlayerState, isMe: boolean): void {
   ctx.roundRect(-half, -vanHeight * 0.5, vanWidth, vanHeight, cornerRadius);
   ctx.stroke();
   ctx.setLineDash([]);
-  
+
+  // Rear cargo doors (rear = back/left, -x). Open whenever the van has room (including empty
+  // on join) so it's clear strays can be picked up; shut when full. Drawn in the van's flipped
+  // local space so it tracks facing direction.
+  if (!p.eliminated) {
+    const doorCapacity = Math.min(Math.floor(p.size), VAN_MAX_CAPACITY);
+    const carrying = p.petsInside.length;
+    const doorsTarget = carrying < doorCapacity ? 1 : 0;
+    let doorOpen = vanDoorOpen.get(p.id);
+    if (doorOpen === undefined) {
+      // Seed open/closed on first draw so empty vans don't ease-from-closed on join
+      doorOpen = doorsTarget;
+    } else {
+      doorOpen += (doorsTarget - doorOpen) * 0.15;
+      if (Math.abs(doorsTarget - doorOpen) < 0.01) doorOpen = doorsTarget;
+    }
+    vanDoorOpen.set(p.id, doorOpen);
+
+    const rearX = -half;
+    const leafLen = vanHeight * 0.5;
+    const leafThick = Math.max(3, half * 0.09);
+    const closedA = Math.PI / 2; // leaves flush along the rear edge when closed
+    const openRange = 1.9;       // ~109° swing when fully open
+    ctx.save();
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = 'transparent';
+    // Revealed dark cargo interior behind the open doors
+    if (doorOpen > 0.02) {
+      ctx.globalAlpha = portAlpha * Math.min(1, doorOpen);
+      ctx.fillStyle = 'rgba(20,15,10,0.85)';
+      ctx.beginPath();
+      ctx.roundRect(rearX, -vanHeight * 0.42, vanWidth * 0.13, vanHeight * 0.84, 2);
+      ctx.fill();
+      ctx.globalAlpha = portAlpha;
+    }
+    // Two barn-style door leaves hinged at the rear top/bottom corners
+    const leafFill = typeof fillStyle === 'string' ? fillStyle : baseColor;
+    for (const sign of [1, -1]) { // +1 = top leaf, -1 = bottom leaf
+      const hingeY = -sign * (vanHeight * 0.5);
+      const theta = sign * (closedA + openRange * doorOpen);
+      ctx.save();
+      ctx.translate(rearX, hingeY);
+      ctx.rotate(theta);
+      ctx.fillStyle = leafFill;
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(0, -leafThick / 2, leafLen, leafThick, 2);
+      ctx.fill();
+      ctx.stroke();
+      // Door handle near the free edge
+      ctx.fillStyle = 'rgba(0,0,0,0.4)';
+      ctx.beginPath();
+      ctx.arc(leafLen * 0.72, 0, leafThick * 0.32, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
   // Wheels (always at bottom - wheels stay on ground/south)
   ctx.fillStyle = '#333';
   // Front wheel (right side in local coordinates, which is the front)
@@ -5959,6 +6271,95 @@ function drawStray(x: number, y: number, petType: number = PET_TYPE_CAT): void {
   }
 }
 
+/**
+ * Endgame highlight: pulse rings on remaining strays (world space) plus edge arrows for
+ * any that are off-screen (screen space). Call while the camera transform is still active
+ * for the rings; arrows are drawn with an identity transform.
+ */
+function drawFinalStrayHuntHints(cam: { x: number; y: number; w: number; h: number }): void {
+  if (!isFinalStrayHuntActive() || !latestSnapshot) return;
+  const pets = latestSnapshot.pets;
+  const pulse = 0.55 + 0.45 * Math.sin(Date.now() * 0.007);
+  const viewL = cam.x;
+  const viewR = cam.x + cam.w;
+  const viewT = cam.y;
+  const viewB = cam.y + cam.h;
+  const margin = 40;
+
+  // World-space pulse rings around on-screen strays
+  ctx.save();
+  ctx.lineWidth = 2.5;
+  for (const pet of pets) {
+    if (pet.insideShelterId !== null) continue;
+    if (pet.x === 0 && pet.y === 0) continue;
+    const p = getInterpolatedPet(pet.id) ?? pet;
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    const onScreen =
+      p.x >= viewL - margin && p.x <= viewR + margin &&
+      p.y >= viewT - margin && p.y <= viewB + margin;
+    if (!onScreen) continue;
+    const r = 18 + pulse * 8;
+    ctx.strokeStyle = `rgba(123, 237, 159, ${0.35 + pulse * 0.45})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(255, 255, 255, ${0.25 + pulse * 0.35})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r * 0.55, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Screen-space edge arrows for off-screen strays
+  const pad = 28;
+  const cx = cam.x + cam.w * 0.5;
+  const cy = cam.y + cam.h * 0.5;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  for (const pet of pets) {
+    if (pet.insideShelterId !== null) continue;
+    if (pet.x === 0 && pet.y === 0) continue;
+    const p = getInterpolatedPet(pet.id) ?? pet;
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    const onScreen =
+      p.x >= viewL && p.x <= viewR &&
+      p.y >= viewT && p.y <= viewB;
+    if (onScreen) continue;
+
+    const dx = p.x - cx;
+    const dy = p.y - cy;
+    const len = Math.hypot(dx, dy) || 1;
+    const sx = dx / len;
+    const sy = dy / len;
+    const halfW = cam.w * 0.5 - pad;
+    const halfH = cam.h * 0.5 - pad;
+    const scale = Math.min(
+      Math.abs(halfW / (sx || 1e-6)),
+      Math.abs(halfH / (sy || 1e-6)),
+    );
+    const screenX = canvas.width * 0.5 + sx * scale * (canvas.width / cam.w);
+    const screenY = canvas.height * 0.5 + sy * scale * (canvas.height / cam.h);
+    const angle = Math.atan2(sy, sx);
+
+    ctx.save();
+    ctx.translate(screenX, screenY);
+    ctx.rotate(angle);
+    ctx.fillStyle = `rgba(123, 237, 159, ${0.75 + pulse * 0.25})`;
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(14, 0);
+    ctx.lineTo(-8, 10);
+    ctx.lineTo(-4, 0);
+    ctx.lineTo(-8, -10);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
 // --- Tiled offscreen canvas system for static strays (vx=0 && vy=0) ---
 // Divides the 4800x4800 map into a 10x10 grid of 480x480 tiles.
 // Static strays are pre-rendered into tile canvases and only re-rendered when the
@@ -5970,17 +6371,24 @@ const STRAY_TILE_ROWS = Math.ceil(MAP_HEIGHT / STRAY_TILE_SIZE);  // 10
 const STRAY_TILE_COUNT = STRAY_TILE_COLS * STRAY_TILE_ROWS;
 const strayTiles: (HTMLCanvasElement | null)[] = new Array(STRAY_TILE_COUNT).fill(null);
 const strayTileCtxs: (CanvasRenderingContext2D | null)[] = new Array(STRAY_TILE_COUNT).fill(null);
-const strayTileHashes: string[] = new Array(STRAY_TILE_COUNT).fill('');
+/** Per-tile content fingerprint (two order-independent numeric hashes of the static stray
+ *  id-set). Cheaper than the old sort + string-concat: no sorting, no string allocation. */
+const strayTileHashA = new Int32Array(STRAY_TILE_COUNT);
+const strayTileHashB = new Int32Array(STRAY_TILE_COUNT);
+/** Persistent per-tile bins, reused every snapshot (cleared with .length=0) to avoid
+ *  allocating STRAY_TILE_COUNT arrays per call. */
+const strayTileBins: PetState[][] = Array.from({ length: STRAY_TILE_COUNT }, () => []);
 /** Wandering strays (vx!==0 || vy!==0) extracted from latest snapshot for per-frame rendering */
-let wanderingStrays: PetState[] = [];
+const wanderingStrays: PetState[] = [];
 
 /** Separate snapshot strays into static (tiles) and wandering (per-frame).
  *  Call once per snapshot update. Only re-renders tiles whose stray set changed. */
 function updateStrayTiles(pets: PetState[]): void {
-  // Bin strays into static (for tiles) and wandering (for per-frame render)
-  const tileBins: PetState[][] = [];
-  for (let i = 0; i < STRAY_TILE_COUNT; i++) tileBins.push([]);
-  const newWandering: PetState[] = [];
+  // Bin strays into static (for tiles) and wandering (for per-frame render).
+  // Reuse persistent arrays — clear instead of re-allocating every snapshot.
+  const tileBins = strayTileBins;
+  for (let i = 0; i < STRAY_TILE_COUNT; i++) tileBins[i].length = 0;
+  wanderingStrays.length = 0;
 
   const edgeMargin = STRAY_SPRITE_SIZE / 2; // 20px — sprite half-size that can overflow
   for (const pet of pets) {
@@ -6009,26 +6417,26 @@ function updateStrayTiles(pets: PetState[]): void {
       if (overflowRight && overflowBottom) tileBins[(row + 1) * STRAY_TILE_COLS + (col + 1)].push(pet);
     } else {
       // Wandering stray → drawn individually each frame
-      newWandering.push(pet);
+      wanderingStrays.push(pet);
     }
   }
-  wanderingStrays = newWandering;
 
   // Re-render only changed tiles
   for (let i = 0; i < STRAY_TILE_COUNT; i++) {
     const bin = tileBins[i];
-    // Build a lightweight hash from sorted pet IDs to detect changes
-    let hash = '';
-    if (bin.length > 0) {
-      // Sort in-place by id for stable comparison (pet ids are "pet-NNN")
-      bin.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-      for (let j = 0; j < bin.length; j++) {
-        if (j > 0) hash += ',';
-        hash += bin[j].id;
-      }
+    // Order-independent numeric fingerprint of the static stray id-set in this tile.
+    // Static strays don't move, so an unchanged id-set means an unchanged tile image.
+    let ha = bin.length;
+    let hb = 0;
+    for (let j = 0; j < bin.length; j++) {
+      const s = bin[j];
+      const n = ((parseInt(s.id.slice(4), 10) || 0) ^ ((s.petType ?? 0) << 24)) | 0;
+      ha = (ha + n) | 0;                       // commutative: sum
+      hb = (hb ^ Math.imul(n, 0x9e3779b1)) | 0; // commutative: xor of scrambled ids
     }
-    if (hash === strayTileHashes[i]) continue; // unchanged
-    strayTileHashes[i] = hash;
+    if (ha === strayTileHashA[i] && hb === strayTileHashB[i]) continue; // unchanged
+    strayTileHashA[i] = ha;
+    strayTileHashB[i] = hb;
 
     if (bin.length === 0) {
       // Clear tile - release canvas for GC if desired, or just null out
@@ -6065,9 +6473,11 @@ function clearStrayTiles(): void {
   for (let i = 0; i < STRAY_TILE_COUNT; i++) {
     strayTiles[i] = null;
     strayTileCtxs[i] = null;
-    strayTileHashes[i] = '';
+    strayTileHashA[i] = 0;
+    strayTileHashB[i] = 0;
+    strayTileBins[i].length = 0;
   }
-  wanderingStrays = [];
+  wanderingStrays.length = 0;
 }
 
 /** Draw a breeder camp: bigger tent, small enclosed pen, random pets breeding inside */
@@ -6645,8 +7055,15 @@ function render(dt: number): void {
   // Draw seasonal particle overlays (snowflakes, leaves, wind streaks)
   drawSeasonParticles(safeCam);
 
+  // Endgame: pulse remaining strays + edge arrows when breeders are gone
+  drawFinalStrayHuntHints(safeCam);
+
   ctx.restore();
 
+  // Minimap: throttled redraw (~12.5Hz). It persists between frames since we don't clear it
+  // unless we redraw, so skipping frames just keeps the last drawn minimap on screen.
+  if (frameNow - lastMinimapDraw >= MINIMAP_REDRAW_MS) {
+  lastMinimapDraw = frameNow;
   const scale = 120 / MAP_WIDTH;
   // Season-aware minimap background
   const minimapBg: Record<Season, string> = {
@@ -6676,12 +7093,14 @@ function render(dt: number): void {
     }
     // Only draw stray pets if hideStraysOnMinimap is false and not spectating
     if (!hideStraysOnMinimap && !isObserver) {
-      minimapCtx.fillStyle = '#c9a86c';
+      const finalHunt = isFinalStrayHuntActive();
       // When many pets, draw every Nth to keep minimap responsive
       // Use stable ID-based sampling so the same pets are consistently drawn
       // across frames (prevents blinking when the server re-sorts the array).
+      // Final hunt: always draw every stray, larger + pulsing so they're easy to find.
       const petCount = latestSnapshot.pets.length;
-      const step = petCount > 1000 ? 4 : petCount > 500 ? 2 : 1;
+      const step = finalHunt ? 1 : petCount > 600 ? 4 : petCount > 300 ? 2 : 1;
+      const huntPulse = 0.55 + 0.45 * Math.sin(Date.now() * 0.008);
       for (let pi = 0; pi < petCount; pi++) {
         const pet = latestSnapshot.pets[pi];
         if (pet.insideShelterId !== null) continue;
@@ -6691,7 +7110,20 @@ function render(dt: number): void {
           const idNum = parseInt(pet.id.slice(4), 10) || 0;
           if (idNum % step !== 0) continue;
         }
-        minimapCtx.fillRect(pet.x * scale - 2, pet.y * scale - 2, 4, 4);
+        if (finalHunt) {
+          const px = pet.x * scale;
+          const py = pet.y * scale;
+          minimapCtx.fillStyle = `rgba(123, 237, 159, ${0.85 + huntPulse * 0.15})`;
+          minimapCtx.beginPath();
+          minimapCtx.arc(px, py, 3 + huntPulse, 0, Math.PI * 2);
+          minimapCtx.fill();
+          minimapCtx.strokeStyle = `rgba(255, 255, 255, ${0.5 + huntPulse * 0.4})`;
+          minimapCtx.lineWidth = 1;
+          minimapCtx.stroke();
+        } else {
+          minimapCtx.fillStyle = '#c9a86c';
+          minimapCtx.fillRect(pet.x * scale - 2, pet.y * scale - 2, 4, 4);
+        }
       }
     }
     for (const u of latestSnapshot.pickups ?? []) {
@@ -6801,15 +7233,12 @@ function render(dt: number): void {
       const by = breederShelter.y * scale;
       const bHalf = Math.max(10, (40 + breederShelter.size * 0.5) * scale); // Min 10px so mill is always visible
       const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
-      minimapCtx.save();
-      minimapCtx.shadowColor = '#ff0000';
-      minimapCtx.shadowBlur = 8 + pulse * 8;
+      // No shadowBlur: a bright fill + ring reads clearly on the minimap without the blur cost.
       minimapCtx.fillStyle = '#cc2222';
       minimapCtx.fillRect(bx - bHalf, by - bHalf, bHalf * 2, bHalf * 2);
-      minimapCtx.strokeStyle = `rgba(255, 50, 50, ${0.9 + pulse * 0.1})`;
+      minimapCtx.strokeStyle = `rgba(255, 80, 80, ${0.85 + pulse * 0.15})`;
       minimapCtx.lineWidth = 2.5;
       minimapCtx.strokeRect(bx - bHalf, by - bHalf, bHalf * 2, bHalf * 2);
-      minimapCtx.restore();
     }
     // Draw boss mode on minimap
     if (latestSnapshot.bossMode?.active) {
@@ -6981,6 +7410,7 @@ function render(dt: number): void {
   minimapCtx.strokeStyle = 'rgba(255,255,255,0.2)';
   minimapCtx.lineWidth = 1;
   minimapCtx.strokeRect(0.5, 0.5, 119, 119);
+  } // end throttled minimap redraw
 
   // Draw shelter locator arrow when player has a shelter and it's off-screen
   const shelterLocatorMe = latestSnapshot?.players.find(p => p.id === myPlayerId);
@@ -7310,7 +7740,17 @@ function render(dt: number): void {
   const tickRate = TICK_RATE;
   const tagPlayer = isObserver ? hudPlayer : me;
   const speedBoostRemain = tagPlayer && (tagPlayer.speedBoostUntil ?? 0) > nowTick ? ((tagPlayer.speedBoostUntil! - nowTick) / tickRate).toFixed(1) : '';
-  if (tagCooldownEl) tagCooldownEl.textContent = tagPlayer ? `Adoptions: ${tagPlayer.totalAdoptions}  •  Strays: ${strayCount}${speedBoostRemain ? `  •  Speed: ${speedBoostRemain}s` : ''}` : '';
+  if (tagCooldownEl) {
+    if (tagPlayer) {
+      const huntActive = isFinalStrayHuntActive();
+      const strayLabel = huntActive
+        ? `Strays left: ${strayCount} — find them!`
+        : `Strays: ${strayCount}`;
+      tagCooldownEl.textContent = `Adoptions: ${tagPlayer.totalAdoptions}  •  ${strayLabel}${speedBoostRemain ? `  •  Speed: ${speedBoostRemain}s` : ''}`;
+    } else {
+      tagCooldownEl.textContent = '';
+    }
+  }
   const matchEndAt = latestSnapshot?.matchEndAt ?? 0;
   const remainingTicks = Math.max(0, matchEndAt - nowTick);
   const remainingSec = remainingTicks / tickRate;
@@ -7353,7 +7793,11 @@ function render(dt: number): void {
   
   // Boss mode timer overlay
   updateBossModeTimer();
-  
+  // Final stray-hunt banner (breeders cleared, few strays left)
+  updateFinalHuntBanner();
+  // Persistent stage objective under top HUD
+  updateObjectiveHud();
+
   // Adoption events panel
   const events = latestSnapshot?.adoptionEvents ?? [];
   const snap = latestSnapshot;
@@ -7408,8 +7852,9 @@ function render(dt: number): void {
   
   const iAmEliminated = !!(me?.eliminated);
   const matchEndedEarly = !!(latestSnapshot?.matchEndedEarly);
-  const matchIsFinished = remainingSec <= 0 || matchEndedEarly || iAmEliminated;
+  const matchIsFinished = forcedMatchOver || remainingSec <= 0 || matchEndedEarly || iAmEliminated;
   if (matchIsFinished && latestSnapshot?.players.length) {
+    closeBossMillModal();
     // Close any active breeder minigame when match ends (including early wins)
     if (breederGame.active) {
       endBreederMiniGame(false);
@@ -7472,6 +7917,8 @@ function render(dt: number): void {
       } else {
         title = `Team ${teamName} won!`;
       }
+    } else if (matchEndBossVictory) {
+      title = 'You won!';
     } else if (latestSnapshot && latestSnapshot.winnerId) {
       const winnerId = latestSnapshot.winnerId;
       const winnerPlayer = latestSnapshot.players.find(p => p.id === winnerId);
@@ -7523,6 +7970,29 @@ function render(dt: number): void {
   } else {
     leaderboardEl.classList.remove('show');
   }
+
+  // Perf + netcode debug overlay (enable with ?debug): fps, stray counts, and netcode metrics.
+  if (DEBUG_PERF) {
+    const movingCount = wanderingStrays.length;
+    const totalPets = latestSnapshot?.totalOutdoorStrays ?? latestSnapshot?.pets.length ?? 0;
+    const line1 = `fps ${measuredFps}  moving ${movingCount}  totalPets ${totalPets}`;
+    // Netcode: round-trip time, smoothed snapshot interval (expect ~80ms), and the per-snapshot
+    // correction distance (gap now / rolling peak). Big gap = the "snap back" you feel.
+    const line2 = `rtt ${currentRttMs}ms  snap ${snapshotIntervalMs.toFixed(0)}ms  gap ${predServerGap.toFixed(0)}px (max ${maxPredServerGap.toFixed(0)})`;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.font = 'bold 13px monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    const w = Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(6, 6, w + 12, 40);
+    ctx.fillStyle = measuredFps >= 50 ? '#7bed9f' : measuredFps >= 30 ? '#ffd700' : '#ff6b6b';
+    ctx.fillText(line1, 12, 11);
+    ctx.fillStyle = maxPredServerGap < 60 ? '#7bed9f' : maxPredServerGap < 200 ? '#ffd700' : '#ff6b6b';
+    ctx.fillText(line2, 12, 27);
+    ctx.restore();
+  }
   } catch (err) {
     console.error('Render error:', err);
     ctx.save();
@@ -7555,6 +8025,8 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
     }
     leaderboardEl.classList.remove('show');
     matchEndPlayed = false;
+    forcedMatchOver = false;
+    matchEndBossVictory = false;
     matchEndTokensAwarded = false;
     matchEndWasStrayLoss = false;
     wasPlayerObserver = false; // Reset observer state for new match
@@ -7584,6 +8056,8 @@ function handleLeaderboardButton(btn: HTMLButtonElement): void {
     }
     leaderboardEl.classList.remove('show');
     matchEndPlayed = false;
+    forcedMatchOver = false;
+    matchEndBossVictory = false;
     matchEndTokensAwarded = false;
     matchEndWasStrayLoss = false;
     latestSnapshot = null;
@@ -8183,6 +8657,8 @@ exitToLobbyBtnEl.addEventListener('click', async () => {
   clearStrayTiles();
   leaderboardEl.classList.remove('show');
   matchEndPlayed = false;
+  forcedMatchOver = false;
+  matchEndBossVictory = false;
   matchEndTokensAwarded = false;
   matchEndWasStrayLoss = false;
   // Clear any pending announcements/banners immediately
@@ -8275,6 +8751,35 @@ if (botsEnabledEl) {
   });
 }
 
+// --- Difficulty selector (Solo picks explicitly; FFA/Teams rotate server-side) ---
+const difficultyOptionsEl = document.getElementById('difficulty-options');
+const difficultyNoteEl = document.getElementById('difficulty-note');
+const difficultyDescEl = document.getElementById('difficulty-desc');
+const DIFFICULTY_DESCRIPTIONS: Record<Difficulty, string> = {
+  easy: 'Fewer breeder camps, mills form slowly, and the boss and rival vans are weaker. Great for learning the game.',
+  medium: 'Balanced camps, mill growth, boss, and rival skill. The standard challenge.',
+  hard: 'More camps, mills form fast, an aggressive boss, and rival vans skilled enough to win. For experts.',
+};
+selectedDifficulty = normalizeDifficulty(localStorage.getItem(DIFFICULTY_KEY));
+
+function refreshDifficultyUI(): void {
+  document.querySelectorAll('.difficulty-option').forEach((b) => {
+    const d = (b as HTMLElement).dataset.difficulty;
+    b.classList.toggle('selected', d === selectedDifficulty);
+  });
+  if (difficultyDescEl) difficultyDescEl.textContent = DIFFICULTY_DESCRIPTIONS[selectedDifficulty];
+}
+
+document.querySelectorAll('.difficulty-option').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const d = normalizeDifficulty((btn as HTMLElement).dataset.difficulty);
+    selectedDifficulty = d;
+    localStorage.setItem(DIFFICULTY_KEY, d);
+    refreshDifficultyUI();
+  });
+});
+refreshDifficultyUI();
+
 function updateSoloOptionsVisibility(): void {
   if (soloOptionsEl) {
     if (selectedMode === 'solo') {
@@ -8290,6 +8795,9 @@ function updateSoloOptionsVisibility(): void {
       mpOptionsEl.classList.add('hidden');
     }
   }
+  // Solo: explicit difficulty picker. FFA/Teams: rotation note.
+  if (difficultyOptionsEl) difficultyOptionsEl.classList.toggle('hidden', selectedMode !== 'solo');
+  if (difficultyNoteEl) difficultyNoteEl.classList.toggle('hidden', selectedMode === 'solo');
 }
 
 document.querySelectorAll('.mode-option').forEach((btn) => {
@@ -8516,6 +9024,7 @@ async function connectAsSpectator(matchId: string): Promise<void> {
           myPlayerId = null;
           observerFollowIndex = 0;
           currentMatchId = msg.matchId ?? null;
+          currentDifficulty = normalizeDifficulty(msg.difficulty);
           observerOverlayMinimized = false;
           observerOverlayEl.classList.remove('hidden');
           observerMiniBtnEl.classList.add('hidden');
@@ -8552,6 +9061,35 @@ async function connectAsSpectator(matchId: string): Promise<void> {
       for (const p of snap.players) {
         const prev = interpolatedPlayers.get(p.id)?.next ?? p;
         interpolatedPlayers.set(p.id, { prev, next: { ...p }, t: 0 });
+      }
+      // Update interpolated pet positions so wandering strays glide instead of teleporting.
+      const petSnapTime = performance.now();
+      const curGen = ++interpPetGen;
+      for (const pet of snap.pets) {
+        const existing = interpolatedPets.get(pet.id);
+        if (existing) {
+          const tmp = existing.prev;
+          existing.prev = existing.next;
+          existing.next = tmp;
+          tmp.id = pet.id; tmp.x = pet.x; tmp.y = pet.y;
+          tmp.vx = pet.vx; tmp.vy = pet.vy;
+          tmp.insideShelterId = pet.insideShelterId;
+          tmp.petType = pet.petType;
+          existing.startTime = petSnapTime;
+          existing.gen = curGen;
+        } else {
+          interpolatedPets.set(pet.id, {
+            prev: pet,
+            next: { ...pet },
+            startTime: petSnapTime,
+            gen: curGen,
+          });
+        }
+      }
+      if (interpolatedPets.size > snap.pets.length + 50) {
+        for (const [id, entry] of interpolatedPets) {
+          if (entry.gen !== curGen) interpolatedPets.delete(id);
+        }
       }
       // Update tiled static stray cache for spectator view
       updateStrayTiles(snap.pets);
@@ -8893,6 +9431,13 @@ const INGREDIENT_EMOJIS: Record<string, string> = {
   treat: '🦴',
 };
 
+/** Boss ingredient RT cost scaled by the active match difficulty (mirrors server logic). */
+function bossIngredientCostForDifficulty(ingredient: string): number {
+  const base = BOSS_INGREDIENT_COSTS[ingredient] ?? 10;
+  const mult = DIFFICULTY_CONFIG[currentDifficulty].boss.ingredientCostMult;
+  return Math.max(1, Math.round(base * mult));
+}
+
 /** Open the boss mill modal when player enters via proximity (server-driven) */
 function openBossMillModalFromProximity(millId: number): void {
   const bossMode = latestSnapshot?.bossMode;
@@ -8951,7 +9496,7 @@ function updateBossMillModal(): void {
       const isComplete = purchased >= needed;
       if (!isComplete) allComplete = false;
       
-      const cost = BOSS_INGREDIENT_COSTS[ingredient] ?? 10;
+      const cost = bossIngredientCostForDifficulty(ingredient);
       const canAfford = playerRt >= cost;
       
       const row = document.createElement('div');
@@ -8980,7 +9525,8 @@ function updateBossMillModal(): void {
   if (bossMillWarning) {
     const tycoonAtThisMill = bossMode.tycoonTargetMill === currentBossMillId;
     const tycoonDist = Math.hypot(bossMode.tycoonX - mill.x, bossMode.tycoonY - mill.y);
-    const isClose = tycoonDist < BOSS_TYCOON_DETECTION_RADIUS * 2;
+    const detectMult = DIFFICULTY_CONFIG[currentDifficulty].boss.detectionMult;
+    const isClose = tycoonDist < BOSS_TYCOON_DETECTION_RADIUS * detectMult * 2;
     
     if (tycoonAtThisMill && isClose) {
       bossMillWarning.classList.remove('hidden');
@@ -9090,6 +9636,97 @@ const bossModeTimerEl = document.getElementById('boss-mode-timer');
 const bossTimerTimeEl = document.getElementById('boss-timer-time');
 const bossTimerMillsEl = document.getElementById('boss-timer-mills');
 const bossRadarIndicatorEl = document.getElementById('radar-indicator');
+
+/** True when camps+mills are gone, boss mode isn't running, and a few outdoor strays remain. */
+function isFinalStrayHuntActive(): boolean {
+  const snap = latestSnapshot;
+  if (!snap || matchPhase !== 'playing') return false;
+  if (snap.bossMode?.active) return false;
+  if (snap.matchEndAt > 0 && snap.tick >= snap.matchEndAt) return false;
+  const strayCount = snap.totalOutdoorStrays ?? snap.pets.length;
+  if (strayCount <= 0 || strayCount >= FINAL_HUNT_STRAY_MAX) return false;
+  if ((snap.breederShelters?.length ?? 0) > 0) return false;
+  for (const u of snap.pickups ?? []) {
+    if (u.type === PICKUP_TYPE_BREEDER) return false;
+  }
+  return true;
+}
+
+/** Count active breeder camps (pickup markers) vs mills (breeder shelters). */
+function countCampsAndMills(): { camps: number; mills: number } {
+  const snap = latestSnapshot;
+  if (!snap) return { camps: 0, mills: 0 };
+  let camps = 0;
+  for (const u of snap.pickups ?? []) {
+    if (u.type === PICKUP_TYPE_BREEDER) camps++;
+  }
+  return { camps, mills: snap.breederShelters?.length ?? 0 };
+}
+
+/** Persistent under-HUD objective: stage-aware win-path reminder (no tutorial modal). */
+function updateObjectiveHud(): void {
+  if (!objectiveHudEl) return;
+  const snap = latestSnapshot;
+  if (!snap || matchPhase !== 'playing') {
+    objectiveHudEl.classList.add('hidden');
+    return;
+  }
+  if (snap.matchEndAt > 0 && snap.tick >= snap.matchEndAt) {
+    objectiveHudEl.classList.add('hidden');
+    return;
+  }
+
+  // Boss Mode has its own timer overlay — keep this line aligned / quiet
+  if (snap.bossMode?.active) {
+    objectiveHudEl.textContent = 'Boss Mode — clear PetMall mills';
+    objectiveHudEl.classList.remove('hidden');
+    return;
+  }
+
+  if (isFinalStrayHuntActive()) {
+    const n = snap.totalOutdoorStrays ?? 0;
+    objectiveHudEl.textContent = `Strays left: ${n} — clear them to start Boss Mode`;
+    objectiveHudEl.classList.remove('hidden');
+    return;
+  }
+
+  const me = snap.players.find((p) => p.id === myPlayerId);
+  const hasShelter = !!(me?.shelterId);
+  if (!hasShelter) {
+    objectiveHudEl.textContent = 'Rescue strays · earn RT · build a shelter to shut breeders';
+    objectiveHudEl.classList.remove('hidden');
+    return;
+  }
+
+  const { camps, mills } = countCampsAndMills();
+  const strays = snap.totalOutdoorStrays ?? 0;
+  objectiveHudEl.textContent = `Camps ${camps} · Mills ${mills} · Strays ${strays} — clear all to start Boss Mode`;
+  objectiveHudEl.classList.remove('hidden');
+}
+
+/** Show/hide the persistent "Almost there!" banner and fire a one-shot announcement. */
+function updateFinalHuntBanner(): void {
+  const active = isFinalStrayHuntActive();
+  if (!finalHuntBannerEl) return;
+  if (!active) {
+    finalHuntBannerEl.classList.add('hidden');
+    // Allow re-announce if breeders somehow return then clear again mid-match
+    if ((latestSnapshot?.totalOutdoorStrays ?? 0) === 0 || (latestSnapshot?.breederShelters?.length ?? 0) > 0) {
+      finalHuntAnnounced = false;
+    }
+    return;
+  }
+  const count = latestSnapshot?.totalOutdoorStrays ?? 0;
+  const noun = count === 1 ? 'stray' : 'strays';
+  if (finalHuntMsgEl) {
+    finalHuntMsgEl.textContent = `${count} ${noun} left — clear them to start Boss Mode! Highlighted on the map.`;
+  }
+  finalHuntBannerEl.classList.remove('hidden');
+  if (!finalHuntAnnounced) {
+    finalHuntAnnounced = true;
+    showAnnouncement([`Breeders cleared! Only ${count} ${noun} left — clear them to start Boss Mode!`]);
+  }
+}
 
 /** Update the boss mode timer overlay */
 function updateBossModeTimer(): void {

@@ -21,11 +21,13 @@ export const MSG_BOSS_ENTER_MILL = 'bossEnterMill';
 export const MSG_BOSS_EXIT_MILL = 'bossExitMill';
 
 export function encodeInput(inputFlags: InputFlags, inputSeq: number): ArrayBuffer {
-  const buf = new ArrayBuffer(4);
+  // msg(1) + flags(2) + seq(4). seq is 32-bit so it never wraps within a session,
+  // which client-side reconciliation relies on to drain its pending-input buffer.
+  const buf = new ArrayBuffer(7);
   const view = new DataView(buf);
   view.setUint8(0, MSG_INPUT);
   view.setUint16(1, inputFlags, true);
-  view.setUint8(3, inputSeq & 0xff);
+  view.setUint32(3, inputSeq >>> 0, true);
   return buf;
 }
 
@@ -34,7 +36,7 @@ export function decodeInput(buf: ArrayBuffer): { inputFlags: InputFlags; inputSe
   if (view.getUint8(0) !== MSG_INPUT) throw new Error('Invalid input message');
   return {
     inputFlags: view.getUint16(1, true),
-    inputSeq: view.getUint8(3),
+    inputSeq: view.getUint32(3, true),
   };
 }
 
@@ -70,7 +72,7 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
   for (const p of players) {
     size += 1 + encoder.encode(p.id).length + 1 + encoder.encode(p.displayName ?? p.id).length + 4 * 4 + 4 + 4 + 1; // id, displayName, x,y,vx,vy, size(4), totalAdoptions(4), numPets
     for (const pid of p.petsInside) size += 1 + encoder.encode(pid).length;
-    size += 4 + 1; // speedBoostUntil(4), inputSeq(1)
+    size += 4 + 4; // speedBoostUntil(4), inputSeq(4)
     size += 1 + 1 + 1 + 1 + 1; // eliminated(1), grounded(1), portCharges(1), shelterPortCharges(1), numAllies(1)
     for (const aid of p.allies ?? []) size += 1 + encoder.encode(aid).length;
     size += 1 + encoder.encode(p.shelterColor ?? '').length; // shelterColor string
@@ -180,7 +182,8 @@ export function encodeSnapshot(snap: GameSnapshot): ArrayBuffer {
     for (const pid of p.petsInside) off = writeString(view, off, pid);
     view.setUint32(off, (p.speedBoostUntil ?? 0) >>> 0, true);
     off += 4;
-    view.setUint8(off++, p.inputSeq & 0xff);
+    view.setUint32(off, (p.inputSeq ?? 0) >>> 0, true);
+    off += 4;
     view.setUint8(off++, (p.eliminated ? 1 : 0));
     view.setUint8(off++, (p.grounded ? 1 : 0));
     view.setUint8(off++, (p.portCharges ?? 0) & 0xff);
@@ -394,7 +397,8 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
     }
     const speedBoostUntil = view.getUint32(off, true);
     off += 4;
-    const inputSeq = view.getUint8(off++);
+    const inputSeq = view.getUint32(off, true);
+    off += 4;
     const eliminated = view.getUint8(off++) !== 0;
     const grounded = view.getUint8(off++) !== 0;
     const portCharges = view.getUint8(off++);
@@ -516,7 +520,7 @@ export function decodeSnapshot(buf: ArrayBuffer): GameSnapshot {
     off += 4;
     const totalAdoptions = view.getUint32(off, true);
     off += 4;
-    const tier = off < view.byteLength ? view.getUint8(off++) : (shelterSize < 50 ? 1 : shelterSize < 120 ? 2 : shelterSize < 250 ? 3 : shelterSize < 500 ? 4 : 5);
+    const tier = off < view.byteLength ? view.getUint8(off++) : (shelterSize < 75 ? 1 : shelterSize < 150 ? 2 : shelterSize < 250 ? 3 : shelterSize < 500 ? 4 : 5);
     shelters.push({ id, ownerId, x, y, hasAdoptionCenter, hasGravity, hasAdvertising, petsInside, size: shelterSize, totalAdoptions, tier });
   }
   const numBreederShelters = off < view.byteLength ? view.getUint8(off++) : 0;

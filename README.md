@@ -58,7 +58,86 @@ npm run dev:client
 
 Open http://localhost:3000.
 
+## Run with PM2
 
+[PM2](https://pm2.keymetrics.io/) keeps the Node processes running, restarts them on crash, and can start them on boot.
+
+### Install PM2
+
+```bash
+npm install -g pm2
+```
+
+From the repo root, run `npm install` and build shared once (required for the server):
+
+```bash
+npm install
+npm run build -w shared
+```
+
+### Development (server + client)
+
+The ecosystem file [`ecosystem.config.cjs`](ecosystem.config.cjs) defines two apps: **rescueworld-server** (signaling + game + auth on ports 4000–4002) and **rescueworld-client** (Vite dev server on port 3000).
+
+Build the server, then start both:
+
+```bash
+npm run build -w server
+pm1 start ecosystem.config.cjs
+```
+
+Open http://localhost:3000. The server app has file watch enabled (restarts when `server/dist` or `server/src` change); rebuild the server after editing TypeScript (`npm run build -w server`).
+
+**Useful commands:**
+
+| Command | Description |
+|--------|-------------|
+| `pm2 status` | List processes |
+| `pm2 logs` | Tail all logs |
+| `pm2 logs rescueworld-server` | Tail one app |
+| `pm2 restart ecosystem.config.cjs` | Restart all apps in the file |
+| `pm2 stop ecosystem.config.cjs` | Stop all apps |
+| `pm2 delete ecosystem.config.cjs` | Remove apps from PM2 |
+
+Start only one app: `pm2 start ecosystem.config.cjs --only rescueworld-server` or `--only rescueworld-client`.
+
+**Boot on system startup** (optional):
+
+```bash
+pm2 save
+pm2 startup
+# run the command pm2 prints, then:
+pm2 save
+```
+
+### Production (server only)
+
+In production the **browser client is static files** served by nginx from `client/dist/` — do not run `rescueworld-client` under PM2. Only the game server runs in Node.
+
+```bash
+npm run build -w shared
+npm run build -w server
+NODE_ENV=production GAME_WS_URL=wss://adoptar.io/ws-game pm2 start ecosystem.config.cjs --only rescueworld-server
+```
+
+Set `GAME_WS_URL` to the public WebSocket URL for the same host users open in the browser (scheme + host + `/ws-game`). For example, use `wss://adoptar.io/ws-game` when serving `https://adoptar.io/rescueworld/`, or `wss://games.vo.ly/ws-game` only if `games.vo.ly` has the `/ws-game` nginx proxy configured. Other env vars (`SIGNALING_PORT`, `GAME_WS_PORT`, `.env` for Redis/OAuth) apply as in [Production deployment](#production-deployment-nginx). PM2 loads `.env` from the repo root when the server starts (see `server/src/index.ts`).
+
+To run without the ecosystem file:
+
+```bash
+GAME_WS_URL=wss://adoptar.io/ws-game pm2 start server/dist/index.js --name rescueworld-server
+```
+
+Reload after code or env changes: `npm run build -w server && pm2 restart rescueworld-server`.
+
+If you started PM2 with the wrong `GAME_WS_URL`, update the running process environment:
+
+```bash
+GAME_WS_URL=wss://adoptar.io/ws-game pm2 restart rescueworld-server --update-env
+pm2 env rescueworld-server
+```
+
+If play/spectate shows `Could not connect` and `Game server connection timeout`, check that `GAME_WS_URL` points to a host where `/ws-game` upgrades to WebSocket. A common failure is starting with `GAME_WS_URL=wss://games.vo.ly/ws-game` while the browser is using `adoptar.io` and only `adoptar.io` has the nginx `/ws-game` proxy.
 
 ## Build all
 
@@ -72,7 +151,7 @@ npm run build -w client
 
 **Browser = client.** When you open the game in a browser, that *is* the client. You do **not** run `dev:client` on the server; nginx serves the built static files from `client/dist/`.
 
-To serve the game behind nginx (e.g. at `https://games.vo.ly/rescueworld/`):
+To serve the game behind nginx (e.g. at `https://adoptar.io/rescueworld/` or `https://games.vo.ly/rescueworld/`):
 
 1. **Build the client** (output: `client/dist/`):
    ```bash
@@ -80,14 +159,14 @@ To serve the game behind nginx (e.g. at `https://games.vo.ly/rescueworld/`):
    NODE_ENV=production npm run build -w client
    ```
 
-2. **Add nginx config.** Merge the contents of [`nginx-rescueworld.conf`](nginx-rescueworld.conf) into the `games.vo.ly` server block in `/etc/nginx/sites-enabled/cdr` (after the "Block common attack" location, before the `/api` location). That adds:
+2. **Add nginx config.** For `adoptar.io`, use [`nginx-adoptar.io.conf`](nginx-adoptar.io.conf). For `games.vo.ly`, merge the contents of [`nginx-rescueworld.conf`](nginx-rescueworld.conf) into the `games.vo.ly` server block in `/etc/nginx/sites-enabled/cdr` (after the "Block common attack" location, before the `/api` location). That adds:
    - `/ws-signaling` → proxy to `127.0.0.1:4000`
    - `/ws-game` → proxy to `127.0.0.1:4001`
    - `/rescueworld/` → static files from `client/dist/` with SPA fallback
 
 3. **Run the game server** with the public WebSocket URL so the signaling server tells clients the correct game URL:
    ```bash
-   GAME_WS_URL=wss://games.vo.ly/ws-game npm run start
+   GAME_WS_URL=wss://adoptar.io/ws-game npm run start
    ```
    (Build server first: `npm run build -w server`.) Optional env: `SIGNALING_PORT=4000`, `GAME_WS_PORT=4001` (defaults).
 

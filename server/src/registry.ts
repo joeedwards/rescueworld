@@ -128,10 +128,20 @@ export async function getGameServers(): Promise<{ url: string; playerCount: numb
   }
 }
 
+/** Max entries to retain in the replay stream. Without trimming the stream grows
+ *  unbounded (XADD never removes entries), eventually reaching tens of millions of
+ *  entries / GBs of memory, which pins Redis CPU and starves the game tick loop.
+ *  `~` makes Redis trim approximately (cheap, only at radix-node boundaries). */
+const REPLAY_STREAM_MAXLEN = 50000;
+
 export async function appendReplay(serverId: string, tick: number, hash: string): Promise<void> {
   if (!redis) return;
   try {
-    await redis.xadd(REPLAY_STREAM_KEY, '*', 'server', serverId, 'tick', String(tick), 'hash', hash);
+    await redis.xadd(
+      REPLAY_STREAM_KEY,
+      'MAXLEN', '~', REPLAY_STREAM_MAXLEN,
+      '*', 'server', serverId, 'tick', String(tick), 'hash', hash,
+    );
   } catch {
     // ignore
   }

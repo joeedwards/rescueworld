@@ -172,3 +172,61 @@ export declare const FALL_WIND_MAX = 1.2;
 export declare function isInVegetationPatch(x: number, y: number): boolean;
 /** Deterministic wind multiplier from tick (Fall only). */
 export declare function getWindMultiplier(tick: number): number;
+/** Game difficulty. Solo players pick this; FFA/Teams/bot matches auto-rotate it. */
+export type Difficulty = 'easy' | 'medium' | 'hard';
+export declare const DIFFICULTIES: Difficulty[];
+/** Runtime guard: coerce an arbitrary value into a valid Difficulty (defaults to medium). */
+export declare function normalizeDifficulty(value: unknown): Difficulty;
+/** Per-bot skill knobs derived from difficulty. Consumed by generateBotProfile(). */
+export interface DifficultyBotConfig {
+    /** Hesitation rate range [min, max] — chance per tick to stand still (lower = better). */
+    hesitation: [number, number];
+    /** Optimal-targeting range [min, max] — how often the bot picks the nearest target (higher = better). */
+    targeting: [number, number];
+    /** Exponent applied to Math.random() for starting RT skew (higher = skewed lower / poorer). */
+    rtSkew: number;
+    /** Probability the bot builds a shelter. */
+    shelterProb: number;
+    /** Probability the bot participates in boss mode. */
+    bossProb: number;
+    /** 0-1 strength of pre-match boosts (size/speed/ports/adopt-speed). */
+    boostLevel: number;
+    /** Whether bots actively hunt and shut down breeder camps. */
+    huntCamps: boolean;
+}
+/** Per-match world + bot tuning for each difficulty. */
+export interface DifficultyConfig {
+    /** Breeder camps spawned per wave, [min, max] inclusive. */
+    campsPerWave: [number, number];
+    /** Multiplier on the interval between breeder waves (>1 = slower/easier). */
+    waveIntervalMult: number;
+    /** Multiplier on the delay before the first wave (>1 = longer grace / easier). */
+    firstWaveDelayMult: number;
+    /** Multiplier on camp->mill growth ticks (>1 = mills form more slowly / easier). */
+    growthTicksMult: number;
+    /** Camp level advances by 1 every this many waves (higher = slower escalation / easier). */
+    levelAdvanceEveryWaves: number;
+    /** Boss mode scaling. */
+    boss: {
+        /** Multiplier on the boss time limit (>1 = more time / easier). */
+        timeMult: number;
+        /** Multiplier on tycoon patrol speed (<1 = slower / easier). */
+        tycoonSpeedMult: number;
+        /** Multiplier on tycoon detection radius (<1 = smaller / easier). */
+        detectionMult: number;
+        /** Multiplier on ingredient RT costs (<1 = cheaper / easier). */
+        ingredientCostMult: number;
+        /** Multiplier on pets required per mill (<1 = fewer / easier). */
+        petCountMult: number;
+        /** Multiplier on tycoon mill rebuild time (>1 = slower rebuild / easier). */
+        rebuildMult: number;
+    };
+    /** Bot skill knobs. */
+    bot: DifficultyBotConfig;
+}
+/**
+ * Difficulty tuning table.
+ * Easy: fewer/slower camps, mills form slowly, weak boss, weak bots.
+ * Hard: more/faster camps, mills form readily, aggressive boss, bots that can genuinely win.
+ */
+export declare const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig>;
